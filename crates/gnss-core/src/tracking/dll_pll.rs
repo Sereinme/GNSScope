@@ -142,9 +142,11 @@ impl DllPllTracking {
             self.prev_prompt = prompt;
 
             // GNSS-SDR FLL+PLL formula with coherent integration time t_coh
+            // Note: fll_in sign negated because our fll_discriminator convention
+            // is opposite to GNSS-SDR's (atan2 gives -θ for positive rotation)
             let pll_w_new = self.pll_w
                 + pll_in * self.fp_w0p2 * t_coh
-                + fll_in * self.fp_w0f * t_coh;
+                - fll_in * self.fp_w0f * t_coh;  // NEGATIVE sign for FLL!
             let carrier_doppler = 0.5 * (pll_w_new + self.pll_w)
                 + self.fp_a2 * self.fp_w0p * pll_in;
             self.pll_w = pll_w_new;
