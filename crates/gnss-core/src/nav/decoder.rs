@@ -1,107 +1,122 @@
 //! GPS L1 C/A navigation message decoding.
 //!
-//! Based on IS-GPS-200. Handles:
-//! - Bit synchronization / frame synchronization (preamble detection)
-//! - Hamming code parity check (extended Hamming (32,26))
-//! - Subframe parsing (TLM, HOW, subframe ID, TOW)
+//! Preamble detection via soft correlation (GNSS-SDR approach):
+//!   corr = Σ sign(symbol) × preamble[i]   → detected when |corr| ≥ threshold
+//!
+//! Hamming parity check and subframe parsing.
 
 /// GPS L1 C/A navigation message preamble: 10001011 (binary)
 pub const PREAMBLE: u8 = 0x8B;
-/// Inverted preamble (Costas PLL 180° ambiguity): 01110100
-pub const PREAMBLE_INV: u8 = 0x74;
 /// Preamble length in bits
 pub const PREAMBLE_LEN: usize = 8;
 /// Bits per word
 pub const WORD_BITS: usize = 30;
-/// Data bits per word
-pub const DATA_BITS: usize = 24;
 /// Words per subframe
 pub const WORDS_PER_SUBFRAME: usize = 10;
 /// Bits per subframe
 pub const SUBFRAME_BITS: usize = WORD_BITS * WORDS_PER_SUBFRAME; // 300
 
-/// Decoded navigation data word (30 bits with parity verified).
+/// Preamble samples: +1 for bit=1, -1 for bit=0
+const PREAMBLE_SAMPLES: [i8; PREAMBLE_LEN] = [1, -1, -1, -1, 1, -1, 1, 1];
+
 #[derive(Debug, Clone, Copy)]
 pub struct NavWord {
-    /// Raw 30-bit word (MSB first, bit 0 = MSB)
     pub raw: u32,
-    /// Whether parity check passed
     pub parity_ok: bool,
 }
 
-/// Parsed Handover Word (HOW).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct How {
-    /// Time of Week in 6-second units (17 bits)
     pub tow: u32,
-    /// Subframe ID (1-5, 3 bits)
     pub subframe_id: u8,
-    /// Anti-spoof flag
     pub anti_spoof: bool,
-    /// Alert flag
     pub alert: bool,
 }
 
-/// Navigation message decoder state machine.
+/// Navigation message decoder.
+///
+/// Stores recent symbols (floating-point), performs soft preamble correlation.
 pub struct NavDecoder {
-    /// Bit buffer for preamble search
-    bit_buf: u32,
-    bit_count: u32,
-    /// Current subframe buffer
+    /// Ring buffer of recent symbols (20ms accumulations)
+    sym_buf: [f64; 16], // 2× PREAMBLE_LEN for wrap
+    sym_idx: usize,
+    /// Subframe bit buffer
     subframe_bits: [u8; SUBFRAME_BITS],
     subframe_idx: usize,
-    /// Whether we've found frame sync
+    /// Frame sync state
     synced: bool,
+    /// Number of preamble detections since last decode
+    preamble_count: u32,
     /// Previous word's last two parity bits (D29*, D30*)
-    prev_d29: u8,
-    prev_d30: u8,
+    prev_d29: u8, prev_d30: u8,
+    /// Bit counter for preamble period (300 symbols per subframe)
+    bit_counter: u32,
+    /// Last preamble index
+    preamble_idx: u32,
+    /// Corr threshold
+    corr_threshold: i32,
+    /// Detected 180° phase ambiguity
+    pub inverted: bool,
     /// Current TOW (from last valid HOW)
     pub tow: u32,
     /// Current subframe ID
     pub subframe_id: u8,
-    /// Words decoded in current subframe
+    /// Words decoded
     pub words: Vec<NavWord>,
 }
 
 impl NavDecoder {
     pub fn new() -> Self {
         Self {
-            bit_buf: 0, bit_count: 0,
-            subframe_bits: [0u8; SUBFRAME_BITS],
-            subframe_idx: 0,
-            synced: false,
+            sym_buf: [0.0; 16], sym_idx: 0,
+            subframe_bits: [0u8; SUBFRAME_BITS], subframe_idx: 0,
+            synced: false, preamble_count: 0,
             prev_d29: 0, prev_d30: 0,
+            bit_counter: 0, preamble_idx: 0,
+            corr_threshold: 5, // allow weaker matches on real data
+            inverted: false,
             tow: 0, subframe_id: 0,
             words: Vec::new(),
         }
     }
 
-    /// Feed one navigation data bit (+1 or -1).
-    /// Returns `true` when a complete, valid subframe has been decoded.
-    ///
-    /// Convention: Prompt_I > 0 → bit = 1; Prompt_I < 0 → bit = 0.
-    pub fn feed_bit(&mut self, bit: u8) -> bool {
-        // Shift into preamble search buffer
-        self.bit_buf = ((self.bit_buf << 1) | (bit as u32 & 1)) & 0xFF;
-        self.bit_count += 1;
+    /// Feed one symbol (20ms accumulated I value).
+    /// Returns true if a valid subframe was decoded.
+    pub fn feed_symbol(&mut self, symbol: f64) -> bool {
+        // Store in ring buffer
+        self.sym_buf[self.sym_idx % 16] = symbol;
+        self.sym_idx += 1;
+        self.bit_counter += 1;
 
-/// Check if two 8-bit values match within `max_err` bit errors.
-fn preamble_match(a: u32, b: u32, max_err: u32) -> bool {
-    let diff = (a ^ b) as u8;
-    diff.count_ones() <= max_err
-}
+        // Check if we have enough stored symbols for preamble correlation
+        if self.sym_idx < PREAMBLE_LEN as usize { return false; }
 
+        // Preamble correlation on the last 8 symbols
+        let start = (self.sym_idx - PREAMBLE_LEN as usize) % 16;
+        let mut corr: i32 = 0;
+        for i in 0..PREAMBLE_LEN {
+            let s = self.sym_buf[(start + i) % 16];
+            let sign = if s > 0.0 { 1i8 } else { -1i8 };
+            corr += (sign * PREAMBLE_SAMPLES[i]) as i32;
+        }
+        // --- Phase 0: searching for preamble ---
         if !self.synced {
-            // Search for preamble (allow 1-bit error)
-            if preamble_match(self.bit_buf, PREAMBLE as u32, 2)
-                || preamble_match(self.bit_buf, PREAMBLE_INV as u32, 2) {
+            if corr.abs() >= self.corr_threshold {
+                // Preamble found!
                 self.synced = true;
+                self.inverted = corr < 0;
+                self.preamble_idx = self.bit_counter - PREAMBLE_LEN as u32;
                 self.subframe_idx = 0;
-                // Write the preamble bits
+                self.words.clear();
+
+                // Fill subframe bits from stored symbols
+                let bit_start = (self.sym_idx - PREAMBLE_LEN as usize) % 16;
                 for i in 0..PREAMBLE_LEN {
+                    let s = self.sym_buf[(bit_start + i) % 16];
+                    let bit = if self.inverted { if s > 0.0 { 0u8 } else { 1u8 } }
+                              else { if s > 0.0 { 1u8 } else { 0u8 } };
                     if self.subframe_idx < SUBFRAME_BITS {
-                        self.subframe_bits[self.subframe_idx] =
-                            ((PREAMBLE >> (PREAMBLE_LEN - 1 - i)) & 1) as u8;
+                        self.subframe_bits[self.subframe_idx] = bit;
                         self.subframe_idx += 1;
                     }
                 }
@@ -112,47 +127,53 @@ fn preamble_match(a: u32, b: u32, max_err: u32) -> bool {
             return false;
         }
 
-        // Collect bits for current subframe
+        // --- Phase 1: collecting subframe ---
+        // Store new symbol bit
+        let bit = if self.inverted { if symbol > 0.0 { 0u8 } else { 1u8 } }
+                  else { if symbol > 0.0 { 1u8 } else { 0u8 } };
         if self.subframe_idx < SUBFRAME_BITS {
             self.subframe_bits[self.subframe_idx] = bit;
             self.subframe_idx += 1;
         }
 
-        // Check if we have a complete word (every 30 bits, starting from preamble)
+        // Parse words every 30 bits
         if self.subframe_idx > 0 && self.subframe_idx % WORD_BITS == 0 {
-            let word_start = self.subframe_idx - WORD_BITS;
-            let word = self.parse_word(word_start);
-            self.words.push(word);
+            let ws = self.subframe_idx - WORD_BITS;
+            let raw = self.parse_word(ws);
+            self.words.push(raw);
+            self.prev_d29 = ((raw.raw >> 1) & 1) as u8;
+            self.prev_d30 = (raw.raw & 1) as u8;
 
-            // Update previous parity bits
-            let raw = word.raw;
-            self.prev_d29 = ((raw >> 1) & 1) as u8;  // bit 29 (0-indexed from MSB)
-            self.prev_d30 = (raw & 1) as u8;           // bit 30
-
-            // Parse HOW if this is word 2 (index 1)
+            // Parse HOW if this is word 2
             if self.words.len() == 2 {
-                if let Some(how) = self.parse_how(&self.words[1]) {
+                if let Some(how) = Self::parse_how(&self.words[1]) {
                     self.tow = how.tow;
                     self.subframe_id = how.subframe_id;
                 }
             }
         }
 
-        // Check if subframe complete
-        if self.subframe_idx >= SUBFRAME_BITS {
-            self.synced = false;
-            self.subframe_idx = 0;
-            let valid = self.words.len() >= 2
-                && self.words[0].parity_ok
-                && self.words[1].parity_ok;
-            // For M1: accept if TLM+HOW are valid
-            valid && self.subframe_id >= 1 && self.subframe_id <= 5
-        } else {
-            false
+        // Check for next preamble (should appear every 300 symbols)
+        if self.bit_counter - self.preamble_idx >= SUBFRAME_BITS as u32 {
+            // Next preamble window: correlate and verify
+            if self.subframe_idx >= SUBFRAME_BITS {
+                let valid = self.words.len() >= 2
+                    && self.words[0].parity_ok
+                    && self.words[1].parity_ok;
+                self.synced = false;
+                self.subframe_idx = 0;
+                self.preamble_count += 1;
+                return valid && self.subframe_id >= 1 && self.subframe_id <= 5;
+            } else {
+                // Subframe not complete — resync
+                self.synced = false;
+                self.subframe_idx = 0;
+            }
         }
+        false
     }
 
-    /// Parse a 30-bit word from the subframe buffer starting at `offset`.
+    /// Parse a 30-bit word from subframe_bits
     fn parse_word(&self, offset: usize) -> NavWord {
         let mut raw: u32 = 0;
         for i in 0..WORD_BITS {
@@ -162,54 +183,28 @@ fn preamble_match(a: u32, b: u32, max_err: u32) -> bool {
         NavWord { raw, parity_ok }
     }
 
-    /// Parse HOW from a decoded word.
-    fn parse_how(&self, word: &NavWord) -> Option<How> {
+    fn parse_how(word: &NavWord) -> Option<How> {
         let w = word.raw;
-        // HOW structure (MSB = bit 1):
-        // Bits 1-17: TOW count (17 bits, 6-second units)
-        // Bit 18: alert flag
-        // Bit 19: anti-spoof flag
-        // Bits 20-22: subframe ID (3 bits)
-        // Bits 23-24: parity check bits (part of encoding)
-        let tow = (w >> 13) & 0x1FFFF;      // bits 1-17
-        let alert = ((w >> 12) & 1) != 0;    // bit 18
-        let anti_spoof = ((w >> 11) & 1) != 0; // bit 19
-        let sf_id = ((w >> 8) & 0x7) as u8;   // bits 20-22
-        Some(How { tow, subframe_id: sf_id, anti_spoof, alert })
-    }
-
-    /// Clear state for next subframe.
-    pub fn reset(&mut self) {
-        self.words.clear();
-        self.synced = false;
-        self.subframe_idx = 0;
+        Some(How {
+            tow: (w >> 13) & 0x1FFFF,
+            alert: ((w >> 12) & 1) != 0,
+            anti_spoof: ((w >> 11) & 1) != 0,
+            subframe_id: ((w >> 8) & 0x7) as u8,
+        })
     }
 }
 
 /// GPS extended Hamming (32,26) parity check.
-///
-/// Returns true if the 30-bit word passes parity check.
-/// `d29_star`, `d30_star` are the last two bits of the PREVIOUS word.
 fn check_parity(word: u32, d29_star: u8, d30_star: u8) -> bool {
-    // Extract data bits D1..D24 (MSB first, bit positions 29..6)
     let d = |n: u32| -> u8 { ((word >> (30 - n)) & 1) as u8 };
     let d29 = d(29);
     let d30 = d(30);
-
-    // Parity equations (per IS-GPS-200 Table 20-XIV)
-    let p25 = d29_star ^ d(1) ^ d(2) ^ d(3) ^ d(5) ^ d(6) ^ d(10) ^ d(11) ^ d(12)
-        ^ d(13) ^ d(14) ^ d(17) ^ d(18) ^ d(20) ^ d(23);
-    let p26 = d30_star ^ d(2) ^ d(3) ^ d(4) ^ d(6) ^ d(7) ^ d(11) ^ d(12) ^ d(13)
-        ^ d(14) ^ d(15) ^ d(18) ^ d(19) ^ d(21) ^ d(24);
-    let p27 = d29_star ^ d(1) ^ d(3) ^ d(4) ^ d(5) ^ d(7) ^ d(8) ^ d(12) ^ d(13)
-        ^ d(14) ^ d(15) ^ d(16) ^ d(19) ^ d(20) ^ d(22);
-    let p28 = d30_star ^ d(2) ^ d(4) ^ d(5) ^ d(6) ^ d(8) ^ d(9) ^ d(13) ^ d(14)
-        ^ d(15) ^ d(16) ^ d(17) ^ d(20) ^ d(21) ^ d(23);
-    let p29 = d30_star ^ d(1) ^ d(3) ^ d(5) ^ d(6) ^ d(7) ^ d(9) ^ d(10) ^ d(14)
-        ^ d(15) ^ d(16) ^ d(17) ^ d(18) ^ d(21) ^ d(22) ^ d(24);
-    let p30 = d29_star ^ d(3) ^ d(5) ^ d(6) ^ d(8) ^ d(9) ^ d(10) ^ d(11) ^ d(13)
-        ^ d(15) ^ d(19) ^ d(22) ^ d(23) ^ d(24);
-
+    let p25 = d29_star ^ d(1)^d(2)^d(3)^d(5)^d(6)^d(10)^d(11)^d(12)^d(13)^d(14)^d(17)^d(18)^d(20)^d(23);
+    let p26 = d30_star ^ d(2)^d(3)^d(4)^d(6)^d(7)^d(11)^d(12)^d(13)^d(14)^d(15)^d(18)^d(19)^d(21)^d(24);
+    let p27 = d29_star ^ d(1)^d(3)^d(4)^d(5)^d(7)^d(8)^d(12)^d(13)^d(14)^d(15)^d(16)^d(19)^d(20)^d(22);
+    let p28 = d30_star ^ d(2)^d(4)^d(5)^d(6)^d(8)^d(9)^d(13)^d(14)^d(15)^d(16)^d(17)^d(20)^d(21)^d(23);
+    let p29 = d30_star ^ d(1)^d(3)^d(5)^d(6)^d(7)^d(9)^d(10)^d(14)^d(15)^d(16)^d(17)^d(18)^d(21)^d(22)^d(24);
+    let p30 = d29_star ^ d(3)^d(5)^d(6)^d(8)^d(9)^d(10)^d(11)^d(13)^d(15)^d(19)^d(22)^d(23)^d(24);
     p25 == d(25) && p26 == d(26) && p27 == d(27) && p28 == d(28) && p29 == d29 && p30 == d30
 }
 
@@ -218,28 +213,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_preamble_detect() {
+    fn test_preamble_correlation_perfect() {
         let mut dec = NavDecoder::new();
-        // Feed the preamble pattern 1 0 0 0 1 0 1 1
-        let preamble_bits = [1u8, 0, 0, 0, 1, 0, 1, 1];
-        for &b in &preamble_bits {
-            dec.feed_bit(b);
+        // Preamble: 10001011 → +1,-1,-1,-1,+1,-1,+1,+1
+        let symbols = [1.0, -1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0];
+        for &s in &symbols {
+            dec.feed_symbol(s);
         }
+        // After 8 symbols, should be synced (corr should be 8)
         assert!(dec.synced);
     }
 
     #[test]
-    fn test_parity_check_known_word() {
-        // Known-good TLM word from a real GPS subframe:
-        // Raw: 0x8B... (first word starts with preamble)
-        // The preamble word should have parity that verifies with D29*=0, D30*=0
-        // TLM word: preamble + 16 reserved + 2 parity + 6 parity
-        // Let's test with a word that has all zeros (except preamble in position)
-        // Not testing actual TLM — just testing parity function
-        let word: u32 = 0x22C2BC00 >> 2; // A known valid TLM word (example)
-        // For test simplicity, just verify function runs
-        let ok = check_parity(word, 0, 0);
-        // This might pass or fail depending on the actual word, just testing no panic
-        let _ = ok;
+    fn test_preamble_correlation_inverted() {
+        let mut dec = NavDecoder::new();
+        // Inverted preamble: -1,+1,+1,+1,-1,+1,-1,-1
+        let symbols = [-1.0, 1.0, 1.0, 1.0, -1.0, 1.0, -1.0, -1.0];
+        for &s in &symbols {
+            dec.feed_symbol(s);
+        }
+        assert!(dec.synced);
+        assert!(dec.inverted);
     }
 }

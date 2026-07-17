@@ -75,7 +75,8 @@ fn test_nav_decoder_direct() {
     for _ in 0..8 { bits.extend(&wb(0)); }
     let mut dec = NavDecoder::new();
     for &b in &bits {
-        if dec.feed_bit(b) {
+        let sym = if b == 1 { 1.0 } else { -1.0 };
+        if dec.feed_symbol(sym) {
             assert_eq!(dec.subframe_id, 1);
             assert_eq!(dec.tow, 100);
             assert!(dec.words[0].parity_ok);
@@ -138,10 +139,9 @@ fn test_m1_track_and_decode_subframe() {
     for ms in 0..dur_ms {
         let _o = trk.process(&signal[ms * spm..(ms + 1) * spm]);
         if let Some(sym) = trk.take_symbol() {
-            let bit = if sym.re > 0.0 { 1 } else { 0 };
             let sym_idx = ms / 20;
-            println!("sym {}: I={:.0}, bit={}", sym_idx, sym.re, bit);
-            if dec.feed_bit(bit) {
+            println!("sym {}: I={:.0}", sym_idx, sym.re);
+            if dec.feed_symbol(sym.re) {
                 assert_eq!(dec.subframe_id, 1);
                 assert_eq!(dec.tow, 100);
                 assert!(dec.words[0].parity_ok, "TLM parity fail");
