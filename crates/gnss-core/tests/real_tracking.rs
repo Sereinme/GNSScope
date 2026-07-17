@@ -36,7 +36,7 @@ fn test_real_data_tracking_and_decode() {
     println!("Acq PRN 1: doppler={:.0}, code_phase={:.1}", ar.doppler_hz, ar.code_phase_chips);
 
     // Track at 2Msps
-    let trk_cfg = TrackingConfig { fs: FS, ..Default::default() };
+    let trk_cfg = TrackingConfig { fs: FS, coherent_ms: 1, ..Default::default() };
     let mut trk = DllPllTracking::new(0, ar.doppler_hz, ar.code_phase_chips, trk_cfg);
 
     let total_ms = buf_2m.len() / spm;

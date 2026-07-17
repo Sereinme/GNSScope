@@ -19,7 +19,7 @@ pub struct TrackingConfig {
 impl Default for TrackingConfig {
     fn default() -> Self {
         Self { fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 40.0, fll_bw: 35.0,
+            dll_bw: 4.0, pll_bw: 40.0, fll_bw: 5.0,
             damping: 0.7, early_late_spc: 0.5, coherent_ms: 1,
         }
     }
@@ -40,8 +40,9 @@ pub struct DllPllTracking {
     // Coherent integration accumulator
     coh_count: u32,
     coh_early: Complex<f64>, coh_prompt: Complex<f64>, coh_late: Complex<f64>,
-    // FLL: previous prompt for freq discriminator
+    // FLL: previous prompt for freq discriminator + EWMA state
     prev_prompt: Complex<f64>,
+    fll_freq_est: f64,  // EWMA of FLL discriminator
     // C/N₀
     cn0_i2: f64, cn0_q2: f64, cn0_n: u32,
     // Symbol accumulation (aligned to bit boundary)
@@ -68,6 +69,7 @@ impl DllPllTracking {
             coh_count: 0,
             coh_early: Complex::new(0.0, 0.0), coh_prompt: Complex::new(0.0, 0.0), coh_late: Complex::new(0.0, 0.0),
             prev_prompt: Complex::new(0.0, 0.0),
+            fll_freq_est: doppler_hz,
             cn0_i2: 0.0, cn0_q2: 0.0, cn0_n: 0,
             symbol_acc: Complex::new(0.0, 0.0), symbol_cnt: 0,
             cycle_ms: 0,
@@ -109,45 +111,31 @@ impl DllPllTracking {
             self.symbol_cnt += 1;
         }
 
-        // Only update loops every coherent_ms
-        if self.coh_count >= self.config.coherent_ms {
-            let n = self.coh_count as f64;
-            let early = self.coh_early;
-            let prompt = self.coh_prompt;
-            let late = self.coh_late;
+        // --- DLL update (every 1ms) ---
+        let dll_err = discriminators::dll_discriminator(e, l, spc_chips);
+        let dll_corr = self.dll_filter.update(-dll_err);
+        self.code_freq_chips_per_s = 1.023e6 + dll_corr;
+        self.code_phase_chips += self.code_freq_chips_per_s * self.t;
+        self.code_phase_chips %= CODE_LENGTH as f64;
 
-            // DLL discriminator
-            let dll_err = discriminators::dll_discriminator(early, late, spc_chips);
-            let dll_corr = self.dll_filter.update(-dll_err);
-            self.code_freq_chips_per_s = 1.023e6 + dll_corr;
+        // --- FLL+PLL update (every 1ms, simple filters) ---
+        let pll_disc = discriminators::pll_discriminator(p);
+        let pll_hz = pll_disc * 3.0;  // gentle phase correction
+        self.carrier_freq_hz += pll_hz * self.t;
 
-            // PLL discriminator
-            let pll_disc = discriminators::pll_discriminator(prompt);
-            let pll_corr_rad_s2 = self.pll_filter.update(pll_disc);
-            let pll_hz = pll_corr_rad_s2 / TAU;
-
-            // FLL discriminator
-            let mut fll_hz = 0.0f64;
-            if self.config.fll_bw > 0.0 {
-                let dt = self.t * n; // integration time in seconds
-                let fll_disc = discriminators::fll_discriminator(self.prev_prompt, prompt, dt);
-                // Simple FLL: add frequency correction proportional to FLL bandwidth
-                fll_hz = fll_disc * (self.config.fll_bw / 35.0) * 0.01;
-            }
-            self.prev_prompt = prompt;
-
-            // Update NCOs
-            self.carrier_freq_hz += (pll_hz + fll_hz) * self.t * n;
-            let t_total = self.t * n;
-            self.code_phase_chips += self.code_freq_chips_per_s * t_total;
-            self.code_phase_chips %= CODE_LENGTH as f64;
-
-            // Reset accumulators
-            self.coh_early = Complex::new(0.0, 0.0);
-            self.coh_prompt = Complex::new(0.0, 0.0);
-            self.coh_late = Complex::new(0.0, 0.0);
-            self.coh_count = 0;
+        // FLL: direct frequency correction from discriminator (output in Hz)
+        if self.config.fll_bw > 0.0 {
+            let fll_disc = discriminators::fll_discriminator(self.prev_prompt, p, self.t);
+            let alpha = self.config.fll_bw * self.t * 0.5;
+            self.carrier_freq_hz += fll_disc * alpha;
         }
+        self.prev_prompt = p;
+
+        // --- Coherent integration accumulator (for longer integration support) ---
+        self.coh_early += e;
+        self.coh_prompt += p;
+        self.coh_late += l;
+        self.coh_count += 1;
 
         let doppler = self.carrier_freq_hz - self.config.if_freq;
         self.update_cn0(p);
