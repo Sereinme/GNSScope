@@ -1,11 +1,10 @@
 //! DLL + PLL tracking for GPS L1 C/A.
 //!
-//! Based on GNSS-SDR `dll_pll_veml_tracking.cc`.
-//! - E/P/L correlators with configurable spacing
-//! - Normalized DLL discriminator: (E-L)/(E+L) in chips
-//! - Costas PLL discriminator: atan2(Q,I)
-//! - 2nd order loop filters for DLL and PLL
-//! - C/N₀ estimation
+//! Based on GNSS-SDR `dll_pll_veml_tracking.cc` + `Tracking_2nd_PLL_filter`.
+//! Key differences from previous implementation:
+//! - PLL filter with K=0.25 (GNSS-SDR), trapezoidal integration
+//! - PLL discriminator converted to Hz: phase_err / (2π * T)
+//! - NCO update: freq += filter_output * T
 
 use super::discriminators;
 use super::loop_filter::LoopFilter;
@@ -27,8 +26,8 @@ impl Default for TrackingConfig {
     fn default() -> Self {
         Self {
             fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 2.0, pll_bw: 25.0,
-            damping: 0.707, early_late_spc: 0.5,
+            dll_bw: 4.0, pll_bw: 25.0,
+            damping: 0.7, early_late_spc: 0.5,
         }
     }
 }
@@ -41,33 +40,31 @@ pub struct TrackingOutput {
     pub code_phase_chips: f64,
     pub carrier_doppler_hz: f64,
     pub cn0_db_hz: f64,
-    pub pll_locked: bool,
 }
 
 pub struct DllPllTracking {
-    prn: usize,
     config: TrackingConfig,
     code: &'static [i8; CODE_LENGTH],
+    t: f64, // integration time (0.001 for 1ms)
 
     // Carrier NCO
     carrier_freq_hz: f64,
-    init_carrier_freq_hz: f64,  // clamped ±500Hz from this
     carrier_phase_rad: f64,
 
     // Code NCO
     code_phase_chips: f64,
     code_freq_chips_per_s: f64,
 
-    // Loop filters (maintain state across 1ms calls)
+    // Loop filters
     dll_filter: LoopFilter,
     pll_filter: LoopFilter,
 
-    // C/N₀ estimation
+    // C/N₀
     cn0_wbp: f64,
     cn0_nbp: f64,
     cn0_n: u32,
 
-    // Symbol accumulation (20ms per GPS nav bit)
+    // Symbol accumulation
     symbol_acc: Complex<f64>,
     symbol_cnt: u32,
 }
@@ -76,57 +73,50 @@ impl DllPllTracking {
     pub fn new(prn: usize, doppler_hz: f64, code_phase_chips: f64, config: TrackingConfig) -> Self {
         let t = 0.001;
         Self {
-            prn,
             config: config.clone(),
             code: &PRN_CODES[prn],
+            t,
             carrier_freq_hz: config.if_freq + doppler_hz,
-            init_carrier_freq_hz: config.if_freq + doppler_hz,
             carrier_phase_rad: 0.0,
             code_phase_chips,
             code_freq_chips_per_s: 1.023e6,
+            // PLL: K=0.25 (GNSS-SDR convention), DLL: K=1.0
             dll_filter: LoopFilter::new(config.dll_bw, config.damping, 1.0, t),
-            pll_filter: LoopFilter::new(config.pll_bw, config.damping, 1.0, t),
+            pll_filter: LoopFilter::new(config.pll_bw, config.damping, 0.25, t),
             cn0_wbp: 0.0, cn0_nbp: 0.0, cn0_n: 0,
             symbol_acc: Complex::new(0.0, 0.0), symbol_cnt: 0,
         }
     }
 
-    /// Process one 1ms block. Returns tracking output + updated state.
     pub fn process(&mut self, samples: &[Complex<f64>]) -> TrackingOutput {
-        let n = samples.len();
         let fs = self.config.fs;
-        let code_rate = self.code_freq_chips_per_s;
-        let spc = self.config.early_late_spc;
-        let spc_s = spc * fs / code_rate;
+        let spc_chips = self.config.early_late_spc;
+        let spc_s = spc_chips * fs / self.code_freq_chips_per_s;
 
-        // Correlate: E, P, L
-        let (early, prompt, late) = self.correlate(samples, spc_s, fs, code_rate);
+        // Correlate
+        let (early, prompt, late) = self.correlate(samples, spc_s);
 
-        // Discriminators
-        let dll_err = discriminators::dll_discriminator(early, late, spc);
-        let pll_err = discriminators::pll_discriminator(prompt);
+        // DLL discriminator (chips)
+        let dll_err = discriminators::dll_discriminator(early, late, spc_chips);
+        let dll_corr = self.dll_filter.update(-dll_err); // negative: E>L → slow down
 
-        // Loop filters → rate corrections
-        // DLL: output in chips/s. Negative sign: if early > late, slow down code rate
-        let dll_corr = self.dll_filter.update(-dll_err);
-        // PLL: output in rad/s, convert to Hz
-        let pll_corr = self.pll_filter.update(pll_err);
-        let pll_hz = pll_corr / std::f64::consts::TAU;
+        // PLL discriminator (radians) — GNSS-SDR passes radians directly
+        let pll_err_rad = discriminators::pll_discriminator(prompt);
+        let pll_corr_rad_per_s2 = self.pll_filter.update(pll_err_rad); // rad/s² output
+        let pll_corr_hz_per_s = pll_corr_rad_per_s2 / TAU; // convert to Hz/s
 
         // Update NCOs
-        // Code rate: nominal + DLL correction (chips/s)
+        // DLL: code_rate += correction_rate (chips/s)
         self.code_freq_chips_per_s = 1.023e6 + dll_corr;
-        // Advance code phase by one code period
-        self.code_phase_chips += self.code_freq_chips_per_s * 0.001;
+        // Advance code phase
+        self.code_phase_chips += self.code_freq_chips_per_s * self.t;
         self.code_phase_chips %= CODE_LENGTH as f64;
 
-        // Carrier frequency: IF + old_doppler + PLL correction
-        // PLL correction is in rad/s, convert to Hz: rad/s / (2π) = Hz
-        self.carrier_freq_hz = (self.carrier_freq_hz + pll_hz)
-            .clamp(self.init_carrier_freq_hz - 500.0, self.init_carrier_freq_hz + 500.0);
+        // PLL: carrier_freq += correction_rate * T (Hz/s * s = Hz)
+        self.carrier_freq_hz += pll_corr_hz_per_s * self.t;
         let doppler = self.carrier_freq_hz - self.config.if_freq;
 
-        // Symbol accumulation (20ms = 1 bit)
+        // Symbol accumulate (20ms)
         self.symbol_acc += prompt;
         self.symbol_cnt += 1;
         if self.symbol_cnt >= 20 {
@@ -144,7 +134,6 @@ impl DllPllTracking {
             code_phase_chips: self.code_phase_chips,
             carrier_doppler_hz: doppler,
             cn0_db_hz: cn0.max(0.0),
-            pll_locked: cn0 > 25.0,
         }
     }
 
@@ -156,40 +145,38 @@ impl DllPllTracking {
         } else { None }
     }
 
-    pub fn set_carrier_freq(&mut self, f: f64) { self.carrier_freq_hz = f; }
     pub fn code_freq(&self) -> f64 { self.code_freq_chips_per_s }
     pub fn dll_state(&self) -> f64 { self.dll_filter.state() }
     pub fn pll_state(&self) -> f64 { self.pll_filter.state() }
 
     // --- private ---
 
-    fn correlate(&mut self, samples: &[Complex<f64>], spc_samples: f64, fs: f64, code_rate: f64) -> (Complex<f64>, Complex<f64>, Complex<f64>) {
-        let n = samples.len();
-        let spc = spc_samples / fs * code_rate; // spacing in chips
+    fn correlate(&mut self, samples: &[Complex<f64>], spc_s: f64) -> (Complex<f64>, Complex<f64>, Complex<f64>) {
+        let fs = self.config.fs;
+        let spc_chips = spc_s / fs * self.code_freq_chips_per_s;
         let mut e = Complex::new(0.0, 0.0);
         let mut p = Complex::new(0.0, 0.0);
         let mut l = Complex::new(0.0, 0.0);
 
         for (i, sample) in samples.iter().enumerate() {
-            // Carrier wipe-off (note: negative phase for down-conversion)
-            let phase = self.carrier_phase_rad;
-            let carrier = Complex::new((TAU * phase).cos(), -(TAU * phase).sin());
+            // Carrier wipe-off
+            let carrier = Complex::new(
+                (TAU * self.carrier_phase_rad).cos(),
+                -(TAU * self.carrier_phase_rad).sin(),
+            );
             let wiped = sample * carrier;
 
             // Code phase for this sample
-            let cp = (self.code_phase_chips + i as f64 * code_rate / fs) % CODE_LENGTH as f64;
+            let cp = (self.code_phase_chips + i as f64 * self.code_freq_chips_per_s / fs) % CODE_LENGTH as f64;
             let ci = cp as usize % CODE_LENGTH;
-            let chip = self.code[ci] as f64;
 
-            // Early
-            let ei = ((cp - spc + CODE_LENGTH as f64) as usize) % CODE_LENGTH;
+            // E/P/L correlations
+            let ei = ((cp - spc_chips + CODE_LENGTH as f64) as usize) % CODE_LENGTH;
             e += wiped * Complex::new(self.code[ei] as f64, 0.0);
 
-            // Prompt
-            p += wiped * Complex::new(chip, 0.0);
+            p += wiped * Complex::new(self.code[ci] as f64, 0.0);
 
-            // Late
-            let li = ((cp + spc) as usize) % CODE_LENGTH;
+            let li = ((cp + spc_chips) as usize) % CODE_LENGTH;
             l += wiped * Complex::new(self.code[li] as f64, 0.0);
 
             // Phase increment

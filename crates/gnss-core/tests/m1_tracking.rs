@@ -87,7 +87,6 @@ fn test_nav_decoder_direct() {
 }
 
 #[test]
-#[ignore = "PLL needs tuning for >1s tracking stability"]
 fn test_m1_track_and_decode_subframe() {
     let fs = 4_000_000.0;
     let prn = 10;
