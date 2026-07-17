@@ -124,7 +124,7 @@ impl DllPllTracking {
         // --- FLL+PLL update (every 1ms, simple filters) ---
         // PLL: pure integrator for phase lock
         let pll_disc = discriminators::pll_discriminator(p);
-        let ki = 0.1;  // integrator gain
+        let ki = 0.01;  // integrator gain (reduced for stability)
         self.pll_int += pll_disc * ki;
         self.carrier_freq_hz += self.pll_int * 0.001;  // gentle freq update
 
@@ -134,11 +134,11 @@ impl DllPllTracking {
             // Adaptive gain: large when freq error is large, small when near lock
             let abs_err = fll_disc.abs();
             let gain = if abs_err > 100.0 {
-                0.01  // fast pull-in
+                0.001  // same as medium
             } else if abs_err > 20.0 {
-                0.003 // medium
+                0.001 // same as fine
             } else {
-                0.0005 // fine tracking
+                0.001 // fine tracking
             };
             self.carrier_freq_hz += fll_disc * gain;
         }
@@ -172,6 +172,7 @@ impl DllPllTracking {
     }
 
     pub fn code_freq(&self) -> f64 { self.code_freq_chips_per_s }
+    pub fn dll_state(&self) -> f64 { self.dll_filter.state() }
 
     fn correlate(&mut self, samples: &[Complex<f64>], spc_s: f64) -> (Complex<f64>, Complex<f64>, Complex<f64>) {
         let fs = self.config.fs;
