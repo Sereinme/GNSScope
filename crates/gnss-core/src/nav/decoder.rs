@@ -85,9 +85,16 @@ impl NavDecoder {
         self.bit_buf = ((self.bit_buf << 1) | (bit as u32 & 1)) & 0xFF;
         self.bit_count += 1;
 
+/// Check if two 8-bit values match within `max_err` bit errors.
+fn preamble_match(a: u32, b: u32, max_err: u32) -> bool {
+    let diff = (a ^ b) as u8;
+    diff.count_ones() <= max_err
+}
+
         if !self.synced {
-            // Search for preamble
-            if self.bit_buf == PREAMBLE as u32 || self.bit_buf == PREAMBLE_INV as u32 {
+            // Search for preamble (allow 1-bit error)
+            if preamble_match(self.bit_buf, PREAMBLE as u32, 2)
+                || preamble_match(self.bit_buf, PREAMBLE_INV as u32, 2) {
                 self.synced = true;
                 self.subframe_idx = 0;
                 // Write the preamble bits
