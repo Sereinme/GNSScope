@@ -1,5 +1,5 @@
-//! DLL + PLL tracking. GNSS-SDR compatible: 3rd-order PLL(40Hz) + 2nd-order DLL(4Hz).
-//! No FLL. Doppler = filter output (direct assignment).
+//! GPS L1 C/A tracking — exact GNSS-SDR Tracking_FLL_PLL_filter port.
+//! 3rd-order PLL (b3=2.4, a3=1.1, a2=1.414), no FLL, direct Doppler assignment.
 
 use super::discriminators;
 use super::loop_filter::LoopFilter;
@@ -21,9 +21,9 @@ pub struct TrackingConfig {
 impl Default for TrackingConfig {
     fn default() -> Self {
         Self { fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 20.0, fll_bw: 0.0,  // No FLL!
+            dll_bw: 4.0, pll_bw: 50.0, fll_bw: 10.0,
             damping: 0.7, early_late_spc: 0.5, carrier_aiding: true,
-            coherent_ms: 1, pll_order: 3,  // 3rd-order PLL
+            coherent_ms: 1, pll_order: 3,
         }
     }
 }
@@ -39,32 +39,46 @@ pub struct DllPllTracking {
     carrier_freq_hz: f64, carrier_phase_rad: f64,
     code_phase_chips: f64, code_freq_chips_per_s: f64,
     dll_filter: LoopFilter,
-    pll_filter: LoopFilter,  // 3rd-order PLL
+    // GNSS-SDR Tracking_FLL_PLL_filter state (3rd order)
+    pll_x: f64,  // initialized to 2*acq_doppler
+    pll_w: f64,  // initialized to 0
+    // Filter constants
+    w0p: f64, w0p2: f64, w0p3: f64,
+    b3: f64, a3: f64, a2: f64,
+    w0f: f64, w0f2: f64,
+    prev_prompt: Complex<f64>,
     cn0_i2: f64, cn0_q2: f64, cn0_n: u32,
     symbol_acc: Complex<f64>, symbol_cnt: u32,
     cycle_ms: usize, bit_boundary: Option<usize>,
     bs_buf: [f64; 40], bs_idx: usize,
     bs_energy: [f64; 20], bs_count: u32,
+    pub last_pll_in: f64, pub last_fll_in: f64,
 }
 
 impl DllPllTracking {
     pub fn new(prn: usize, doppler_hz: f64, code_phase_chips: f64, config: TrackingConfig) -> Self {
         let t = 0.001;
+        let w0p = config.pll_bw / 0.7845;
+        let w0p2 = w0p * w0p;
+        let w0p3 = w0p2 * w0p;
         Self {
             config: config.clone(), code: &PRN_CODES[prn], t,
             carrier_freq_hz: config.if_freq + doppler_hz, carrier_phase_rad: 0.0,
             code_phase_chips, code_freq_chips_per_s: GPS_L1_CA_CODE_RATE,
             dll_filter: LoopFilter::new(config.dll_bw, config.damping, 1.0, t),
-            pll_filter: {
-                let mut f = LoopFilter::new_order(config.pll_bw, t, config.pll_order);
-                f.initialize(doppler_hz);
-                f
-            },
+            // GNSS-SDR initialize: d_pll_x = 2*acq_doppler, d_pll_w = 0
+            pll_x: 2.0 * doppler_hz,
+            pll_w: 0.0,
+            w0p, w0p2, w0p3,
+            b3: 2.400, a3: 1.100, a2: 1.414,
+            w0f: config.fll_bw / 0.53, w0f2: (config.fll_bw / 0.53).powi(2),
+            prev_prompt: Complex::new(0.0, 0.0),
             cn0_i2: 0.0, cn0_q2: 0.0, cn0_n: 0,
             symbol_acc: Complex::new(0.0, 0.0), symbol_cnt: 0,
             cycle_ms: 0, bit_boundary: None,
             bs_buf: [0.0; 40], bs_idx: 0,
             bs_energy: [0.0; 20], bs_count: 0,
+            last_pll_in: 0.0, last_fll_in: 0.0,
         }
     }
 
@@ -74,7 +88,7 @@ impl DllPllTracking {
         let spc_s = spc_chips * fs / self.code_freq_chips_per_s;
         let (e, p, l) = self.correlate(samples, spc_s);
 
-        // DLL: code_freq = rate - filter_output + carrier_aiding
+        // DLL
         let dll_err = discriminators::dll_discriminator(e, l, spc_chips);
         let dll_out = self.dll_filter.update(-dll_err);
         self.code_freq_chips_per_s = GPS_L1_CA_CODE_RATE - dll_out;
@@ -85,22 +99,26 @@ impl DllPllTracking {
         self.code_phase_chips += self.code_freq_chips_per_s * self.t;
         self.code_phase_chips %= CODE_LENGTH as f64;
 
-        // PLL: 3rd-order, input = phase error in Hz (cycles per second = atan/2π * 1/Ti)
-        // GNSS-SDR: d_carr_phase_error_hz = atan(Q,I) / 2π  → this is in cycles
-        // tracking_loop_filter expects input in same units as output (Hz)
-        // So input = phase_error_cycles / Ti (convert cycles to Hz)
-        let pll_err_rad = discriminators::pll_discriminator(p);
-        let pll_in = -pll_err_rad / TAU;  // negate: positive phase error → decrease freq
-        // tracking_loop_filter with include_last_integrator=false:
-        //   input = Hz, output = Hz (directly assignable to Doppler)
-        // But our phase error is in cycles (dimensionless per Ti)
-        // GNSS-SDR passes d_carr_phase_error_hz which is cycles (not Hz!)
-        // The filter internally handles the scaling via T in coefficients
-        let pll_out = self.pll_filter.update(pll_in);  // output in Hz
-        self.carrier_freq_hz = self.config.if_freq + pll_out;
+        // PLL: GNSS-SDR Tracking_FLL_PLL_filter (3rd order, FLL=0)
+        // Input: PLL_discriminator = atan(Q,I) / 2π  (cycles, = Hz in GNSS-SDR convention)
+        let pll_disc = discriminators::pll_discriminator(p) / TAU;
+        self.last_pll_in = pll_disc;
+        let fll_disc = if self.config.fll_bw > 0.0 {
+            discriminators::fll_discriminator(self.prev_prompt, p, self.t) / TAU
+        } else { 0.0 };
+        self.prev_prompt = p;
+        self.last_fll_in = fll_disc;
+
+        // 3rd order update (exact GNSS-SDR Tracking_FLL_PLL_filter formula)
+        self.pll_w += self.t * (self.w0p3 * pll_disc + self.w0f2 * fll_disc);
+        self.pll_x += self.t * (0.5 * self.pll_w + self.a2 * self.w0f * fll_disc + self.a3 * self.w0p2 * pll_disc);
+        let carrier_doppler = 0.5 * self.pll_x + self.b3 * self.w0p * pll_disc;
+
+        // Direct assignment
+        self.carrier_freq_hz = self.config.if_freq + carrier_doppler;
         let doppler = self.carrier_freq_hz - self.config.if_freq;
 
-        // Symbol accumulation (aligned to bit boundary)
+        // Symbol accumulation
         self.update_bit_sync(p);
         self.cycle_ms = (self.cycle_ms + 1) % 20;
         let boundary = self.bit_boundary.unwrap_or(0);
@@ -135,8 +153,6 @@ impl DllPllTracking {
 
     pub fn code_freq(&self) -> f64 { self.code_freq_chips_per_s }
     pub fn dll_state(&self) -> f64 { self.dll_filter.state() }
-    pub fn last_pll_in(&self) -> f64 { self.pll_filter.state() }
-    pub fn last_fll_in(&self) -> f64 { 0.0 }
 
     fn correlate(&mut self, samples: &[Complex<f64>], spc_s: f64) -> (Complex<f64>, Complex<f64>, Complex<f64>) {
         let fs = self.config.fs;
