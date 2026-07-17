@@ -29,7 +29,7 @@ fn test_real_data_tracking_and_decode() {
     assert!(ar.detected);
     println!("Acq: dopp={:.0} cp={:.1}", ar.doppler_hz, ar.code_phase_chips);
 
-    // Fine doppler search: try offsets from acq result
+    // Fine doppler search: 40 Hz step, 1.5s tracking, single Q/I sample
     let mut best_qi = f64::MAX;
     let mut best_dopp = ar.doppler_hz;
     for offset in (-600..=0).step_by(40) {
