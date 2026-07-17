@@ -27,7 +27,7 @@ impl Default for TrackingConfig {
     fn default() -> Self {
         Self {
             fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 2.0, pll_bw: 15.0,
+            dll_bw: 2.0, pll_bw: 25.0,
             damping: 0.707, early_late_spc: 0.5,
         }
     }
@@ -158,6 +158,8 @@ impl DllPllTracking {
 
     pub fn set_carrier_freq(&mut self, f: f64) { self.carrier_freq_hz = f; }
     pub fn code_freq(&self) -> f64 { self.code_freq_chips_per_s }
+    pub fn dll_state(&self) -> f64 { self.dll_filter.state() }
+    pub fn pll_state(&self) -> f64 { self.pll_filter.state() }
 
     // --- private ---
 

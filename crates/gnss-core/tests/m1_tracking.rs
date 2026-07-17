@@ -137,8 +137,10 @@ fn test_m1_track_and_decode_subframe() {
         if let Some(sym) = trk.take_symbol() {
             let bit = if sym.re > 0.0 { 1 } else { 0 };
             let sym_idx = ms / 20;
-            if sym_idx < 30 || sym_idx % 50 == 0 {
-                println!("sym {}: I={:.1}, bit={}", sym_idx, sym.re, bit);
+            if sym_idx < 10 || sym_idx % 50 == 0 {
+                println!("sym {}: I={:.0}, cp={:.2}, dopp={:.2}, cn0={:.1}, dll_s={:.2}, pll_s={:.2}",
+                    sym_idx, sym.re, o.code_phase_chips, o.carrier_doppler_hz, o.cn0_db_hz,
+                    trk.dll_state(), trk.pll_state());
             }
             if dec.feed_bit(bit) {
                 assert_eq!(dec.subframe_id, 1);
