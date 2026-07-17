@@ -27,7 +27,7 @@ pub struct TrackingConfig {
 impl Default for TrackingConfig {
     fn default() -> Self {
         Self { fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 30.0, fll_bw: 50.0,
+            dll_bw: 4.0, pll_bw: 30.0, fll_bw: 5.0,
             damping: 0.7, early_late_spc: 0.5, carrier_aiding: true,
             coherent_ms: 1,
         }
@@ -146,7 +146,7 @@ impl DllPllTracking {
                 discriminators::fll_discriminator(self.prev_prompt, prompt, t_coh)
             } else { 0.0 };
             self.last_fll_in = fll_raw;
-            let alpha = 0.1;  // EWMA smoothing factor
+            let alpha = 0.02;  // EWMA smoothing factor (stronger for 1ms noise)
             self.fll_filt = (1.0 - alpha) * self.fll_filt + alpha * fll_raw;
             let fll_in = self.fll_filt;  // use smoothed value
             self.prev_prompt = prompt;
@@ -156,7 +156,7 @@ impl DllPllTracking {
             // is opposite to GNSS-SDR's (atan2 gives -θ for positive rotation)
             let pll_w_new = self.pll_w
                 + pll_in * self.fp_w0p2 * t_coh
-                - fll_in * self.fp_w0f * t_coh;  // NEGATIVE sign for FLL!
+                + fll_in * self.fp_w0f * t_coh;  // phase_unwrapped fll_diff_atan has correct sign
             let carrier_doppler = 0.5 * (pll_w_new + self.pll_w)
                 + self.fp_a2 * self.fp_w0p * pll_in;
             self.pll_w = pll_w_new;

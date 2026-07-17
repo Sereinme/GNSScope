@@ -31,14 +31,18 @@ pub fn pll_discriminator(prompt: Complex<f64>) -> f64 {
     f64::atan(prompt.im / prompt.re)
 }
 
-/// FLL four-quadrant arctan discriminator (cross-product).
+/// FLL differential arctan discriminator with phase unwrapping.
 ///
-/// Returns frequency error in Hz over the given integration time.
-/// GNSS-SDR: `fll_four_quadrant_atan`
+/// Returns frequency error in Hz. GNSS-SDR: `fll_diff_atan`
+/// Uses phase unwrap to handle ±π discontinuities.
 pub fn fll_discriminator(prompt_prev: Complex<f64>, prompt_curr: Complex<f64>, t: f64) -> f64 {
-    let cross = prompt_prev.im * prompt_curr.re - prompt_prev.re * prompt_curr.im;
-    let dot = prompt_prev.re * prompt_curr.re + prompt_prev.im * prompt_curr.im;
-    f64::atan2(cross, dot) / (std::f64::consts::TAU * t)
+    let phase_prev = f64::atan2(prompt_prev.im, prompt_prev.re);
+    let phase_curr = f64::atan2(prompt_curr.im, prompt_curr.re);
+    let mut diff = phase_curr - phase_prev;
+    // Phase unwrap: keep difference in [-π, π]
+    if diff > std::f64::consts::PI { diff -= std::f64::consts::TAU; }
+    if diff < -std::f64::consts::PI { diff += std::f64::consts::TAU; }
+    diff / (std::f64::consts::TAU * t)
 }
 
 #[cfg(test)]
