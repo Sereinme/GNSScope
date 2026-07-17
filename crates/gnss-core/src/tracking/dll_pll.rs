@@ -47,6 +47,11 @@ pub struct DllPllTracking {
     w0f: f64, w0f2: f64,
     prev_prompt: Complex<f64>,
     cn0_i2: f64, cn0_q2: f64, cn0_n: u32,
+    tracking_ms: u64,
+    pull_in_time_ms: u64,
+    pll_bw_pull_in: f64,
+    w0p_pull_in: f64, w0p2_pull_in: f64, w0p3_pull_in: f64,
+    last_prompt: Complex<f64>,
     symbol_acc: Complex<f64>, symbol_cnt: u32,
     cycle_ms: usize, bit_boundary: Option<usize>,
     bs_buf: [f64; 40], bs_idx: usize,
@@ -73,6 +78,13 @@ impl DllPllTracking {
             w0f: config.fll_bw / 0.53, w0f2: (config.fll_bw / 0.53).powi(2),
             prev_prompt: Complex::new(0.0, 0.0),
             cn0_i2: 0.0, cn0_q2: 0.0, cn0_n: 0,
+            tracking_ms: 0,
+            pull_in_time_ms: 4000,  // 4 seconds pull-in
+            pll_bw_pull_in: 50.0,
+            w0p_pull_in: 50.0_f64 / 0.7845,
+            w0p2_pull_in: (50.0_f64 / 0.7845).powi(2),
+            w0p3_pull_in: (50.0_f64 / 0.7845).powi(3),
+            last_prompt: Complex::new(0.0, 0.0),
             symbol_acc: Complex::new(0.0, 0.0), symbol_cnt: 0,
             cycle_ms: 0, bit_boundary: None,
             bs_buf: [0.0; 40], bs_idx: 0,
@@ -98,8 +110,16 @@ impl DllPllTracking {
         self.code_phase_chips += self.code_freq_chips_per_s * self.t;
         self.code_phase_chips %= CODE_LENGTH as f64;
 
-        // PLL: GNSS-SDR Tracking_FLL_PLL_filter (3rd order, FLL=0)
-        // Input: PLL_discriminator = atan(Q,I) / 2π  (cycles, = Hz in GNSS-SDR convention)
+        // PLL: GNSS-SDR Tracking_FLL_PLL_filter (3rd order)
+        // Use wide bandwidth during pull-in, narrow after
+        self.tracking_ms += 1;
+        let in_pull_in = self.tracking_ms < self.pull_in_time_ms;
+        let (w0p, w0p2, w0p3) = if in_pull_in {
+            (self.w0p_pull_in, self.w0p2_pull_in, self.w0p3_pull_in)
+        } else {
+            (self.w0p, self.w0p2, self.w0p3)
+        };
+
         let pll_disc = discriminators::pll_discriminator(p) / TAU;
         self.last_pll_in = pll_disc;
         let fll_disc = if self.config.fll_bw > 0.0 {
@@ -109,28 +129,19 @@ impl DllPllTracking {
         self.last_fll_in = fll_disc;
 
         // 3rd order update (exact GNSS-SDR Tracking_FLL_PLL_filter formula)
-        self.pll_w += self.t * (self.w0p3 * pll_disc + self.w0f2 * fll_disc);
-        self.pll_x += self.t * (0.5 * self.pll_w + self.a2 * self.w0f * fll_disc + self.a3 * self.w0p2 * pll_disc);
-        let carrier_doppler = 0.5 * self.pll_x + self.b3 * self.w0p * pll_disc;
+        self.pll_w += self.t * (w0p3 * pll_disc + self.w0f2 * fll_disc);
+        self.pll_x += self.t * (0.5 * self.pll_w + self.a2 * self.w0f * fll_disc + self.a3 * w0p2 * pll_disc);
+        let carrier_doppler = 0.5 * self.pll_x + self.b3 * w0p * pll_disc;
 
         // Direct assignment
         self.carrier_freq_hz = self.config.if_freq + carrier_doppler;
         let doppler = self.carrier_freq_hz - self.config.if_freq;
 
-        // Symbol accumulation
-        self.update_bit_sync(p);
-        self.cycle_ms = (self.cycle_ms + 1) % 20;
-        let boundary = self.bit_boundary.unwrap_or(0);
-        if self.cycle_ms == boundary && self.symbol_cnt > 0 && self.symbol_cnt < 20 {
-            self.symbol_acc = Complex::new(0.0, 0.0);
-            self.symbol_cnt = 0;
-        }
-        if self.cycle_ms == boundary || self.symbol_cnt > 0 {
-            self.symbol_acc += p;
-            self.symbol_cnt += 1;
-        }
+        // Output 1ms prompt — bit sync and 20ms accumulation handled by NavDecoder
+        // (GNSS-SDR: tracking outputs 1ms, telemetry decoder does bit sync)
 
         self.update_cn0(p);
+        self.last_prompt = p;
         let cn0 = self.compute_cn0();
 
         TrackingOutput {
@@ -141,13 +152,11 @@ impl DllPllTracking {
         }
     }
 
+    /// Output 1ms prompt value for external bit sync + 20ms accumulation.
+    /// Returns Some(prompt) every call — caller does 20ms grouping.
     pub fn take_symbol(&mut self) -> Option<Complex<f64>> {
-        if self.symbol_cnt >= 20 {
-            let s = self.symbol_acc;
-            self.symbol_acc = Complex::new(0.0, 0.0);
-            self.symbol_cnt = 0;
-            Some(s)
-        } else { None }
+        // Return last prompt — caller accumulates 20 values
+        Some(self.last_prompt)
     }
 
     pub fn code_freq(&self) -> f64 { self.code_freq_chips_per_s }
