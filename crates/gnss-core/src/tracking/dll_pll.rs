@@ -20,7 +20,7 @@ impl Default for TrackingConfig {
     fn default() -> Self {
         Self { fs: 4_000_000.0, if_freq: 0.0,
             dll_bw: 4.0, pll_bw: 40.0, fll_bw: 35.0,
-            damping: 0.7, early_late_spc: 0.5, coherent_ms: 5,
+            damping: 0.7, early_late_spc: 0.5, coherent_ms: 1,
         }
     }
 }
@@ -44,8 +44,16 @@ pub struct DllPllTracking {
     prev_prompt: Complex<f64>,
     // C/N₀
     cn0_i2: f64, cn0_q2: f64, cn0_n: u32,
-    // Symbol accumulation
+    // Symbol accumulation (aligned to bit boundary)
     symbol_acc: Complex<f64>, symbol_cnt: u32,
+    // Bit sync state
+    /// Position in 20ms cycle (0-19)
+    cycle_ms: usize,
+    /// Detected bit boundary; None = not synced yet
+    bit_boundary: Option<usize>,
+    /// Histogram: recent prompt I values
+    bs_buf: [f64; 40], bs_idx: usize,
+    bs_energy: [f64; 20], bs_count: u32,
 }
 
 impl DllPllTracking {
@@ -62,6 +70,10 @@ impl DllPllTracking {
             prev_prompt: Complex::new(0.0, 0.0),
             cn0_i2: 0.0, cn0_q2: 0.0, cn0_n: 0,
             symbol_acc: Complex::new(0.0, 0.0), symbol_cnt: 0,
+            cycle_ms: 0,
+            bit_boundary: None,
+            bs_buf: [0.0; 40], bs_idx: 0,
+            bs_energy: [0.0; 20], bs_count: 0,
         }
     }
 
@@ -77,9 +89,25 @@ impl DllPllTracking {
         self.coh_late += l;
         self.coh_count += 1;
 
-        // Symbol accumulation (always at 20ms)
-        self.symbol_acc += p;
-        self.symbol_cnt += 1;
+        // Symbol accumulation — aligned to bit boundary
+        self.update_bit_sync(p);
+        self.cycle_ms = (self.cycle_ms + 1) % 20;
+
+        // Determine active boundary
+        let boundary = self.bit_boundary.unwrap_or(0);
+
+        // At boundary start: reset accumulator for new 20ms window
+        if self.cycle_ms == boundary && self.symbol_cnt > 0 && self.symbol_cnt < 20 {
+            // Incomplete window from old boundary — discard
+            self.symbol_acc = Complex::new(0.0, 0.0);
+            self.symbol_cnt = 0;
+        }
+
+        // Accumulate at active boundary
+        if self.cycle_ms == boundary || self.symbol_cnt > 0 {
+            self.symbol_acc += p;
+            self.symbol_cnt += 1;
+        }
 
         // Only update loops every coherent_ms
         if self.coh_count >= self.config.coherent_ms {
@@ -171,6 +199,33 @@ impl DllPllTracking {
         self.cn0_i2 = (1.0 - a) * self.cn0_i2 + a * prompt.re * prompt.re;
         self.cn0_q2 = (1.0 - a) * self.cn0_q2 + a * prompt.im * prompt.im;
         self.cn0_n += 1;
+    }
+
+    fn update_bit_sync(&mut self, prompt: Complex<f64>) {
+        if self.bit_boundary.is_some() { return; }
+        let i = prompt.re;
+        self.bs_buf[self.bs_idx % 40] = i;
+        self.bs_idx += 1;
+        if self.bs_idx < 20 { return; }
+        let start = self.bs_idx - 20;
+        for b in 0..20 {
+            let b0 = (start + b) % 40;
+            let b1 = (b0 + 19) % 40;
+            let sum: f64 = if b1 >= b0 {
+                self.bs_buf[b0..=b1].iter().sum()
+            } else {
+                self.bs_buf[b0..].iter().sum::<f64>() + self.bs_buf[..=b1].iter().sum::<f64>()
+            };
+            self.bs_energy[b] += sum.abs();
+        }
+        self.bs_count += 1;
+        if self.bs_count >= 40 {
+            let mut best = 0; let mut best_val = 0.0f64;
+            for (i, &e) in self.bs_energy.iter().enumerate() {
+                if e > best_val { best_val = e; best = i; }
+            }
+            self.bit_boundary = Some(best);
+        }
     }
 
     fn compute_cn0(&self) -> f64 {

@@ -87,7 +87,7 @@ fn test_nav_decoder_direct() {
 }
 
 #[test]
-#[ignore = "bit sync resets accumulator; fix pending"]
+#[ignore = "PLL stability insufficient for 18s decode; bit sync correctly detects boundary 0"]
 fn test_m1_track_and_decode_subframe() {
     let fs = 4_000_000.0;
     let prn = 10;
@@ -106,6 +106,8 @@ fn test_m1_track_and_decode_subframe() {
     let mut bits = wb(tlm);
     bits.extend(&wb(how));
     for _ in 0..8 { bits.extend(&wb(0)); }
+    // Repeat 3 times to have enough data after bit sync consumes ~800ms
+    let bits: Vec<u8> = bits.iter().cycle().take(bits.len() * 3).copied().collect();
     let dur_ms = bits.len() * 20;
     // Only run first 2s for debug
 
