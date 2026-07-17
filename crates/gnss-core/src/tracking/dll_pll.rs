@@ -27,9 +27,9 @@ pub struct TrackingConfig {
 impl Default for TrackingConfig {
     fn default() -> Self {
         Self { fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 20.0, fll_bw: 35.0,
+            dll_bw: 4.0, pll_bw: 30.0, fll_bw: 50.0,
             damping: 0.7, early_late_spc: 0.5, carrier_aiding: true,
-            coherent_ms: 1,  // quick test
+            coherent_ms: 1,
         }
     }
 }
@@ -53,6 +53,9 @@ pub struct DllPllTracking {
     fp_w0p2: f64, fp_w0f: f64, fp_w0p: f64, fp_a2: f64,
     prev_prompt: Complex<f64>,
     prev_pll_in: f64,     // previous PLL input (cycles)
+    fll_filt: f64,        // EWMA-smoothed FLL discriminator
+    pub last_pll_in: f64,  // last PLL discriminator (cycles)
+    pub last_fll_in: f64,  // last FLL discriminator (Hz)
     // C/N₀
     cn0_i2: f64, cn0_q2: f64, cn0_n: u32,
     // Symbol accumulation (aligned to bit boundary)
@@ -84,6 +87,8 @@ impl DllPllTracking {
             fp_w0p2: w0p2, fp_w0f: w0f, fp_w0p: w0p, fp_a2: a2,
             prev_prompt: Complex::new(0.0, 0.0),
             prev_pll_in: 0.0,
+            fll_filt: 0.0,
+            last_pll_in: 0.0, last_fll_in: 0.0,
             cn0_i2: 0.0, cn0_q2: 0.0, cn0_n: 0,
             symbol_acc: Complex::new(0.0, 0.0), symbol_cnt: 0,
             cycle_ms: 0, bit_boundary: None,
@@ -135,10 +140,15 @@ impl DllPllTracking {
 
             // PLL (input in cycles)
             let pll_in = discriminators::pll_discriminator(prompt) / TAU;
-            // FLL (input in Hz)
-            let fll_in = if self.config.fll_bw > 0.0 {
+            self.last_pll_in = pll_in;
+            // FLL (input in Hz), with EWMA smoothing for noise reduction
+            let fll_raw = if self.config.fll_bw > 0.0 {
                 discriminators::fll_discriminator(self.prev_prompt, prompt, t_coh)
             } else { 0.0 };
+            self.last_fll_in = fll_raw;
+            let alpha = 0.1;  // EWMA smoothing factor
+            self.fll_filt = (1.0 - alpha) * self.fll_filt + alpha * fll_raw;
+            let fll_in = self.fll_filt;  // use smoothed value
             self.prev_prompt = prompt;
 
             // GNSS-SDR FLL+PLL formula with coherent integration time t_coh
