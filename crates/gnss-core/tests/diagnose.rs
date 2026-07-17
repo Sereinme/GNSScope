@@ -33,7 +33,7 @@ fn diagnose_pll_fll() {
         let out = trk.process(&signal[ms * spm..(ms + 1) * spm]);
         if ms % 200 == 0 || ms < 10 {
             println!("{:4}  {:10.4} {:10.1} {:8.1} {:8.0} {:8.0}",
-                ms, trk.last_pll_in, trk.last_fll_in,
+                ms, trk.last_pll_in(), trk.last_fll_in(),
                 out.carrier_doppler_hz,
                 out.prompt.re.abs(), out.prompt.im.abs());
         }
