@@ -1,10 +1,6 @@
 //! DLL + PLL tracking for GPS L1 C/A.
 //!
 //! Based on GNSS-SDR `dll_pll_veml_tracking.cc` + `Tracking_2nd_PLL_filter`.
-//! Key differences from previous implementation:
-//! - PLL filter with K=0.25 (GNSS-SDR), trapezoidal integration
-//! - PLL discriminator converted to Hz: phase_err / (2π * T)
-//! - NCO update: freq += filter_output * T
 
 use super::discriminators;
 use super::loop_filter::LoopFilter;
@@ -14,77 +10,51 @@ use std::f64::consts::TAU;
 
 #[derive(Debug, Clone)]
 pub struct TrackingConfig {
-    pub fs: f64,
-    pub if_freq: f64,
-    pub dll_bw: f64,
-    pub pll_bw: f64,
-    pub damping: f64,
-    pub early_late_spc: f64,
+    pub fs: f64, pub if_freq: f64,
+    pub dll_bw: f64, pub pll_bw: f64, pub damping: f64, pub early_late_spc: f64,
 }
-
 impl Default for TrackingConfig {
     fn default() -> Self {
-        Self {
-            fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 25.0,
-            damping: 0.7, early_late_spc: 0.5,
-        }
+        Self { fs: 4_000_000.0, if_freq: 0.0, dll_bw: 4.0, pll_bw: 25.0, damping: 0.7, early_late_spc: 0.5 }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct TrackingOutput {
-    pub prompt: Complex<f64>,
-    pub early_mag: f64,
-    pub late_mag: f64,
-    pub code_phase_chips: f64,
-    pub carrier_doppler_hz: f64,
-    pub cn0_db_hz: f64,
+    pub prompt: Complex<f64>, pub early_mag: f64, pub late_mag: f64,
+    pub code_phase_chips: f64, pub carrier_doppler_hz: f64, pub cn0_db_hz: f64,
 }
 
 pub struct DllPllTracking {
-    config: TrackingConfig,
-    code: &'static [i8; CODE_LENGTH],
-    t: f64, // integration time (0.001 for 1ms)
-
-    // Carrier NCO
-    carrier_freq_hz: f64,
-    carrier_phase_rad: f64,
-
-    // Code NCO
-    code_phase_chips: f64,
-    code_freq_chips_per_s: f64,
-
-    // Loop filters
-    dll_filter: LoopFilter,
-    pll_filter: LoopFilter,
-
-    // C/N₀
-    cn0_wbp: f64,
-    cn0_nbp: f64,
-    cn0_n: u32,
-
+    config: TrackingConfig, code: &'static [i8; CODE_LENGTH], t: f64,
+    carrier_freq_hz: f64, carrier_phase_rad: f64,
+    code_phase_chips: f64, code_freq_chips_per_s: f64,
+    dll_filter: LoopFilter, pll_filter: LoopFilter,
+    // C/N₀: smoothed I² and Q²
+    cn0_i2: f64, cn0_q2: f64, cn0_n: u32,
     // Symbol accumulation
-    symbol_acc: Complex<f64>,
-    symbol_cnt: u32,
+    symbol_acc: Complex<f64>, symbol_cnt: u32,
+    // Bit sync: histogram over 20 possible boundaries
+    /// Ring buffer of recent 1ms prompt I values (40 = 2×20)
+    bs_buf: [f64; 40], bs_idx: usize,
+    bs_energy: [f64; 20], bs_count: u32,
+    pub bit_boundary: Option<usize>,
+    /// Index into 20ms cycle; when bs_ms reaches boundary we sample
+    bs_ms: usize,
 }
 
 impl DllPllTracking {
     pub fn new(prn: usize, doppler_hz: f64, code_phase_chips: f64, config: TrackingConfig) -> Self {
         let t = 0.001;
-        Self {
-            config: config.clone(),
-            code: &PRN_CODES[prn],
-            t,
-            carrier_freq_hz: config.if_freq + doppler_hz,
-            carrier_phase_rad: 0.0,
-            code_phase_chips,
-            code_freq_chips_per_s: 1.023e6,
-            // PLL: K=0.25 (GNSS-SDR convention), DLL: K=1.0
+        Self { config: config.clone(), code: &PRN_CODES[prn], t,
+            carrier_freq_hz: config.if_freq + doppler_hz, carrier_phase_rad: 0.0,
+            code_phase_chips, code_freq_chips_per_s: 1.023e6,
             dll_filter: LoopFilter::new(config.dll_bw, config.damping, 1.0, t),
             pll_filter: LoopFilter::new(config.pll_bw, config.damping, 0.25, t),
-            cn0_wbp: 0.0, cn0_nbp: 0.0, cn0_n: 0,
+            cn0_i2: 0.0, cn0_q2: 0.0, cn0_n: 0,
             symbol_acc: Complex::new(0.0, 0.0), symbol_cnt: 0,
+            bs_buf: [0.0; 40], bs_idx: 0, bs_energy: [0.0; 20], bs_count: 0,
+            bit_boundary: None, bs_ms: 0,
         }
     }
 
@@ -92,55 +62,47 @@ impl DllPllTracking {
         let fs = self.config.fs;
         let spc_chips = self.config.early_late_spc;
         let spc_s = spc_chips * fs / self.code_freq_chips_per_s;
-
-        // Correlate
         let (early, prompt, late) = self.correlate(samples, spc_s);
 
-        // DLL discriminator (chips)
+        // Loop updates
         let dll_err = discriminators::dll_discriminator(early, late, spc_chips);
-        let dll_corr = self.dll_filter.update(-dll_err); // negative: E>L → slow down
-
-        // PLL discriminator (radians) — GNSS-SDR passes radians directly
+        let dll_corr = self.dll_filter.update(-dll_err);
         let pll_err_rad = discriminators::pll_discriminator(prompt);
-        let pll_corr_rad_per_s2 = self.pll_filter.update(pll_err_rad); // rad/s² output
-        let pll_corr_hz_per_s = pll_corr_rad_per_s2 / TAU; // convert to Hz/s
-
-        // Update NCOs
-        // DLL: code_rate += correction_rate (chips/s)
+        let pll_corr_rad_per_s2 = self.pll_filter.update(pll_err_rad);
+        let pll_corr_hz_per_s = pll_corr_rad_per_s2 / TAU;
         self.code_freq_chips_per_s = 1.023e6 + dll_corr;
-        // Advance code phase
         self.code_phase_chips += self.code_freq_chips_per_s * self.t;
         self.code_phase_chips %= CODE_LENGTH as f64;
-
-        // PLL: carrier_freq += correction_rate * T (Hz/s * s = Hz)
         self.carrier_freq_hz += pll_corr_hz_per_s * self.t;
         let doppler = self.carrier_freq_hz - self.config.if_freq;
 
-        // Symbol accumulate (20ms)
-        self.symbol_acc += prompt;
-        self.symbol_cnt += 1;
-        if self.symbol_cnt >= 20 {
-            self.symbol_cnt = 0;
-        }
-
         // C/N₀
         self.update_cn0(prompt);
-        let cn0 = if self.cn0_n > 20 {
-            10.0 * (self.cn0_nbp / (self.cn0_wbp - self.cn0_nbp + 1e-30)).log10() + 30.0
-        } else { 0.0 };
+        let cn0 = self.compute_cn0();
+
+        // Bit synchronization
+        self.update_bit_sync(prompt);
+
+        // Symbol accumulation: only accumulate at the active boundary
+        let boundary = self.bit_boundary.unwrap_or(0);
+        if self.bs_ms == boundary {
+            self.symbol_acc += prompt;
+            self.symbol_cnt += 1;
+        }
+        self.bs_ms = (self.bs_ms + 1) % 20;
 
         TrackingOutput {
             prompt, early_mag: early.norm(), late_mag: late.norm(),
-            code_phase_chips: self.code_phase_chips,
-            carrier_doppler_hz: doppler,
+            code_phase_chips: self.code_phase_chips, carrier_doppler_hz: doppler,
             cn0_db_hz: cn0.max(0.0),
         }
     }
 
     pub fn take_symbol(&mut self) -> Option<Complex<f64>> {
-        if self.symbol_cnt == 0 {
+        if self.symbol_cnt >= 20 {
             let s = self.symbol_acc;
             self.symbol_acc = Complex::new(0.0, 0.0);
+            self.symbol_cnt = 0;
             Some(s)
         } else { None }
     }
@@ -157,29 +119,16 @@ impl DllPllTracking {
         let mut e = Complex::new(0.0, 0.0);
         let mut p = Complex::new(0.0, 0.0);
         let mut l = Complex::new(0.0, 0.0);
-
         for (i, sample) in samples.iter().enumerate() {
-            // Carrier wipe-off
-            let carrier = Complex::new(
-                (TAU * self.carrier_phase_rad).cos(),
-                -(TAU * self.carrier_phase_rad).sin(),
-            );
+            let carrier = Complex::new((TAU * self.carrier_phase_rad).cos(), -(TAU * self.carrier_phase_rad).sin());
             let wiped = sample * carrier;
-
-            // Code phase for this sample
             let cp = (self.code_phase_chips + i as f64 * self.code_freq_chips_per_s / fs) % CODE_LENGTH as f64;
             let ci = cp as usize % CODE_LENGTH;
-
-            // E/P/L correlations
             let ei = ((cp - spc_chips + CODE_LENGTH as f64) as usize) % CODE_LENGTH;
             e += wiped * Complex::new(self.code[ei] as f64, 0.0);
-
             p += wiped * Complex::new(self.code[ci] as f64, 0.0);
-
             let li = ((cp + spc_chips) as usize) % CODE_LENGTH;
             l += wiped * Complex::new(self.code[li] as f64, 0.0);
-
-            // Phase increment
             self.carrier_phase_rad += self.carrier_freq_hz / fs;
             self.carrier_phase_rad -= self.carrier_phase_rad.floor();
         }
@@ -187,11 +136,51 @@ impl DllPllTracking {
     }
 
     fn update_cn0(&mut self, prompt: Complex<f64>) {
-        let wbp = prompt.norm_sqr();
-        let nbp = prompt.re * prompt.re;
+        let i2 = prompt.re * prompt.re;
+        let q2 = prompt.im * prompt.im;
         let a = 0.01;
-        self.cn0_wbp = (1.0 - a) * self.cn0_wbp + a * wbp;
-        self.cn0_nbp = (1.0 - a) * self.cn0_nbp + a * nbp;
+        self.cn0_i2 = (1.0 - a) * self.cn0_i2 + a * i2;
+        self.cn0_q2 = (1.0 - a) * self.cn0_q2 + a * q2;
         self.cn0_n += 1;
+    }
+
+    fn compute_cn0(&self) -> f64 {
+        if self.cn0_n < 20 || self.cn0_q2 < 1e-30 { return 0.0; }
+        let ratio = self.cn0_i2 / self.cn0_q2;
+        // C/N₀ ≈ 10*log10(ratio - 1) + 27.0 (for T=1ms)
+        if ratio > 1.1 { 10.0 * (ratio - 1.0).log10() + 27.0 } else { 0.0 }
+    }
+
+    fn update_bit_sync(&mut self, prompt: Complex<f64>) {
+        if self.bit_boundary.is_some() { return; }
+        self.bs_buf[self.bs_idx % 40] = prompt.re;
+        self.bs_idx += 1;
+        if self.bs_idx < 20 { return; }
+        // For each possible boundary, compute bit energy = |sum of 20 consecutive I|
+        let start = self.bs_idx - 20;
+        for b in 0..20 {
+            let b0 = (start + b) % 40;
+            let b1 = (b0 + 19) % 40;
+            let sum: f64 = if b1 >= b0 {
+                self.bs_buf[b0..=b1].iter().sum()
+            } else {
+                let s1: f64 = self.bs_buf[b0..].iter().sum();
+                let s2: f64 = self.bs_buf[..=b1].iter().sum();
+                s1 + s2
+            };
+            self.bs_energy[b] += sum.abs();
+        }
+        self.bs_count += 1;
+        if self.bs_count >= 40 {
+            let mut best = 0;
+            let mut best_val = 0.0f64;
+            for (i, &e) in self.bs_energy.iter().enumerate() {
+                if e > best_val { best_val = e; best = i; }
+            }
+            self.bit_boundary = Some(best);
+            // Reset accumulator to align with new boundary
+            self.symbol_acc = Complex::new(0.0, 0.0);
+            self.symbol_cnt = 0;
+        }
     }
 }

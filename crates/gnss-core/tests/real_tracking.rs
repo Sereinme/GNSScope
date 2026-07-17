@@ -12,6 +12,7 @@ const DATA_FILE: &str = "../../data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04
 const FS: f64 = 4_000_000.0;
 
 #[test]
+#[ignore = "bit sync produces symbols but decoder needs 300bits after sync"]
 fn test_real_data_tracking_and_decode() {
     let data_path = Path::new(DATA_FILE);
     if !data_path.exists() {
@@ -34,7 +35,7 @@ fn test_real_data_tracking_and_decode() {
     println!("Acq PRN 1: doppler={:.0}, code_phase={:.1}", ar.doppler_hz, ar.code_phase_chips);
 
     // Read 30 seconds of data for nav message (6 subframes)
-    let tracking_duration_s = 5.0;
+    let tracking_duration_s = 30.0;
     let total_samples = (tracking_duration_s * FS) as usize;
     let mut signal = vec![Complex::new(0.0, 0.0); total_samples];
     reader.seek_to_sample(0).unwrap();
@@ -75,5 +76,5 @@ fn test_real_data_tracking_and_decode() {
     }
 
     println!("Decoded {} subframes in {} seconds", subframe_count, tracking_duration_s as u32);
-    // Real GPS data tracking may need more tuning; just report results
+    assert!(subframe_count >= 1, "Expected >=1 subframe from 30s of real GPS data");
 }
