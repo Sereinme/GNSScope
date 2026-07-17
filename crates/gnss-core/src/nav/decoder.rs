@@ -109,8 +109,8 @@ impl NavDecoder {
             self.subframe_idx += 1;
         }
 
-        // Check if we have a complete word (every 30 bits after preamble)
-        if self.subframe_idx > PREAMBLE_LEN && (self.subframe_idx - PREAMBLE_LEN) % WORD_BITS == 0 {
+        // Check if we have a complete word (every 30 bits, starting from preamble)
+        if self.subframe_idx > 0 && self.subframe_idx % WORD_BITS == 0 {
             let word_start = self.subframe_idx - WORD_BITS;
             let word = self.parse_word(word_start);
             self.words.push(word);

@@ -27,7 +27,7 @@ impl Default for TrackingConfig {
     fn default() -> Self {
         Self {
             fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 40.0,
+            dll_bw: 2.0, pll_bw: 15.0,
             damping: 0.707, early_late_spc: 0.5,
         }
     }
@@ -51,6 +51,7 @@ pub struct DllPllTracking {
 
     // Carrier NCO
     carrier_freq_hz: f64,
+    init_carrier_freq_hz: f64,  // clamped ±500Hz from this
     carrier_phase_rad: f64,
 
     // Code NCO
@@ -79,6 +80,7 @@ impl DllPllTracking {
             config: config.clone(),
             code: &PRN_CODES[prn],
             carrier_freq_hz: config.if_freq + doppler_hz,
+            init_carrier_freq_hz: config.if_freq + doppler_hz,
             carrier_phase_rad: 0.0,
             code_phase_chips,
             code_freq_chips_per_s: 1.023e6,
@@ -120,7 +122,8 @@ impl DllPllTracking {
 
         // Carrier frequency: IF + old_doppler + PLL correction
         // PLL correction is in rad/s, convert to Hz: rad/s / (2π) = Hz
-        self.carrier_freq_hz += pll_hz;
+        self.carrier_freq_hz = (self.carrier_freq_hz + pll_hz)
+            .clamp(self.init_carrier_freq_hz - 500.0, self.init_carrier_freq_hz + 500.0);
         let doppler = self.carrier_freq_hz - self.config.if_freq;
 
         // Symbol accumulation (20ms = 1 bit)
