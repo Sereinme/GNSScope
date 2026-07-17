@@ -203,8 +203,11 @@ impl PcpsAcquisition {
         let mean = if count > 0 { sum / count as f64 } else { 1.0 };
         let peak_to_mean = max_val / mean;
 
-        // Convert code index to chips
-        let code_phase_chips = (max_code_idx as f64 / fft_size as f64) * CODE_LENGTH as f64;
+        // Convert code index to chips.
+        // The IFFT peak gives the shift needed on the LOCAL code.
+        // The received signal's code phase = (CODE_LENGTH - detected) % CODE_LENGTH
+        let raw_phase = (max_code_idx as f64 / fft_size as f64) * CODE_LENGTH as f64;
+        let code_phase_chips = (CODE_LENGTH as f64 - raw_phase) % CODE_LENGTH as f64;
 
         AcquisitionResult {
             prn: (prn + 1) as u8,
