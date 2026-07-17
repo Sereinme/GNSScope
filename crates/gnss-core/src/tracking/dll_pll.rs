@@ -18,7 +18,7 @@ pub struct TrackingConfig {
 impl Default for TrackingConfig {
     fn default() -> Self {
         Self { fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 20.0, fll_bw: 35.0,
+            dll_bw: 4.0, pll_bw: 40.0, fll_bw: 0.0,
             damping: 0.7, early_late_spc: 0.5,
         }
     }
@@ -35,7 +35,8 @@ pub struct DllPllTracking {
     carrier_freq_hz: f64, carrier_phase_rad: f64,
     code_phase_chips: f64, code_freq_chips_per_s: f64,
     dll_filter: LoopFilter,
-    // FLL+PLL state (GNSS-SDR Tracking_FLL_PLL_filter, 2nd-order PLL + 1st-order FLL)
+    pll_filter: LoopFilter,  // used when fll_bw == 0
+    // FLL+PLL state (when fll_bw > 0)
     fll_pll_w: f64,
     prev_prompt: Option<Complex<f64>>,
     // FLL+PLL filter constants
@@ -64,6 +65,7 @@ impl DllPllTracking {
             carrier_freq_hz: config.if_freq + doppler_hz, carrier_phase_rad: 0.0,
             code_phase_chips, code_freq_chips_per_s: 1.023e6,
             dll_filter: LoopFilter::new(config.dll_bw, config.damping, 1.0, t),
+            pll_filter: LoopFilter::new(config.pll_bw, config.damping, 0.25, t),
             fll_pll_w: doppler_hz,  // initialize with acquisition Doppler
             prev_prompt: None,
             fp_w0p, fp_w0p2, fp_w0f, fp_a2,
@@ -87,22 +89,27 @@ impl DllPllTracking {
         self.code_phase_chips += self.code_freq_chips_per_s * self.t;
         self.code_phase_chips %= CODE_LENGTH as f64;
 
-        // FLL+PLL (GNSS-SDR hybrid filter)
+        // Carrier tracking: FLL+PLL or pure PLL
         let pll_disc = discriminators::pll_discriminator(prompt);
-        let fll_disc = if let Some(prev) = self.prev_prompt {
-            discriminators::fll_discriminator(prev, prompt, self.t)
-        } else { 0.0 };
-        self.prev_prompt = Some(prompt);
-
-        // GNSS-SDR 2nd-order PLL + 1st-order FLL update
-        let pll_w_new = self.fll_pll_w
-            + pll_disc * self.fp_w0p2 * self.t
-            + fll_disc * self.fp_w0f * self.t;
-        let carrier_err_hz = 0.5 * (pll_w_new + self.fll_pll_w)
-            + self.fp_a2 * self.fp_w0p * pll_disc;
-        self.fll_pll_w = pll_w_new;
-
-        self.carrier_freq_hz += carrier_err_hz * self.t;
+        if self.config.fll_bw > 0.0 {
+            let fll_disc = if let Some(prev) = self.prev_prompt {
+                discriminators::fll_discriminator(prev, prompt, self.t)
+            } else { 0.0 };
+            self.prev_prompt = Some(prompt);
+            // GNSS-SDR 2nd-order PLL + 1st-order FLL update
+            let pll_w_new = self.fll_pll_w
+                + pll_disc * self.fp_w0p2 * self.t
+                + fll_disc * self.fp_w0f * self.t;
+            let carrier_err_hz = 0.5 * (pll_w_new + self.fll_pll_w)
+                + self.fp_a2 * self.fp_w0p * pll_disc;
+            self.fll_pll_w = pll_w_new;
+            self.carrier_freq_hz += carrier_err_hz * self.t;
+        } else {
+            // Pure PLL: use existing loop filter
+            let pll_corr_rad_per_s2 = self.pll_filter.update(pll_disc);
+            let pll_corr_hz_per_s = pll_corr_rad_per_s2 / TAU;
+            self.carrier_freq_hz += pll_corr_hz_per_s * self.t;
+        }
         let doppler = self.carrier_freq_hz - self.config.if_freq;
 
         // C/N₀
