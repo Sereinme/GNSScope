@@ -155,17 +155,18 @@ impl NavDecoder {
 
         // Check for next preamble (should appear every 300 symbols)
         if self.bit_counter - self.preamble_idx >= SUBFRAME_BITS as u32 {
-            // Next preamble window: correlate and verify
             if self.subframe_idx >= SUBFRAME_BITS {
-                let valid = self.words.len() >= 2
-                    && self.words[0].parity_ok
-                    && self.words[1].parity_ok;
+                let n_ok = self.words.iter().filter(|w| w.parity_ok).count();
+                let valid = n_ok >= 2 && self.words[0].parity_ok && self.words[1].parity_ok;
+                if !valid {
+                    eprintln!("DBG: {} words, {} ok, sf={}, tow={}",
+                        self.words.len(), n_ok, self.subframe_id, self.tow);
+                }
                 self.synced = false;
                 self.subframe_idx = 0;
                 self.preamble_count += 1;
                 return valid && self.subframe_id >= 1 && self.subframe_id <= 5;
             } else {
-                // Subframe not complete — resync
                 self.synced = false;
                 self.subframe_idx = 0;
             }

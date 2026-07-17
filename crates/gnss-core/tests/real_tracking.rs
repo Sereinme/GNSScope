@@ -57,6 +57,37 @@ fn test_real_data_tracking_and_decode() {
         }
     }
 
+    // Print first 40 20ms symbols for each of best 5 boundaries
+    println!("\nFirst 30 20ms symbols (boundary 0):");
+    for i in 0..30.min(prompt_i.len() / 20) {
+        let sum: f64 = prompt_i[i*20..(i+1)*20].iter().sum();
+        print!("{:8.0} ", sum);
+        if (i+1) % 10 == 0 { println!(); }
+    }
+
+    // Check preamble correlation at each boundary
+    println!("\nPreamble corr at each boundary (first 300 bits):");
+    let preamble = [1.0, -1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0];
+    for boundary in 0..20 {
+        let mut best_corr = 0i32;
+        let mut bit_idx = boundary;
+        while bit_idx + 8 * 20 <= prompt_i.len() && bit_idx < 300 * 20 + boundary {
+            let mut syms = [0.0f64; 8];
+            for b in 0..8 {
+                syms[b] = prompt_i[bit_idx + b*20..bit_idx + (b+1)*20].iter().sum();
+            }
+            let mut corr = 0i32;
+            for b in 0..8 {
+                corr += (syms[b].signum() * preamble[b]) as i32;
+            }
+            if corr.abs() > best_corr { best_corr = corr.abs(); }
+            bit_idx += 8 * 20;
+        }
+        if best_corr >= 5 {
+            println!("  b{:2}: best_corr={}", boundary, best_corr);
+        }
+    }
+
     // 20-phase bit sync + NavDecoder
     let mut best_sf = 0u32;
     let mut best_boundary = 0;
