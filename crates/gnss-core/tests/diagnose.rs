@@ -33,10 +33,11 @@ fn diagnose_freq_tracking() {
     for ms in 0..total_ms {
         let out = trk.process(&signal[ms * spm..(ms + 1) * spm]);
         if ms % 50 == 0 {
-            println!("ms {:4}: freq={:8.1} |I|={:6.0} |Q|={:6.0} Q/I={:.3}",
+            println!("ms {:4}: freq={:8.1} |I|={:6.0} |Q|={:6.0} Q/I={:6.3} cp={:.2}",
                 ms, out.carrier_doppler_hz,
                 out.prompt.re.abs(), out.prompt.im.abs(),
-                (out.prompt.im / (out.prompt.re.abs() + 1e-30)).abs());
+                (out.prompt.im / (out.prompt.re.abs() + 1e-30)).abs(),
+                out.code_phase_chips);
         }
     }
 }

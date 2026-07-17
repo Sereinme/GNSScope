@@ -37,6 +37,8 @@ pub struct DllPllTracking {
     code_phase_chips: f64, code_freq_chips_per_s: f64,
     dll_filter: LoopFilter,
     pll_filter: LoopFilter,
+    // PLL: simple integrator (no differential term to avoid oscillation)
+    pll_int: f64,
     // Coherent integration accumulator
     coh_count: u32,
     coh_early: Complex<f64>, coh_prompt: Complex<f64>, coh_late: Complex<f64>,
@@ -70,6 +72,7 @@ impl DllPllTracking {
             coh_early: Complex::new(0.0, 0.0), coh_prompt: Complex::new(0.0, 0.0), coh_late: Complex::new(0.0, 0.0),
             prev_prompt: Complex::new(0.0, 0.0),
             fll_freq_est: doppler_hz,
+            pll_int: 0.0,
             cn0_i2: 0.0, cn0_q2: 0.0, cn0_n: 0,
             symbol_acc: Complex::new(0.0, 0.0), symbol_cnt: 0,
             cycle_ms: 0,
@@ -119,15 +122,25 @@ impl DllPllTracking {
         self.code_phase_chips %= CODE_LENGTH as f64;
 
         // --- FLL+PLL update (every 1ms, simple filters) ---
+        // PLL: pure integrator for phase lock
         let pll_disc = discriminators::pll_discriminator(p);
-        let pll_hz = pll_disc * 3.0;  // gentle phase correction
-        self.carrier_freq_hz += pll_hz * self.t;
+        let ki = 0.1;  // integrator gain
+        self.pll_int += pll_disc * ki;
+        self.carrier_freq_hz += self.pll_int * 0.001;  // gentle freq update
 
-        // FLL: direct frequency correction from discriminator (output in Hz)
+        // FLL: adaptive gain — fast pull-in, slow tracking
         if self.config.fll_bw > 0.0 {
             let fll_disc = discriminators::fll_discriminator(self.prev_prompt, p, self.t);
-            let alpha = self.config.fll_bw * self.t * 0.5;
-            self.carrier_freq_hz += fll_disc * alpha;
+            // Adaptive gain: large when freq error is large, small when near lock
+            let abs_err = fll_disc.abs();
+            let gain = if abs_err > 100.0 {
+                0.01  // fast pull-in
+            } else if abs_err > 20.0 {
+                0.003 // medium
+            } else {
+                0.0005 // fine tracking
+            };
+            self.carrier_freq_hz += fll_disc * gain;
         }
         self.prev_prompt = p;
 
