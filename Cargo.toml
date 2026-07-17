@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gnss-core",
+    "crates/gnss-data",
+    "crates/gnss-gui",
+]

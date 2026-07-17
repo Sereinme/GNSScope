@@ -1,0 +1,8 @@
+[package]
+name = "gnss-gui"
+version = "0.1.0"
+edition = "2021"
+description = "GNSScope GUI application using gpui"
+
+[dependencies]
+gnss-core = { path = "../gnss-core" }

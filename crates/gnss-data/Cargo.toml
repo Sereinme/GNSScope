@@ -1,0 +1,5 @@
+[package]
+name = "gnss-data"
+version = "0.1.0"
+edition = "2021"
+description = "Static GNSS data: PRN codes, ephemeris models, ionospheric models"

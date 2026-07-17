@@ -1,0 +1,13 @@
+[package]
+name = "gnss-core"
+version = "0.1.0"
+edition = "2021"
+description = "GNSS signal processing core: acquisition, tracking, nav decoding, PVT"
+
+[dependencies]
+gnss-data = { path = "../gnss-data" }
+rustfft = "6"
+num-complex = "0.4"
+
+[dev-dependencies]
+fastrand = "2"
