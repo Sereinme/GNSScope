@@ -27,7 +27,7 @@ pub struct TrackingConfig {
 impl Default for TrackingConfig {
     fn default() -> Self {
         Self { fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 30.0, fll_bw: 25.0,
+            dll_bw: 4.0, pll_bw: 10.0, fll_bw: 10.0,
             damping: 0.7, early_late_spc: 0.5, carrier_aiding: true,
             coherent_ms: 5,  // reduce FLL noise
         }
@@ -93,7 +93,7 @@ impl DllPllTracking {
             fll_filt: 0.0,
             last_pll_in: 0.0, last_fll_in: 0.0,
             tracking_ms: 0,
-            pull_in_time_ms: 2000,  // 2 seconds pure FLL pull-in
+            pull_in_time_ms: 4000,  // 4 seconds pure FLL pull-in
             cn0_i2: 0.0, cn0_q2: 0.0, cn0_n: 0,
             symbol_acc: Complex::new(0.0, 0.0), symbol_cnt: 0,
             cycle_ms: 0, bit_boundary: None,
@@ -158,12 +158,13 @@ impl DllPllTracking {
             let fll_in = self.fll_filt;  // use smoothed value
             self.prev_prompt = prompt;
 
-            // GNSS-SDR FLL+PLL formula with coherent integration time t_coh
-            // Note: fll_in sign negated because our fll_discriminator convention
-            // is opposite to GNSS-SDR's (atan2 gives -θ for positive rotation)
+            // FLL weight: full during pull-in, reduced after
+            let fll_weight = if self.tracking_ms < self.pull_in_time_ms { 1.0 } else { 0.1 };
+
+            // GNSS-SDR FLL+PLL formula
             let pll_w_new = self.pll_w
                 + pll_in * self.fp_w0p2 * t_coh
-                - fll_in * self.fp_w0f * t_coh;  // FLL sign: phase_diff positive → freq too high → decrease
+                - fll_in * self.fp_w0f * t_coh * fll_weight;
             let carrier_doppler = 0.5 * (pll_w_new + self.pll_w)
                 + self.fp_a2 * self.fp_w0p * pll_in;
             self.pll_w = pll_w_new;

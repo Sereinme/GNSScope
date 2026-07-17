@@ -15,7 +15,7 @@ fn diagnose_pll_fll() {
     if !data_path.exists() { eprintln!("SKIP"); return; }
     let mut reader = IqReader::open(data_path, IqFormat::Int16).unwrap();
     let spm = FS as usize / 1000;
-    let total = (1.0 * FS) as usize;
+    let total = (5.0 * FS) as usize;
     let mut signal = vec![Complex::new(0.0, 0.0); total];
     reader.read(&mut signal, total).unwrap();
 
@@ -31,7 +31,7 @@ fn diagnose_pll_fll() {
     println!("ms    pll_in(cyc) fll_in(Hz)  Doppler  |I|      |Q|");
     for ms in 0..total_ms {
         let out = trk.process(&signal[ms * spm..(ms + 1) * spm]);
-        if ms % 10 == 0 || ms < 10 {
+        if ms % 200 == 0 || ms < 10 {
             println!("{:4}  {:10.4} {:10.1} {:8.1} {:8.0} {:8.0}",
                 ms, trk.last_pll_in, trk.last_fll_in,
                 out.carrier_doppler_hz,
