@@ -11,7 +11,8 @@ const PREAMBLE_SAMPLES: [i8; PREAMBLE_LEN] = [1, -1, -1, -1, 1, -1, 1, 1];
 
 #[derive(Debug, Clone, Copy)]
 pub struct NavWord {
-    pub raw: u32,
+    pub raw: u32,       // data bits (after D30* inversion)
+    pub raw_parity: u32, // raw 30-bit word (for D29*/D30* extraction)
     pub parity_ok: bool,
 }
 
@@ -98,7 +99,7 @@ impl NavDecoder {
             let ws = self.subframe_idx - WORD_BITS;
             let raw = self.parse_word_gnss_sdr(ws);
             self.words.push(raw);
-            self.prev_word = raw.raw;
+            self.prev_word = raw.raw_parity;  // Raw bits for D29*/D30*
 
             if self.words.len() == 2 {
                 if let Some(how) = Self::parse_how(&self.words[1]) {
@@ -161,8 +162,18 @@ impl NavDecoder {
 
         let parity_ok = Self::gps_parity_check(ext_word);
 
-        // For data extraction, store in MSB-first format (D1 at bit 29)
-        NavWord { raw: gpsword, parity_ok }
+        // For data extraction: if D30* was 1, data bits were inverted
+        let d30_star_val = (self.prev_word & 1) != 0;
+        let data_word = if ext_word & (1u32 << 31) != 0 {
+            ext_word & 0x3FFFFFFF
+        } else {
+            gpsword
+        };
+
+        eprintln!("DBG word {}: raw={:#010x} d30*={} parity={}",
+            self.words.len(), gpsword, d30_star_val, parity_ok);
+
+        NavWord { raw: data_word, raw_parity: gpsword, parity_ok }
     }
 
     /// GPS parity check — exact port of GNSS-SDR gps_word_parityCheck

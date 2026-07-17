@@ -32,22 +32,39 @@ fn test_real_data_tracking_and_decode() {
     // Fine doppler search: 40 Hz step, 1.5s tracking, single Q/I sample
     let mut best_qi = f64::MAX;
     let mut best_dopp = ar.doppler_hz;
-    for offset in (-600..=0).step_by(40) {
+    for offset in (-600..=0).step_by(20) {
         let init_dopp = ar.doppler_hz + offset as f64;
         let cfg = TrackingConfig { fs: FS, ..Default::default() };
         let mut trk = DllPllTracking::new(0, init_dopp, ar.code_phase_chips, cfg);
-        for ms in 0..1500 {
+        for ms in 0..2000 {
             trk.process(&signal[ms * spm..(ms + 1) * spm]);
         }
-        let out = trk.process(&signal[1500 * spm..1501 * spm]);
+        let out = trk.process(&signal[2000 * spm..2001 * spm]);
         let qi = (out.prompt.im / (out.prompt.re.abs() + 1e-30)).abs();
         if qi < best_qi { best_qi = qi; best_dopp = init_dopp; }
     }
     println!("Best init_dopp={:.0} Q/I={:.3}", best_dopp, best_qi);
 
-    // Track 60s with best doppler
+    // Also try fine code phase search
+    let mut best_cp = ar.code_phase_chips;
+    let mut best_cp_qi = best_qi;
+    for cp_offset in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+        let cp = ar.code_phase_chips + cp_offset;
+        let cfg = TrackingConfig { fs: FS, ..Default::default() };
+        let mut trk = DllPllTracking::new(0, best_dopp, cp, cfg);
+        for ms in 0..1500 {
+            trk.process(&signal[ms * spm..(ms + 1) * spm]);
+        }
+        let out = trk.process(&signal[1500 * spm..1501 * spm]);
+        let qi = (out.prompt.im / (out.prompt.re.abs() + 1e-30)).abs();
+        println!("  cp={:.1}: Q/I={:.3}", cp, qi);
+        if qi < best_cp_qi { best_cp_qi = qi; best_cp = cp; }
+    }
+    println!("Best cp={:.1} Q/I={:.3}", best_cp, best_cp_qi);
+
+    // Track 60s with best doppler and code phase
     let cfg = TrackingConfig { fs: FS, ..Default::default() };
-    let mut trk = DllPllTracking::new(0, best_dopp, ar.code_phase_chips, cfg);
+    let mut trk = DllPllTracking::new(0, best_dopp, best_cp, cfg);
     let mut prompt_i: Vec<f64> = Vec::with_capacity(total_ms);
     for ms in 0..total_ms {
         let out = trk.process(&signal[ms * spm..(ms + 1) * spm]);

@@ -38,8 +38,11 @@ pub struct DllPllTracking {
     carrier_freq_hz: f64, carrier_phase_rad: f64,
     code_phase_chips: f64, code_freq_chips_per_s: f64,
     dll_filter: LoopFilter,
-    pll_filter: LoopFilter,  // 3rd-order bilinear transform
-    fll_filt: f64,  // EWMA-smoothed FLL
+    pll_filter: LoopFilter,
+    fll_filt: f64,
+    // Coherent accumulator
+    coh_count: u32,
+    coh_early: Complex<f64>, coh_prompt: Complex<f64>, coh_late: Complex<f64>,
     // GNSS-SDR Tracking_FLL_PLL_filter state (3rd order)
     pll_x: f64,  // initialized to 2*acq_doppler
     pll_w: f64,  // initialized to 0
@@ -78,6 +81,8 @@ impl DllPllTracking {
                 f
             },
             fll_filt: 0.0,
+            coh_count: 0,
+            coh_early: Complex::new(0.0, 0.0), coh_prompt: Complex::new(0.0, 0.0), coh_late: Complex::new(0.0, 0.0),
             // 2nd-order PLL init: old_nco = acq_doppler, old_error = 0
             pll_x: 0.0,  // old_carr_error
             pll_w: doppler_hz,  // old_carr_nco
@@ -107,38 +112,54 @@ impl DllPllTracking {
         let spc_s = spc_chips * fs / self.code_freq_chips_per_s;
         let (e, p, l) = self.correlate(samples, spc_s);
 
-        // DLL
-        let dll_err = discriminators::dll_discriminator(e, l, spc_chips);
-        let dll_out = self.dll_filter.update(-dll_err);
-        self.code_freq_chips_per_s = GPS_L1_CA_CODE_RATE - dll_out;
-        if self.config.carrier_aiding {
-            self.code_freq_chips_per_s += (self.carrier_freq_hz - self.config.if_freq)
-                * GPS_L1_CA_CODE_RATE / GPS_L1_FREQ;
+        // Coherent accumulator (N ms before loop update)
+        self.coh_early += e;
+        self.coh_prompt += p;
+        self.coh_late += l;
+        self.coh_count += 1;
+
+        let t_coh = self.t * self.config.coherent_ms as f64;
+        let do_update = self.coh_count >= self.config.coherent_ms;
+
+        if do_update {
+            let ce = self.coh_early;
+            let cp = self.coh_prompt;
+            let cl = self.coh_late;
+            self.coh_early = Complex::new(0.0, 0.0);
+            self.coh_prompt = Complex::new(0.0, 0.0);
+            self.coh_late = Complex::new(0.0, 0.0);
+            self.coh_count = 0;
+
+            // DLL (update every coherent_ms)
+            let dll_err = discriminators::dll_discriminator(ce, cl, spc_chips);
+            let dll_out = self.dll_filter.update(-dll_err);
+            self.code_freq_chips_per_s = GPS_L1_CA_CODE_RATE - dll_out;
+            if self.config.carrier_aiding {
+                self.code_freq_chips_per_s += (self.carrier_freq_hz - self.config.if_freq)
+                    * GPS_L1_CA_CODE_RATE / GPS_L1_FREQ;
+            }
+
+            // PLL: 2nd-order (tracking_2nd_PLL_filter.cc)
+            let pll_disc = discriminators::pll_discriminator(cp) / TAU;
+            self.last_pll_in = pll_disc;
+            self.prev_prompt = cp;
+
+            let k1 = self.w0f / self.w0p2;
+            let k2 = t_coh / (2.0 * 1.0 / self.w0p2);
+            let pll_nco = self.pll_w
+                + k1 * (pll_disc - self.pll_x)
+                + k2 * (pll_disc + self.pll_x);
+            self.pll_x = pll_disc;
+            self.pll_w = pll_nco;
+
+            self.carrier_freq_hz = self.config.if_freq + pll_nco;
         }
+
+        // Code NCO advances every 1ms
         self.code_phase_chips += self.code_freq_chips_per_s * self.t;
         self.code_phase_chips %= CODE_LENGTH as f64;
 
-        // PLL: 2nd-order (tracking_2nd_PLL_filter.cc — matches CTTC 2013 config)
-        // Input: atan(Q,I) / 2π (cycles); Output: Hz (direct assignment)
-        let pll_disc = discriminators::pll_discriminator(p) / TAU;
-        self.last_pll_in = pll_disc;
-        self.prev_prompt = p;
-
-        // 2nd order: tau2/tau1 * (disc - old_disc) + (disc + old_disc) * T/(2*tau1)
-        let k1 = self.w0f / self.w0p2;  // tau2/tau1 = (2*zeta/wn) / (K/wn^2) = 2*zeta*wn/K
-        let k2 = self.t / (2.0 * 1.0 / self.w0p2);  // T/(2*tau1) = T*wn^2/(2*K)
-        let pll_nco = self.pll_w  // old_nco
-            + k1 * (pll_disc - self.pll_x)  // differential term
-            + k2 * (pll_disc + self.pll_x);  // trapezoidal integration
-        self.pll_x = pll_disc;  // old_error = current
-        self.pll_w = pll_nco;   // old_nco = current
-
-        self.carrier_freq_hz = self.config.if_freq + pll_nco;
         let doppler = self.carrier_freq_hz - self.config.if_freq;
-
-        // Output 1ms prompt — bit sync and 20ms accumulation handled by NavDecoder
-        // (GNSS-SDR: tracking outputs 1ms, telemetry decoder does bit sync)
-
         self.update_cn0(p);
         self.last_prompt = p;
         let cn0 = self.compute_cn0();
