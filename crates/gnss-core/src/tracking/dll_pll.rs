@@ -21,7 +21,7 @@ pub struct TrackingConfig {
 impl Default for TrackingConfig {
     fn default() -> Self {
         Self { fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 40.0, fll_bw: 0.0,  // No FLL!
+            dll_bw: 4.0, pll_bw: 20.0, fll_bw: 0.0,  // No FLL!
             damping: 0.7, early_late_spc: 0.5, carrier_aiding: true,
             coherent_ms: 1, pll_order: 3,  // 3rd-order PLL
         }
