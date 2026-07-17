@@ -1,6 +1,10 @@
-//! DLL + PLL/FLL tracking for GPS L1 C/A with variable coherent integration.
+//! DLL + PLL/FLL tracking. GNSS-SDR compatible algorithm.
 //!
-//! Default: 10ms coherent integration (SNR gain ~10dB over 1ms).
+//! Key design (from GNSS-SDR run_dll_pll + update_tracking_vars):
+//! - PLL input: atan(Q/I) / 2π (cycles), FLL input: fll_diff_atan / 2π (Hz)
+//! - Carrier Doppler: DIRECT ASSIGNMENT from filter output (not accumulation)
+//! - Code freq: nominal - DLL filter output + carrier aiding
+//! - Filter initialized with acquisition Doppler
 
 use super::discriminators;
 use super::loop_filter::LoopFilter;
@@ -8,19 +12,21 @@ use gnss_data::gps_l1ca::{CODE_LENGTH, PRN_CODES};
 use num_complex::Complex;
 use std::f64::consts::TAU;
 
+const GPS_L1_FREQ: f64 = 1575.42e6;
+const GPS_L1_CA_CODE_RATE: f64 = 1.023e6;
+
 #[derive(Debug, Clone)]
 pub struct TrackingConfig {
     pub fs: f64, pub if_freq: f64,
     pub dll_bw: f64, pub pll_bw: f64, pub fll_bw: f64,
     pub damping: f64, pub early_late_spc: f64,
-    /// Coherent integration time in ms (1, 2, 4, 10, 20)
-    pub coherent_ms: u32,
+    pub carrier_aiding: bool,
 }
 impl Default for TrackingConfig {
     fn default() -> Self {
         Self { fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 40.0, fll_bw: 5.0,
-            damping: 0.7, early_late_spc: 0.5, coherent_ms: 1,
+            dll_bw: 4.0, pll_bw: 20.0, fll_bw: 35.0,
+            damping: 0.7, early_late_spc: 0.5, carrier_aiding: true,
         }
     }
 }
@@ -36,25 +42,16 @@ pub struct DllPllTracking {
     carrier_freq_hz: f64, carrier_phase_rad: f64,
     code_phase_chips: f64, code_freq_chips_per_s: f64,
     dll_filter: LoopFilter,
-    pll_filter: LoopFilter,
-    // PLL: simple integrator (no differential term to avoid oscillation)
-    pll_int: f64,
-    // Coherent integration accumulator
-    coh_count: u32,
-    coh_early: Complex<f64>, coh_prompt: Complex<f64>, coh_late: Complex<f64>,
-    // FLL: previous prompt for freq discriminator + EWMA state
+    // GNSS-SDR FLL+PLL filter state
+    pll_w: f64,           // frequency (initialized = acq Doppler)
+    fp_w0p2: f64, fp_w0f: f64, fp_w0p: f64, fp_a2: f64,
     prev_prompt: Complex<f64>,
-    fll_freq_est: f64,  // EWMA of FLL discriminator
+    prev_pll_in: f64,     // previous PLL input (cycles)
     // C/N₀
     cn0_i2: f64, cn0_q2: f64, cn0_n: u32,
     // Symbol accumulation (aligned to bit boundary)
     symbol_acc: Complex<f64>, symbol_cnt: u32,
-    // Bit sync state
-    /// Position in 20ms cycle (0-19)
-    cycle_ms: usize,
-    /// Detected bit boundary; None = not synced yet
-    bit_boundary: Option<usize>,
-    /// Histogram: recent prompt I values
+    cycle_ms: usize, bit_boundary: Option<usize>,
     bs_buf: [f64; 40], bs_idx: usize,
     bs_energy: [f64; 20], bs_count: u32,
 }
@@ -62,21 +59,23 @@ pub struct DllPllTracking {
 impl DllPllTracking {
     pub fn new(prn: usize, doppler_hz: f64, code_phase_chips: f64, config: TrackingConfig) -> Self {
         let t = 0.001;
+        // GNSS-SDR filter constants
+        let w0p = config.pll_bw / 0.53;
+        let w0p2 = w0p * w0p;
+        let w0f = config.fll_bw / 0.25;
+        let a2 = 1.414;
         Self {
             config: config.clone(), code: &PRN_CODES[prn], t,
             carrier_freq_hz: config.if_freq + doppler_hz, carrier_phase_rad: 0.0,
-            code_phase_chips, code_freq_chips_per_s: 1.023e6,
-            dll_filter: LoopFilter::new(config.dll_bw, config.damping, 1.0, t * config.coherent_ms as f64),
-            pll_filter: LoopFilter::new(config.pll_bw, config.damping, 0.25, t * config.coherent_ms as f64),
-            coh_count: 0,
-            coh_early: Complex::new(0.0, 0.0), coh_prompt: Complex::new(0.0, 0.0), coh_late: Complex::new(0.0, 0.0),
+            code_phase_chips, code_freq_chips_per_s: GPS_L1_CA_CODE_RATE,
+            dll_filter: LoopFilter::new(config.dll_bw, config.damping, 1.0, t),
+            pll_w: doppler_hz,  // initialized to acquisition Doppler!
+            fp_w0p2: w0p2, fp_w0f: w0f, fp_w0p: w0p, fp_a2: a2,
             prev_prompt: Complex::new(0.0, 0.0),
-            fll_freq_est: doppler_hz,
-            pll_int: 0.0,
+            prev_pll_in: 0.0,
             cn0_i2: 0.0, cn0_q2: 0.0, cn0_n: 0,
             symbol_acc: Complex::new(0.0, 0.0), symbol_cnt: 0,
-            cycle_ms: 0,
-            bit_boundary: None,
+            cycle_ms: 0, bit_boundary: None,
             bs_buf: [0.0; 40], bs_idx: 0,
             bs_energy: [0.0; 20], bs_count: 0,
         }
@@ -86,71 +85,53 @@ impl DllPllTracking {
         let fs = self.config.fs;
         let spc_chips = self.config.early_late_spc;
         let spc_s = spc_chips * fs / self.code_freq_chips_per_s;
-
-        // Correlate this 1ms block
         let (e, p, l) = self.correlate(samples, spc_s);
-        self.coh_early += e;
-        self.coh_prompt += p;
-        self.coh_late += l;
-        self.coh_count += 1;
 
-        // Symbol accumulation — aligned to bit boundary
+        // --- DLL (per GNSS-SDR: code_freq = rate - filter_output + carrier_aiding) ---
+        let dll_err = discriminators::dll_discriminator(e, l, spc_chips);
+        let dll_out = self.dll_filter.update(-dll_err);  // chips/s
+        self.code_freq_chips_per_s = GPS_L1_CA_CODE_RATE - dll_out;
+        if self.config.carrier_aiding {
+            // Carrier aiding: scale carrier Doppler to code Doppler
+            self.code_freq_chips_per_s += (self.carrier_freq_hz - self.config.if_freq)
+                * GPS_L1_CA_CODE_RATE / GPS_L1_FREQ;
+        }
+        self.code_phase_chips += self.code_freq_chips_per_s * self.t;
+        self.code_phase_chips %= CODE_LENGTH as f64;
+
+        // --- PLL+FLL (GNSS-SDR: PLL input in cycles, FLL in Hz, output = absolute Doppler) ---
+        let pll_in = discriminators::pll_discriminator(p) / TAU; // radians → cycles
+        let fll_in = if self.config.fll_bw > 0.0 {
+            discriminators::fll_discriminator(self.prev_prompt, p, self.t) // already in Hz!
+        } else { 0.0 };
+        self.prev_prompt = p;
+
+        // GNSS-SDR 2nd-order PLL + 1st-order FLL formula
+        let pll_w_new = self.pll_w
+            + pll_in * self.fp_w0p2 * self.t
+            + fll_in * self.fp_w0f * self.t;
+        let carrier_doppler = 0.5 * (pll_w_new + self.pll_w)
+            + self.fp_a2 * self.fp_w0p * pll_in;
+        self.pll_w = pll_w_new;
+        self.prev_pll_in = pll_in;
+
+        // DIRECT ASSIGNMENT (not accumulation!)
+        self.carrier_freq_hz = self.config.if_freq + carrier_doppler;
+        let doppler = self.carrier_freq_hz - self.config.if_freq;
+
+        // --- Symbol accumulation (aligned to bit boundary) ---
         self.update_bit_sync(p);
         self.cycle_ms = (self.cycle_ms + 1) % 20;
-
-        // Determine active boundary
         let boundary = self.bit_boundary.unwrap_or(0);
-
-        // At boundary start: reset accumulator for new 20ms window
         if self.cycle_ms == boundary && self.symbol_cnt > 0 && self.symbol_cnt < 20 {
-            // Incomplete window from old boundary — discard
             self.symbol_acc = Complex::new(0.0, 0.0);
             self.symbol_cnt = 0;
         }
-
-        // Accumulate at active boundary
         if self.cycle_ms == boundary || self.symbol_cnt > 0 {
             self.symbol_acc += p;
             self.symbol_cnt += 1;
         }
 
-        // --- DLL update (every 1ms) ---
-        let dll_err = discriminators::dll_discriminator(e, l, spc_chips);
-        let dll_corr = self.dll_filter.update(-dll_err);
-        self.code_freq_chips_per_s = 1.023e6 + dll_corr;
-        self.code_phase_chips += self.code_freq_chips_per_s * self.t;
-        self.code_phase_chips %= CODE_LENGTH as f64;
-
-        // --- FLL+PLL update (every 1ms, simple filters) ---
-        // PLL: pure integrator for phase lock
-        let pll_disc = discriminators::pll_discriminator(p);
-        let ki = 0.01;  // integrator gain (reduced for stability)
-        self.pll_int += pll_disc * ki;
-        self.carrier_freq_hz += self.pll_int * 0.001;  // gentle freq update
-
-        // FLL: adaptive gain — fast pull-in, slow tracking
-        if self.config.fll_bw > 0.0 {
-            let fll_disc = discriminators::fll_discriminator(self.prev_prompt, p, self.t);
-            // Adaptive gain: large when freq error is large, small when near lock
-            let abs_err = fll_disc.abs();
-            let gain = if abs_err > 100.0 {
-                0.001  // same as medium
-            } else if abs_err > 20.0 {
-                0.001 // same as fine
-            } else {
-                0.001 // fine tracking
-            };
-            self.carrier_freq_hz += fll_disc * gain;
-        }
-        self.prev_prompt = p;
-
-        // --- Coherent integration accumulator (for longer integration support) ---
-        self.coh_early += e;
-        self.coh_prompt += p;
-        self.coh_late += l;
-        self.coh_count += 1;
-
-        let doppler = self.carrier_freq_hz - self.config.if_freq;
         self.update_cn0(p);
         let cn0 = self.compute_cn0();
 
@@ -196,13 +177,6 @@ impl DllPllTracking {
         (e, p, l)
     }
 
-    fn update_cn0(&mut self, prompt: Complex<f64>) {
-        let a = 0.01;
-        self.cn0_i2 = (1.0 - a) * self.cn0_i2 + a * prompt.re * prompt.re;
-        self.cn0_q2 = (1.0 - a) * self.cn0_q2 + a * prompt.im * prompt.im;
-        self.cn0_n += 1;
-    }
-
     fn update_bit_sync(&mut self, prompt: Complex<f64>) {
         if self.bit_boundary.is_some() { return; }
         let i = prompt.re;
@@ -228,6 +202,13 @@ impl DllPllTracking {
             }
             self.bit_boundary = Some(best);
         }
+    }
+
+    fn update_cn0(&mut self, prompt: Complex<f64>) {
+        let a = 0.01;
+        self.cn0_i2 = (1.0 - a) * self.cn0_i2 + a * prompt.re * prompt.re;
+        self.cn0_q2 = (1.0 - a) * self.cn0_q2 + a * prompt.im * prompt.im;
+        self.cn0_n += 1;
     }
 
     fn compute_cn0(&self) -> f64 {

@@ -24,7 +24,7 @@ fn diagnose_dll() {
     let ar = acq.acquire(0, &signal[..spm]);
     assert!(ar.detected);
 
-    let trk_cfg = TrackingConfig { fs: FS, coherent_ms: 1, ..Default::default() };
+    let trk_cfg = TrackingConfig { fs: FS, ..Default::default() };
     let mut trk = DllPllTracking::new(0, ar.doppler_hz, ar.code_phase_chips, trk_cfg);
 
     let total_ms = total / spm;
