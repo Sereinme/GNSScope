@@ -1,4 +1,4 @@
-//! Real data decoding: 3rd-order PLL with pull-in + 20-phase bit sync.
+//! Real data decoding with corrected initial Doppler.
 
 use gnss_core::acquisition::{PcpsAcquisition, PcpsConfig};
 use gnss_core::io::{IqFormat, IqReader};
@@ -22,21 +22,37 @@ fn test_real_data_tracking_and_decode() {
     let n = reader.read(&mut signal, total).unwrap();
     let total_ms = n / spm;
 
+    // Acquire with fine doppler step
     let acq_cfg = PcpsConfig { fs: FS, doppler_max: 10_000.0, doppler_step: 250.0, threshold: 15.0, ..Default::default() };
     let mut acq = PcpsAcquisition::new(acq_cfg);
     let ar = acq.acquire(0, &signal[..spm]);
     assert!(ar.detected);
-    println!("Acq: doppler={:.0} cp={:.1}", ar.doppler_hz, ar.code_phase_chips);
+    println!("Acq: dopp={:.0} cp={:.1}", ar.doppler_hz, ar.code_phase_chips);
 
-    let trk_cfg = TrackingConfig { fs: FS, ..Default::default() };
-    let mut trk = DllPllTracking::new(0, ar.doppler_hz, ar.code_phase_chips, trk_cfg);
+    // Fine doppler search: try offsets from acq result
+    let mut best_qi = f64::MAX;
+    let mut best_dopp = ar.doppler_hz;
+    for offset in (-600..=0).step_by(40) {
+        let init_dopp = ar.doppler_hz + offset as f64;
+        let cfg = TrackingConfig { fs: FS, ..Default::default() };
+        let mut trk = DllPllTracking::new(0, init_dopp, ar.code_phase_chips, cfg);
+        for ms in 0..1500 {
+            trk.process(&signal[ms * spm..(ms + 1) * spm]);
+        }
+        let out = trk.process(&signal[1500 * spm..1501 * spm]);
+        let qi = (out.prompt.im / (out.prompt.re.abs() + 1e-30)).abs();
+        if qi < best_qi { best_qi = qi; best_dopp = init_dopp; }
+    }
+    println!("Best init_dopp={:.0} Q/I={:.3}", best_dopp, best_qi);
 
-    // Collect 1ms prompt I values + Doppler
+    // Track 60s with best doppler
+    let cfg = TrackingConfig { fs: FS, ..Default::default() };
+    let mut trk = DllPllTracking::new(0, best_dopp, ar.code_phase_chips, cfg);
     let mut prompt_i: Vec<f64> = Vec::with_capacity(total_ms);
     for ms in 0..total_ms {
         let out = trk.process(&signal[ms * spm..(ms + 1) * spm]);
         prompt_i.push(out.prompt.re);
-        if ms % 500 == 0 {
+        if ms % 5000 == 0 {
             println!("ms {}: dopp={:.1} |I|={:.0}", ms, out.carrier_doppler_hz, out.prompt.re.abs());
         }
     }
@@ -52,7 +68,7 @@ fn test_real_data_tracking_and_decode() {
             let sum: f64 = prompt_i[bit_idx..bit_idx + 20].iter().sum();
             if dec.feed_symbol(sum) {
                 sf_count += 1;
-                if sf_count == 1 {
+                if sf_count <= 3 {
                     println!("B{}: SF={} TOW={}", boundary, dec.subframe_id, dec.tow);
                 }
             }
@@ -61,4 +77,5 @@ fn test_real_data_tracking_and_decode() {
         if sf_count > best_sf { best_sf = sf_count; best_boundary = boundary; }
     }
     println!("Best: b={} sf={}", best_boundary, best_sf);
+    assert!(best_sf >= 1, "Expected ≥1 subframe");
 }

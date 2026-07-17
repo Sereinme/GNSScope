@@ -21,7 +21,7 @@ pub struct TrackingConfig {
 impl Default for TrackingConfig {
     fn default() -> Self {
         Self { fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 20.0, fll_bw: 0.0,
+            dll_bw: 4.0, pll_bw: 40.0, fll_bw: 10.0,
             damping: 0.7, early_late_spc: 0.5, carrier_aiding: true,
             coherent_ms: 1, pll_order: 3,
         }
@@ -38,6 +38,8 @@ pub struct DllPllTracking {
     carrier_freq_hz: f64, carrier_phase_rad: f64,
     code_phase_chips: f64, code_freq_chips_per_s: f64,
     dll_filter: LoopFilter,
+    pll_filter: LoopFilter,  // 3rd-order bilinear transform
+    fll_filt: f64,  // EWMA-smoothed FLL
     // GNSS-SDR Tracking_FLL_PLL_filter state (3rd order)
     pll_x: f64,  // initialized to 2*acq_doppler
     pll_w: f64,  // initialized to 0
@@ -70,9 +72,15 @@ impl DllPllTracking {
             carrier_freq_hz: config.if_freq + doppler_hz, carrier_phase_rad: 0.0,
             code_phase_chips, code_freq_chips_per_s: GPS_L1_CA_CODE_RATE,
             dll_filter: LoopFilter::new(config.dll_bw, config.damping, 1.0, t),
-            // GNSS-SDR initialize: d_pll_x = 2*acq_doppler, d_pll_w = 0
-            pll_x: 2.0 * doppler_hz,
-            pll_w: 0.0,
+            pll_filter: {
+                let mut f = LoopFilter::new_order(config.pll_bw, t, config.pll_order);
+                f.initialize(doppler_hz);
+                f
+            },
+            fll_filt: 0.0,
+            // 2nd-order PLL init: old_nco = acq_doppler, old_error = 0
+            pll_x: 0.0,  // old_carr_error
+            pll_w: doppler_hz,  // old_carr_nco
             w0p, w0p2, w0p3,
             b3: 2.400, a3: 1.100, a2: 1.414,
             w0f: config.fll_bw / 0.53, w0f2: (config.fll_bw / 0.53).powi(2),
@@ -110,31 +118,22 @@ impl DllPllTracking {
         self.code_phase_chips += self.code_freq_chips_per_s * self.t;
         self.code_phase_chips %= CODE_LENGTH as f64;
 
-        // PLL: GNSS-SDR Tracking_FLL_PLL_filter (3rd order)
-        // Use wide bandwidth during pull-in, narrow after
-        self.tracking_ms += 1;
-        let in_pull_in = self.tracking_ms < self.pull_in_time_ms;
-        let (w0p, w0p2, w0p3) = if in_pull_in {
-            (self.w0p_pull_in, self.w0p2_pull_in, self.w0p3_pull_in)
-        } else {
-            (self.w0p, self.w0p2, self.w0p3)
-        };
-
+        // PLL: 2nd-order (tracking_2nd_PLL_filter.cc — matches CTTC 2013 config)
+        // Input: atan(Q,I) / 2π (cycles); Output: Hz (direct assignment)
         let pll_disc = discriminators::pll_discriminator(p) / TAU;
         self.last_pll_in = pll_disc;
-        let fll_disc = if self.config.fll_bw > 0.0 {
-            discriminators::fll_discriminator(self.prev_prompt, p, self.t) / TAU
-        } else { 0.0 };
         self.prev_prompt = p;
-        self.last_fll_in = fll_disc;
 
-        // 3rd order update (exact GNSS-SDR Tracking_FLL_PLL_filter formula)
-        self.pll_w += self.t * (w0p3 * pll_disc + self.w0f2 * fll_disc);
-        self.pll_x += self.t * (0.5 * self.pll_w + self.a2 * self.w0f * fll_disc + self.a3 * w0p2 * pll_disc);
-        let carrier_doppler = 0.5 * self.pll_x + self.b3 * w0p * pll_disc;
+        // 2nd order: tau2/tau1 * (disc - old_disc) + (disc + old_disc) * T/(2*tau1)
+        let k1 = self.w0f / self.w0p2;  // tau2/tau1 = (2*zeta/wn) / (K/wn^2) = 2*zeta*wn/K
+        let k2 = self.t / (2.0 * 1.0 / self.w0p2);  // T/(2*tau1) = T*wn^2/(2*K)
+        let pll_nco = self.pll_w  // old_nco
+            + k1 * (pll_disc - self.pll_x)  // differential term
+            + k2 * (pll_disc + self.pll_x);  // trapezoidal integration
+        self.pll_x = pll_disc;  // old_error = current
+        self.pll_w = pll_nco;   // old_nco = current
 
-        // Direct assignment
-        self.carrier_freq_hz = self.config.if_freq + carrier_doppler;
+        self.carrier_freq_hz = self.config.if_freq + pll_nco;
         let doppler = self.carrier_freq_hz - self.config.if_freq;
 
         // Output 1ms prompt — bit sync and 20ms accumulation handled by NavDecoder
