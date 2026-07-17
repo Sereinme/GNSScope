@@ -21,13 +21,12 @@ pub struct TrackingConfig {
 impl Default for TrackingConfig {
     fn default() -> Self {
         Self { fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 50.0, fll_bw: 10.0,
+            dll_bw: 4.0, pll_bw: 20.0, fll_bw: 0.0,
             damping: 0.7, early_late_spc: 0.5, carrier_aiding: true,
             coherent_ms: 1, pll_order: 3,
         }
     }
 }
-
 #[derive(Debug, Clone)]
 pub struct TrackingOutput {
     pub prompt: Complex<f64>, pub early_mag: f64, pub late_mag: f64,

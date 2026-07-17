@@ -31,18 +31,22 @@ pub fn pll_discriminator(prompt: Complex<f64>) -> f64 {
     f64::atan(prompt.im / prompt.re)
 }
 
-/// FLL differential arctan discriminator with phase unwrapping.
+/// FLL differential arctan discriminator — exact GNSS-SDR port.
 ///
-/// Returns frequency error in Hz. GNSS-SDR: `fll_diff_atan`
-/// Uses phase unwrap to handle ±π discontinuities.
+/// Returns rad/s. GNSS-SDR: `fll_diff_atan(prompt_s1, prompt_s2, 0, t)`
+/// Uses atan(Q/I) (two-quadrant) and phase_unwrap at ±π/2 (Costas).
 pub fn fll_discriminator(prompt_prev: Complex<f64>, prompt_curr: Complex<f64>, t: f64) -> f64 {
-    let phase_prev = f64::atan2(prompt_prev.im, prompt_prev.re);
-    let phase_curr = f64::atan2(prompt_curr.im, prompt_curr.re);
+    let phase_prev = if prompt_prev.re.abs() < 1e-30 { 0.0 } else {
+        f64::atan(prompt_prev.im / prompt_prev.re)
+    };
+    let phase_curr = if prompt_curr.re.abs() < 1e-30 { 0.0 } else {
+        f64::atan(prompt_curr.im / prompt_curr.re)
+    };
     let mut diff = phase_curr - phase_prev;
-    // Phase unwrap: keep difference in [-π, π] (use while for large diffs)
-    while diff > std::f64::consts::PI { diff -= std::f64::consts::TAU; }
-    while diff < -std::f64::consts::PI { diff += std::f64::consts::TAU; }
-    diff / (std::f64::consts::TAU * t)
+    // GNSS-SDR phase_unwrap: only ±π/2 (Costas loop ambiguity)
+    if diff >= std::f64::consts::FRAC_PI_2 { diff -= std::f64::consts::PI; }
+    if diff <= -std::f64::consts::FRAC_PI_2 { diff += std::f64::consts::PI; }
+    diff / t  // rad/s
 }
 
 #[cfg(test)]
