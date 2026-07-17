@@ -27,9 +27,9 @@ pub struct TrackingConfig {
 impl Default for TrackingConfig {
     fn default() -> Self {
         Self { fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 30.0, fll_bw: 5.0,
+            dll_bw: 4.0, pll_bw: 30.0, fll_bw: 25.0,
             damping: 0.7, early_late_spc: 0.5, carrier_aiding: true,
-            coherent_ms: 1,
+            coherent_ms: 5,  // reduce FLL noise
         }
     }
 }
@@ -56,6 +56,9 @@ pub struct DllPllTracking {
     fll_filt: f64,        // EWMA-smoothed FLL discriminator
     pub last_pll_in: f64,  // last PLL discriminator (cycles)
     pub last_fll_in: f64,  // last FLL discriminator (Hz)
+    /// Pull-in: pure FLL for first N seconds, then FLL+PLL
+    tracking_ms: u64,
+    pull_in_time_ms: u64,
     // C/N₀
     cn0_i2: f64, cn0_q2: f64, cn0_n: u32,
     // Symbol accumulation (aligned to bit boundary)
@@ -89,6 +92,8 @@ impl DllPllTracking {
             prev_pll_in: 0.0,
             fll_filt: 0.0,
             last_pll_in: 0.0, last_fll_in: 0.0,
+            tracking_ms: 0,
+            pull_in_time_ms: 2000,  // 2 seconds pure FLL pull-in
             cn0_i2: 0.0, cn0_q2: 0.0, cn0_n: 0,
             symbol_acc: Complex::new(0.0, 0.0), symbol_cnt: 0,
             cycle_ms: 0, bit_boundary: None,
@@ -128,6 +133,7 @@ impl DllPllTracking {
             let early = self.coh_early;
             let prompt = self.coh_prompt;
             let late = self.coh_late;
+            self.tracking_ms += self.config.coherent_ms as u64;
 
             // DLL
             let dll_err = discriminators::dll_discriminator(early, late, spc_chips);
@@ -138,9 +144,10 @@ impl DllPllTracking {
                     * GPS_L1_CA_CODE_RATE / GPS_L1_FREQ;
             }
 
-            // PLL (input in cycles)
-            let pll_in = discriminators::pll_discriminator(prompt) / TAU;
-            self.last_pll_in = pll_in;
+            // PLL (input in cycles) — disabled during pull-in (pure FLL)
+            let pll_in_raw = discriminators::pll_discriminator(prompt) / TAU;
+            self.last_pll_in = pll_in_raw;
+            let pll_in = if self.tracking_ms < self.pull_in_time_ms { 0.0 } else { pll_in_raw };
             // FLL (input in Hz), with EWMA smoothing for noise reduction
             let fll_raw = if self.config.fll_bw > 0.0 {
                 discriminators::fll_discriminator(self.prev_prompt, prompt, t_coh)

@@ -39,9 +39,9 @@ pub fn fll_discriminator(prompt_prev: Complex<f64>, prompt_curr: Complex<f64>, t
     let phase_prev = f64::atan2(prompt_prev.im, prompt_prev.re);
     let phase_curr = f64::atan2(prompt_curr.im, prompt_curr.re);
     let mut diff = phase_curr - phase_prev;
-    // Phase unwrap: keep difference in [-π, π]
-    if diff > std::f64::consts::PI { diff -= std::f64::consts::TAU; }
-    if diff < -std::f64::consts::PI { diff += std::f64::consts::TAU; }
+    // Phase unwrap: keep difference in [-π, π] (use while for large diffs)
+    while diff > std::f64::consts::PI { diff -= std::f64::consts::TAU; }
+    while diff < -std::f64::consts::PI { diff += std::f64::consts::TAU; }
     diff / (std::f64::consts::TAU * t)
 }
 
