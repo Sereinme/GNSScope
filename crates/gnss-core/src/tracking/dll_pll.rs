@@ -83,13 +83,9 @@ impl DllPllTracking {
         // Bit synchronization
         self.update_bit_sync(prompt);
 
-        // Symbol accumulation: only accumulate at the active boundary
-        let boundary = self.bit_boundary.unwrap_or(0);
-        if self.bs_ms == boundary {
-            self.symbol_acc += prompt;
-            self.symbol_cnt += 1;
-        }
-        self.bs_ms = (self.bs_ms + 1) % 20;
+        // Symbol accumulation
+        self.symbol_acc += prompt;
+        self.symbol_cnt += 1;
 
         TrackingOutput {
             prompt, early_mag: early.norm(), late_mag: late.norm(),
@@ -178,9 +174,7 @@ impl DllPllTracking {
                 if e > best_val { best_val = e; best = i; }
             }
             self.bit_boundary = Some(best);
-            // Reset accumulator to align with new boundary
-            self.symbol_acc = Complex::new(0.0, 0.0);
-            self.symbol_cnt = 0;
+            // Switch boundary going forward (don't reset — first symbol may be mixed)
         }
     }
 }

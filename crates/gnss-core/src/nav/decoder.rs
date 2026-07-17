@@ -7,6 +7,8 @@
 
 /// GPS L1 C/A navigation message preamble: 10001011 (binary)
 pub const PREAMBLE: u8 = 0x8B;
+/// Inverted preamble (Costas PLL 180° ambiguity): 01110100
+pub const PREAMBLE_INV: u8 = 0x74;
 /// Preamble length in bits
 pub const PREAMBLE_LEN: usize = 8;
 /// Bits per word
@@ -85,7 +87,7 @@ impl NavDecoder {
 
         if !self.synced {
             // Search for preamble
-            if self.bit_buf == PREAMBLE as u32 {
+            if self.bit_buf == PREAMBLE as u32 || self.bit_buf == PREAMBLE_INV as u32 {
                 self.synced = true;
                 self.subframe_idx = 0;
                 // Write the preamble bits
