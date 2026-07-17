@@ -17,7 +17,7 @@ fn test_real_data_tracking_and_decode() {
 
     let mut reader = IqReader::open(data_path, IqFormat::Int16).unwrap();
     let spm = FS as usize / 1000;
-    let total = (10.0 * FS) as usize;  // 10 seconds for quick test
+    let total = (30.0 * FS) as usize;  // 30 seconds
     let mut signal = vec![Complex::new(0.0, 0.0); total];
     let n = reader.read(&mut signal, total).unwrap();
 
@@ -42,7 +42,7 @@ fn test_real_data_tracking_and_decode() {
 
         if let Some(sym) = trk.take_symbol() {
             sym_total += 1;
-            if sym_total <= 12 {
+            if sym_total <= 12 || (sym_total >= 200 && sym_total <= 212) {
                 println!("sym {}: I={:.0}",
                     sym_total-1, sym.re);
             }
