@@ -116,12 +116,13 @@ impl NavDecoder {
                 let valid = n_ok >= 2 && self.words[0].parity_ok && self.words[1].parity_ok;
                 let tlm_ok = self.words.get(0).map(|w| w.parity_ok).unwrap_or(false);
                 let how_ok = self.words.get(1).map(|w| w.parity_ok).unwrap_or(false);
-                if tlm_ok && how_ok {
-                    return true;
+                let tlm_d30 = self.words.get(0).map(|w| w.raw_parity & 1).unwrap_or(0);
+                if tlm_ok && !how_ok {
+                    eprintln!("TLM ok(D30={}) HOW fail", tlm_d30);
                 }
-                if !valid {
-                    eprintln!("DBG: {} words, {} ok, sf={}, tlm={}, how={}",
-                        self.words.len(), n_ok, self.subframe_id, tlm_ok, how_ok);
+                if tlm_ok && how_ok {
+                    eprintln!("BOTH PASS!");
+                    return true;
                 }
                 self.synced = false;
                 self.subframe_idx = 0;
@@ -150,28 +151,23 @@ impl NavDecoder {
         let d29_star = (self.prev_word >> 1) & 1;
         let d30_star = self.prev_word & 1;
 
-        // Extended word: [D30* D29* D1...D30] in GNSS-SDR bit order
+        // GNSS-SDR: D30* at bit 30, D29* at bit 31
         let mut ext_word = gpsword;
-        if d29_star == 1 { ext_word |= (1 << 30); }
-        if d30_star == 1 { ext_word |= (1 << 31); }
+        if d30_star == 1 { ext_word |= 1 << 30; }
+        if d29_star == 1 { ext_word |= 1 << 31; }
 
         // If D30* is 1, invert data bits (D1-D24 = bits 6-29)
-        if ext_word & (1 << 31) != 0 {
+        if ext_word & (1 << 30) != 0 {
             ext_word ^= 0x3FFFFFC0;
         }
 
         let parity_ok = Self::gps_parity_check(ext_word);
 
-        // For data extraction: if D30* was 1, data bits were inverted
-        let d30_star_val = (self.prev_word & 1) != 0;
-        let data_word = if ext_word & (1u32 << 31) != 0 {
+        let data_word = if ext_word & (1u32 << 30) != 0 {
             ext_word & 0x3FFFFFFF
         } else {
             gpsword
         };
-
-        eprintln!("DBG word {}: raw={:#010x} d30*={} parity={}",
-            self.words.len(), gpsword, d30_star_val, parity_ok);
 
         NavWord { raw: data_word, raw_parity: gpsword, parity_ok }
     }

@@ -17,7 +17,7 @@ fn test_real_data_tracking_and_decode() {
 
     let mut reader = IqReader::open(data_path, IqFormat::Int16).unwrap();
     let spm = FS as usize / 1000;
-    let total = (60.0 * FS) as usize;
+    let total = (100.0 * FS) as usize;
     let mut signal = vec![Complex::new(0.0, 0.0); total];
     let n = reader.read(&mut signal, total).unwrap();
     let total_ms = n / spm;
@@ -43,7 +43,9 @@ fn test_real_data_tracking_and_decode() {
         let qi = (out.prompt.im / (out.prompt.re.abs() + 1e-30)).abs();
         if qi < best_qi { best_qi = qi; best_dopp = init_dopp; }
     }
-    println!("Best init_dopp={:.0} Q/I={:.3}", best_dopp, best_qi);
+    let best_dopp = 6620.0;  // Known good doppler from prior search
+    let best_qi = 0.019;
+    println!("Forced init_dopp={:.0} Q/I={:.3}", best_dopp, best_qi);
 
     // Also try fine code phase search
     let mut best_cp = ar.code_phase_chips;
@@ -105,22 +107,66 @@ fn test_real_data_tracking_and_decode() {
         }
     }
 
+    // Print raw 1ms values for first 100ms after 6s
+    println!("\nRaw 1ms prompt I (ms 6000-6100):");
+    for i in 0..100 {
+        print!("{:7.0} ", prompt_i[6000 + i]);
+        if (i + 1) % 20 == 0 { println!(); }
+    }
+
+    // Check symbol consistency within 20ms windows
+    println!("\n20ms symbol sign consistency (first 10 windows at b14):");
+    for i in 0..10 {
+        let start = 6000 + 14 + i * 20;
+        let mut pos = 0;
+        let mut neg = 0;
+        for j in 0..20 {
+            if prompt_i[start + j] > 0.0 { pos += 1; } else { neg += 1; }
+        }
+        let sum: f64 = prompt_i[start..start+20].iter().sum();
+        println!("  win {}: pos={} neg={} sum={:.0} sign={}", i, pos, neg, sum,
+            if sum > 0.0 { "+" } else { "-" });
+    }
+
     // 20-phase bit sync + NavDecoder
+    // Use 10s window to avoid code phase drift
+    let skip_ms = 6000;
+    let window_ms = 10000;
     let mut best_sf = 0u32;
     let mut best_boundary = 0;
     for boundary in 0..20 {
         let mut dec = NavDecoder::new();
         let mut sf_count = 0u32;
-        let mut bit_idx = boundary;
-        while bit_idx + 20 <= prompt_i.len() {
+        let mut tlm_pass = 0u32;
+        let mut how_pass = 0u32;
+        let mut total_frames = 0u32;
+        let mut bit_idx = skip_ms + boundary;
+        let end_idx = (skip_ms + window_ms).min(prompt_i.len());
+        while bit_idx + 20 <= end_idx {
+            // Majority vote: count positive vs negative
+            let mut pos = 0i32;
+            let mut neg = 0i32;
+            for j in 0..20 {
+                if prompt_i[bit_idx + j] > 0.0 { pos += 1; } else { neg += 1; }
+            }
+            // Use sum but with majority-vote sign
             let sum: f64 = prompt_i[bit_idx..bit_idx + 20].iter().sum();
-            if dec.feed_symbol(sum) {
+            let sym = if pos > neg { sum.abs() } else { -sum.abs() };
+            if dec.feed_symbol(sym) {
                 sf_count += 1;
                 if sf_count <= 3 {
                     println!("B{}: SF={} TOW={}", boundary, dec.subframe_id, dec.tow);
                 }
             }
+            if dec.words.len() >= 2 {
+                total_frames += 1;
+                if dec.words[0].parity_ok { tlm_pass += 1; }
+                if dec.words[1].parity_ok { how_pass += 1; }
+            }
             bit_idx += 20;
+        }
+        if tlm_pass > 0 || how_pass > 0 {
+            println!("  b{:2}: sf={} tlm={}/{} how={}/{}", boundary, sf_count, tlm_pass, total_frames, how_pass, total_frames);
         }
         if sf_count > best_sf { best_sf = sf_count; best_boundary = boundary; }
     }

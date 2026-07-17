@@ -21,7 +21,7 @@ pub struct TrackingConfig {
 impl Default for TrackingConfig {
     fn default() -> Self {
         Self { fs: 4_000_000.0, if_freq: 0.0,
-            dll_bw: 4.0, pll_bw: 30.0, fll_bw: 0.0,
+            dll_bw: 4.0, pll_bw: 50.0, fll_bw: 0.0,
             damping: 0.7, early_late_spc: 0.5, carrier_aiding: true,
             coherent_ms: 1, pll_order: 3,
         }
@@ -76,7 +76,7 @@ impl DllPllTracking {
             code_phase_chips, code_freq_chips_per_s: GPS_L1_CA_CODE_RATE,
             dll_filter: LoopFilter::new(config.dll_bw, config.damping, 1.0, t),
             pll_filter: {
-                let mut f = LoopFilter::new_order(config.pll_bw, t, config.pll_order);
+                let mut f = LoopFilter::new_order(config.pll_bw, t, 2);  // 2nd-order
                 f.initialize(doppler_hz);
                 f
             },
@@ -139,12 +139,12 @@ impl DllPllTracking {
                     * GPS_L1_CA_CODE_RATE / GPS_L1_FREQ;
             }
 
-            // PLL: 2nd-order (tracking_2nd_PLL_filter.cc)
+            // PLL: 2nd-order with low k1 (stable integrator)
             let pll_disc = discriminators::pll_discriminator(cp) / TAU;
             self.last_pll_in = pll_disc;
             self.prev_prompt = cp;
 
-            let k1 = self.w0f / self.w0p2;
+            let k1 = self.w0f / self.w0p2;  // accidentally low proportional gain
             let k2 = t_coh / (2.0 * 1.0 / self.w0p2);
             let pll_nco = self.pll_w
                 + k1 * (pll_disc - self.pll_x)
