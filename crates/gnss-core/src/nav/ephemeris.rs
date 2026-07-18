@@ -77,24 +77,40 @@ impl BitReader {
         BitReader { bits }
     }
 
-    /// Read `len` unsigned bits starting at bit `start` (0-indexed, D1 = bit 0).
-    fn read_u(&self, start: usize, len: usize) -> u64 {
+    /// Read an unsigned value spanning multiple bit ranges. Each tuple is
+    /// (first_bit_1based, length). Bits are read D-first, MSB first, and
+    /// concatenated in order. D(N) is at index N-1 of our 0-based `bits`.
+    fn read_segments_u(&self, segs: &[(usize, usize)]) -> u64 {
         let mut v: u64 = 0;
-        for i in 0..len {
-            v = (v << 1) | self.bits[start + i] as u64;
+        for &(first, len) in segs {
+            let start = first - 1; // convert D(1-based) to 0-based index
+            for i in 0..len {
+                v = (v << 1) | self.bits[start + i] as u64;
+            }
         }
         v
     }
 
-    /// Read `len` signed (two's complement, MSB = sign) bits starting at `start`.
-    fn read_i(&self, start: usize, len: usize) -> i64 {
-        let u = self.read_u(start, len);
-        let sign_bit = 1u64 << (len - 1);
+    /// Read a signed (two's complement) value spanning multiple bit ranges.
+    fn read_segments_i(&self, segs: &[(usize, usize)]) -> i64 {
+        let u = self.read_segments_u(segs);
+        let total_bits: usize = segs.iter().map(|&(_, l)| l).sum();
+        let sign_bit = 1u64 << (total_bits - 1);
         if u & sign_bit != 0 {
-            (u as i64) - (1i64 << len)
+            (u as i64) - (1i64 << total_bits)
         } else {
             u as i64
         }
+    }
+
+    /// Convenience: single-segment unsigned read, D(first) 1-based.
+    fn read_u(&self, first: usize, len: usize) -> u64 {
+        self.read_segments_u(&[(first, len)])
+    }
+
+    /// Convenience: single-segment signed read, D(first) 1-based.
+    fn read_i(&self, first: usize, len: usize) -> i64 {
+        self.read_segments_i(&[(first, len)])
     }
 
     #[allow(dead_code)]
@@ -120,12 +136,12 @@ const PI_P2_43: f64 = std::f64::consts::PI * P2_43;
 /// Parse subframe 1 (clock + SV ID). Returns None if subframe_id != 1.
 pub fn parse_subframe1(words: &[NavWord], prn: u8) -> Option<Ephemeris> {
     let r = BitReader::new(words);
-    let sf = r.read_u(49, 3) as u8;
+    let sf = r.read_u(50, 3) as u8;
     if sf != 1 { return None; }
 
     let mut e = Ephemeris::default();
     e.prn = prn;
-    e.week_number = r.read_u(60, 10) as u16;
+    e.week_number = r.read_u(61, 10) as u16;
     e.sv_accuracy = r.read_u(73, 4) as u8;
     e.sv_health = r.read_u(77, 6) as u8;
     e.tgd = r.read_i(197, 8) as f64 * P2_31;
@@ -133,26 +149,27 @@ pub fn parse_subframe1(words: &[NavWord], prn: u8) -> Option<Ephemeris> {
     e.af2 = r.read_i(241, 8) as f64 * P2_55;
     e.af1 = r.read_i(249, 16) as f64 * P2_43;
     e.af0 = r.read_i(271, 22) as f64 * P2_31;
-    e.iodc = ((r.read_u(83, 2) as u16) << 8) | (r.read_u(211, 8) as u16);
-    e.tow = r.read_u(30, 17) as u32;
+    // IODC = {83,2} MSB + {211,8} LSB (two-segment field).
+    e.iodc = ((r.read_segments_u(&[(83, 2), (211, 8)])) as u16);
+    e.tow = r.read_u(31, 17) as u32;
     Some(e)
 }
 
 /// Merge subframe 2 (orbit part 1) into an existing Ephemeris.
 pub fn parse_subframe2(e: &mut Ephemeris, words: &[NavWord]) -> bool {
     let r = BitReader::new(words);
-    if r.read_u(49, 3) != 2 { return false; }
-    let iode_sf2 = r.read_u(60, 8) as u8;
+    if r.read_u(50, 3) != 2 { return false; }
+    let iode_sf2 = r.read_u(61, 8) as u8;
     e.iode = iode_sf2;
-    e.crs = r.read_i(68, 16) as f64 * P2_5;
+    e.crs = r.read_i(69, 16) as f64 * P2_5;
     e.delta_n = r.read_i(91, 16) as f64 * PI_P2_43;
-    e.m0 = r.read_i(107, 32) as f64 * PI_P2_31;
+    e.m0 = r.read_segments_i(&[(107, 8), (121, 24)]) as f64 * PI_P2_31;
     e.cuc = r.read_i(151, 16) as f64 * P2_29;
-    e.eccentricity = r.read_u(167, 32) as f64 * P2_33;
+    e.eccentricity = r.read_segments_u(&[(167, 8), (181, 24)]) as f64 * P2_33;
     e.cus = r.read_i(211, 16) as f64 * P2_29;
-    e.sqrt_a = r.read_u(227, 32) as f64 * P2_19;
+    e.sqrt_a = r.read_segments_u(&[(227, 8), (241, 24)]) as f64 * P2_19;
     e.toe = r.read_u(271, 16) as f64 * 16.0;
-    e.tow = r.read_u(30, 17) as u32;
+    e.tow = r.read_u(31, 17) as u32;
     true
 }
 
@@ -160,18 +177,18 @@ pub fn parse_subframe2(e: &mut Ephemeris, words: &[NavWord]) -> bool {
 /// if IODE mismatch (SF2 vs SF3) — ephemeris is inconsistent.
 pub fn parse_subframe3(e: &mut Ephemeris, words: &[NavWord]) -> bool {
     let r = BitReader::new(words);
-    if r.read_u(49, 3) != 3 { return false; }
-    let iode_sf3 = r.read_u(270, 8) as u8;
+    if r.read_u(50, 3) != 3 { return false; }
+    let iode_sf3 = r.read_u(271, 8) as u8;
     if iode_sf3 != e.iode { return false; }
-    e.cic = r.read_i(60, 16) as f64 * P2_29;
-    e.omega0 = r.read_i(77, 32) as f64 * PI_P2_31;
+    e.cic = r.read_i(61, 16) as f64 * P2_29;
+    e.omega0 = r.read_segments_i(&[(77, 8), (91, 24)]) as f64 * PI_P2_31;
     e.cis = r.read_i(121, 16) as f64 * P2_29;
-    e.i0 = r.read_i(137, 32) as f64 * PI_P2_31;
+    e.i0 = r.read_segments_i(&[(137, 8), (151, 24)]) as f64 * PI_P2_31;
     e.crc = r.read_i(181, 16) as f64 * P2_5;
-    e.omega = r.read_i(197, 32) as f64 * PI_P2_31;
+    e.omega = r.read_segments_i(&[(197, 8), (211, 24)]) as f64 * PI_P2_31;
     e.omega_dot = r.read_i(241, 24) as f64 * PI_P2_43;
     e.i_dot = r.read_i(279, 14) as f64 * PI_P2_43;
-    e.tow = r.read_u(30, 17) as u32;
+    e.tow = r.read_u(31, 17) as u32;
     // Validate IODC low 8 bits == IODE
     if (e.iodc & 0xFF) as u8 != e.iode { return false; }
     true
@@ -180,21 +197,15 @@ pub fn parse_subframe3(e: &mut Ephemeris, words: &[NavWord]) -> bool {
 /// Parse Klobuchar ionosphere params from subframe 4 page 18.
 pub fn parse_iono(words: &[NavWord]) -> Option<IonoParams> {
     let r = BitReader::new(words);
-    if r.read_u(49, 3) != 4 { return None; }
-    let page_id = r.read_u(62, 6) as u8; // data ID / page — page 18 (sv page 56) carries iono
-    // GNSS-SDR checks SV_page == 56 for the iono page (page 18 of subframe 4).
-    // The page ID field layout: bits 62-67 hold the 6-bit page indicator.
-    // We accept any subframe-4 with the iono fields populated; real validation
-    // needs the page match. For robustness we parse fields and mark valid.
-    let _ = page_id;
-    let alpha0 = r.read_i(68, 8) as f64 * P2_30;
-    let alpha1 = r.read_i(76, 8) as f64 * P2_27;
-    let alpha2 = r.read_i(90, 8) as f64 * P2_24;
-    let alpha3 = r.read_i(98, 8) as f64 * P2_24;
-    let beta0 = r.read_i(106, 8) as f64 * (1u64 << 11) as f64;
-    let beta1 = r.read_i(120, 8) as f64 * (1u64 << 14) as f64;
-    let beta2 = r.read_i(128, 8) as f64 * (1u64 << 16) as f64;
-    let beta3 = r.read_i(136, 8) as f64 * (1u64 << 16) as f64;
+    if r.read_u(50, 3) != 4 { return None; }
+    let alpha0 = r.read_i(69, 8) as f64 * P2_30;
+    let alpha1 = r.read_i(77, 8) as f64 * P2_27;
+    let alpha2 = r.read_i(91, 8) as f64 * P2_24;
+    let alpha3 = r.read_i(99, 8) as f64 * P2_24;
+    let beta0 = r.read_i(107, 8) as f64 * (1u64 << 11) as f64;
+    let beta1 = r.read_i(121, 8) as f64 * (1u64 << 14) as f64;
+    let beta2 = r.read_i(129, 8) as f64 * (1u64 << 16) as f64;
+    let beta3 = r.read_i(137, 8) as f64 * (1u64 << 16) as f64;
     Some(IonoParams {
         alpha: [alpha0, alpha1, alpha2, alpha3],
         beta: [beta0, beta1, beta2, beta3],
@@ -222,24 +233,33 @@ impl EphemerisCollector {
     pub fn feed(&mut self, prn: u8, words: &[NavWord]) -> Option<Ephemeris> {
         if words.len() != 10 { return None; }
         let r = BitReader::new(words);
-        let sf = r.read_u(49, 3) as u8;
-        if !(1..=3).contains(&sf) { return None; }
+        let sf = r.read_u(50, 3) as u8;
+        if !(1..=3).contains(&sf) {
+            eprintln!("  [eph] PRN {} sf={} (not 1-3, skipping)", prn, sf);
+            return None;
+        }
         let arr: [NavWord; 10] = [
             words[0], words[1], words[2], words[3], words[4],
             words[5], words[6], words[7], words[8], words[9],
         ];
         let entry = self.per_prn.entry(prn).or_default();
         entry.insert(sf, arr);
+        eprintln!("  [eph] PRN {} got sf={}, have {:?}", prn, sf, entry.keys().collect::<Vec<_>>());
         // Need all of 1, 2, 3.
         if !(entry.contains_key(&1) && entry.contains_key(&2) && entry.contains_key(&3)) {
             return None;
         }
         let mut e = match parse_subframe1(&entry[&1], prn) {
             Some(e) => e,
-            None => return None,
+            None => { eprintln!("  [eph] PRN {} parse_subframe1 failed", prn); return None; }
         };
-        if !parse_subframe2(&mut e, &entry[&2]) { return None; }
-        if !parse_subframe3(&mut e, &entry[&3]) { return None; }
+        if !parse_subframe2(&mut e, &entry[&2]) {
+            eprintln!("  [eph] PRN {} parse_subframe2 failed", prn); return None;
+        }
+        if !parse_subframe3(&mut e, &entry[&3]) {
+            eprintln!("  [eph] PRN {} parse_subframe3 failed (IODE sf2={} sf3={} iodc={})",
+                prn, e.iode, e.iode, e.iodc); return None;
+        }
         Some(e)
     }
 }
@@ -264,6 +284,6 @@ mod tests {
         // raw bit (29 - 19) = bit 10 → 0; (29-20)=bit 9 → 1; (29-21)=bit 8 → 0.
         words[1].raw = 1 << 9;
         let r = BitReader::new(&words);
-        assert_eq!(r.read_u(49, 3), 2);
+        assert_eq!(r.read_u(50, 3), 2);
     }
 }

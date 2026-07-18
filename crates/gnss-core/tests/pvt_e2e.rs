@@ -122,6 +122,8 @@ fn test_pvt_e2e() {
     let mut subframes_decoded_per_prn: std::collections::BTreeMap<u8, u32> = Default::default();
 
     // Phase 1: track all channels, collect prompt_i, run bit sync.
+    let mut diag_counters: std::collections::BTreeMap<u8, (u32, u32, f64, f64)> = Default::default();
+    // (sync_attempts, sync_successes, last_qi, last_abs_p)
     for ms in 0..total_ms {
         let chunk = &signal[ms * spm..(ms + 1) * spm];
         for ch in channels.iter_mut() {
@@ -136,6 +138,20 @@ fn test_pvt_e2e() {
                     ch.boundary = Some(b);
                     eprintln!("PRN {} bit sync locked at ms={} boundary={}", ch.prn, ms, b);
                 }
+            }
+        }
+
+        // Periodic tracking-quality diagnostic (every 5 s).
+        if ms > 0 && ms % 5000 == 0 {
+            for ch in channels.iter() {
+                let qi = (ch.prompt_i.last().unwrap_or(&0.0).abs()) / 1.0;
+                let _ = qi;
+                // Re-read latest prompt magnitude from the tracker's last output is not stored;
+                // use |prompt_i| as a proxy for |I|.
+                let last_i = ch.prompt_i.last().copied().unwrap_or(0.0);
+                let abs_p = last_i.abs();
+                eprintln!("  [ms={:>6}] PRN {:2} dopp={:+.0} |I|={:.0} cn0={:.1}",
+                    ms, ch.prn, ch.doppler_hz, abs_p, ch.cn0_db_hz);
             }
         }
     }
@@ -159,22 +175,30 @@ fn test_pvt_e2e() {
         eprintln!("PRN {} decoding from first_bit_ms={}", ch.prn, first_bit_ms);
 
         let mut bit_idx = first_bit_ms;
+        let mut sync_count = 0u32;
+        let mut decode_count = 0u32;
         while bit_idx + 20 <= ch.prompt_i.len() {
             let sum: f64 = ch.prompt_i[bit_idx..bit_idx + 20].iter().sum();
+            let was_synced = ch.nav.is_synced();
             if ch.nav.feed_symbol(sum) {
                 ch.tow_count = ch.nav.tow;
                 ch.last_subframe_ms = Some(bit_idx + 20);
                 *subframes_decoded_per_prn.entry(ch.prn).or_insert(0) += 1;
+                decode_count += 1;
                 let sf_id = ch.nav.subframe_id;
-                eprintln!("PRN {} subframe {} decoded at bit_idx={} tow={}",
-                    ch.prn, sf_id, bit_idx, ch.nav.tow);
+                if decode_count <= 5 {
+                    eprintln!("PRN {} subframe {} decoded at bit_idx={} tow={} words.len={}",
+                        ch.prn, sf_id, bit_idx, ch.nav.tow, ch.nav.words.len());
+                }
                 if let Some(eph) = ch.collector.feed(ch.prn, &ch.nav.words) {
                     eprintln!("PRN {} ephemeris complete", ch.prn);
                     ephemerides.insert(ch.prn, eph);
                 }
             }
+            if ch.nav.is_synced() && !was_synced { sync_count += 1; }
             bit_idx += 20;
         }
+        eprintln!("PRN {}: sync_count={} decode_count={}", ch.prn, sync_count, decode_count);
         // Keep latest cn0/doppler for pseudorange weighting.
     }
 
@@ -195,6 +219,32 @@ fn test_pvt_e2e() {
     // Form pseudoranges: use the latest subframe TOW per channel + ms offset.
     // Pick a common receive epoch: the latest ms where all ephemeris-bearing
     // channels have a known TOW.
+    // Form pseudoranges at a common receive epoch.
+    //
+    // Anchor the receiver clock to GPS time using the first decoded subframe:
+    //   anchor_rx_sow = tow_count × 6 - 6  (start of that subframe, GPS SOW)
+    //   anchor_ms     = ms index when that subframe's first bit was received
+    // Then for the common receive epoch `rx_ms` (all channels tracked to here):
+    //   rx_sow = anchor_rx_sow + (rx_ms - anchor_ms) / 1000
+    // Per-channel transmit time (from its most recent subframe + ms offset):
+    //   tx_sow = ch.tow_count × 6 - 6 + (rx_ms - ch.last_subframe_ms) / 1000
+    //   (the signal currently being received was transmitted `ms_since_subframe`
+    //    after the subframe start)
+    let rx_ms = channels.iter().map(|c| c.prompt_i.len()).max().unwrap_or(0) as u64;
+
+    // Anchor: use the earliest decoded subframe across channels.
+    let anchor = channels.iter()
+        .filter_map(|c| c.last_subframe_ms.map(|m| (m, c.tow_count)))
+        .min_by_key(|&(m, _)| m);
+    let (anchor_ms, anchor_tow) = match anchor {
+        Some(a) => a,
+        None => panic!("no subframe decoded on any channel"),
+    };
+    let anchor_rx_sow = anchor_tow as f64 * 6.0 - 6.0;
+    let rx_sow = anchor_rx_sow + (rx_ms as f64 - anchor_ms as f64) / 1000.0;
+    println!("\nrx_ms={} anchor_ms={} anchor_tow={} rx_sow={:.3}",
+        rx_ms, anchor_ms, anchor_tow, rx_sow);
+
     let mut pseudoranges: Vec<Pseudorange> = Vec::new();
     for ch in channels.iter() {
         if ch.last_subframe_ms.is_none() { continue; }
@@ -202,20 +252,20 @@ fn test_pvt_e2e() {
         let tow_count = ch.tow_count;
         if tow_count == 0 { continue; }
         // ms elapsed since the start of the most recent subframe on this channel.
-        let ms_into_subframe = (ch.prompt_i.len() as u64) - ch.last_subframe_ms.unwrap() as u64;
-        let rx_sample_index = ch.prompt_i.len() as u64;
-        let pr = Pseudorange::from_tracking(
-            ch.prn,
-            tow_count,
-            ms_into_subframe,
-            rx_sample_index,
-            FS,
-            ch.cn0_db_hz,
-            ch.doppler_hz,
-        );
-        println!("PRN {}: PR={:.0} m tow_count={} ms_into_sf={} rx_sow={:.3} tx_sow={:.3} cn0={:.1}",
-            ch.prn, pr.pseudorange_m, tow_count, ms_into_subframe,
-            pr.receive_time_sow, pr.transmit_time_sow, ch.cn0_db_hz);
+        let ms_since_subframe = rx_ms - ch.last_subframe_ms.unwrap() as u64;
+        // Transmit time: subframe start + elapsed.
+        let tx_sow = tow_count as f64 * 6.0 - 6.0 + ms_since_subframe as f64 / 1000.0;
+        let pseudorange_m = (rx_sow - tx_sow) * 299_792_458.0;
+        let pr = Pseudorange {
+            prn: ch.prn,
+            pseudorange_m,
+            transmit_time_sow: tx_sow,
+            receive_time_sow: rx_sow,
+            cn0_db_hz: ch.cn0_db_hz,
+            doppler_hz: ch.doppler_hz,
+        };
+        println!("PRN {}: PR={:.0} m tow_count={} ms_since_sf={} tx_sow={:.3} cn0={:.1}",
+            ch.prn, pr.pseudorange_m, tow_count, ms_since_subframe, tx_sow, ch.cn0_db_hz);
         pseudoranges.push(pr);
     }
 

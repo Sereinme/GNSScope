@@ -39,7 +39,7 @@ impl NavDecoder {
             subframe_bits: [0u8; SUBFRAME_BITS], subframe_idx: 0,
             synced: false, prev_word: 0,
             bit_counter: 0, preamble_idx: 0,
-            corr_threshold: 5,
+            corr_threshold: 7,
             inverted: false,
             tow: 0, subframe_id: 0,
             words: Vec::new(),
