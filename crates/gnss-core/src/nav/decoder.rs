@@ -49,6 +49,9 @@ impl NavDecoder {
     /// Whether the decoder has locked onto a preamble (for diagnostics).
     pub fn is_synced(&self) -> bool { self.synced }
 
+    /// Total symbols fed so far (for diagnostics).
+    pub fn bit_counter(&self) -> u32 { self.bit_counter }
+
     pub fn feed_symbol(&mut self, symbol: f64) -> bool {
         self.sym_buf[self.sym_idx % 16] = symbol;
         self.sym_idx += 1;
@@ -119,11 +122,13 @@ impl NavDecoder {
                 let valid = n_ok >= 2 && self.words[0].parity_ok && self.words[1].parity_ok;
                 let tlm_ok = self.words.get(0).map(|w| w.parity_ok).unwrap_or(false);
                 let how_ok = self.words.get(1).map(|w| w.parity_ok).unwrap_or(false);
-                if tlm_ok && how_ok {
-                    return true;
-                }
+                let subframe_valid = tlm_ok && how_ok;
+                // Reset for next subframe search regardless of outcome.
                 self.synced = false;
                 self.subframe_idx = 0;
+                if subframe_valid {
+                    return true;
+                }
                 return valid && self.subframe_id >= 1 && self.subframe_id <= 5;
             } else {
                 self.synced = false;
