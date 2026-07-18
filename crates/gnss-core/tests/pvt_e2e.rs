@@ -242,7 +242,7 @@ fn test_pvt_e2e() {
     let rx_sow = anchor_rx_sow + (rx_ms as f64 - anchor_ms as f64) / 1000.0;
 
     let mut pseudoranges: Vec<Pseudorange> = Vec::new();
-    println!("\nPRN  tow  last_sf  ms_sf   NDO    SCP   cp_ms   travel   PR");
+    println!("\nPRN  tow  last_sf  ms_sf   NDO    cp_ms   travel   PR");
     for ch in channels.iter() {
         if ch.last_subframe_ms.is_none() { continue; }
         if !ephemerides.contains_key(&ch.prn) { continue; }
@@ -259,9 +259,8 @@ fn test_pvt_e2e() {
         let tx_sow = subframe_start_sow + ms_since_subframe as f64 * 1e-3 + code_phase_ms * 1e-3;
         let traveltime = rx_sow - tx_sow;
         let pseudorange_m = traveltime * 299_792_458.0;
-        let scp_chips = (nco_chips + 1023.0 - 2.0 * ch.acq_code_phase).rem_euclid(1023.0);
-        println!("{:3} {} {} {} NDO={:.1} SCP={:.1} cp_ms={:.4} travel={:.3}ms PR={:.0}m",
-            ch.prn, tow_count, last_sf_ms, ms_since_subframe, nco_chips, scp_chips,
+        println!("{:3} {} {} {} NDO={:.1} cp_ms={:.4} travel={:.3}ms PR={:.0}m",
+            ch.prn, tow_count, last_sf_ms, ms_since_subframe, nco_chips,
             code_phase_ms, traveltime * 1000.0, pseudorange_m);
         let pr = Pseudorange {
             prn: ch.prn,
@@ -274,13 +273,7 @@ fn test_pvt_e2e() {
         pseudoranges.push(pr);
     }
 
-    if pseudoranges.len() < 4 {
-        panic!("Need ≥4 pseudoranges, got {}", pseudoranges.len());
-    }
-
-    // Solve WLS. Bootstrap with a rough a-priori (Earth center / zero alt).
-    let sol: PvtSolution = solve_wls(&pseudoranges, &ephemerides, &iono, 0.0, 0.0, 0.0);
-
+    // Check for duplicate call removal — the following is the only solve_wls call.
     if pseudoranges.len() < 4 {
         panic!("Need ≥4 pseudoranges, got {}", pseudoranges.len());
     }
@@ -336,6 +329,10 @@ fn test_pvt_e2e() {
     let lat_err = (lat_deg - REF_LAT).abs();
     let lon_err = (lon_deg - REF_LON).abs();
     println!("Error: lat={:.4}° lon={:.4}°", lat_err, lon_err);
-    assert!(lat_err < 1.0, "latitude error too large: {:.4}°", lat_err);
-    assert!(lon_err < 1.0, "longitude error too large: {:.4}°", lon_err);
+    // Tight thresholds for pseudorange-quality feedback loop.
+    // With correct sub-ms pseudorange, both should be < 0.005° (~500 m).
+    // Current bug: code_phase_chips is NCO accumulator, not signal code phase
+    // → lon error typically ~0.05° = 5.5 km. This assert goes RED on the bug.
+    assert!(lat_err < 0.005, "latitude error too large: {:.4}°", lat_err);
+    assert!(lon_err < 0.005, "longitude error too large: {:.4}°", lon_err);
 }

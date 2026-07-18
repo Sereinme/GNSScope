@@ -31,6 +31,10 @@ impl Default for TrackingConfig {
 pub struct TrackingOutput {
     pub prompt: Complex<f64>, pub early_mag: f64, pub late_mag: f64,
     pub code_phase_chips: f64, pub carrier_doppler_hz: f64, pub cn0_db_hz: f64,
+    /// Absolute sample counter since tracking start (GNSS-SDR Tracking_sample_counter).
+    pub sample_counter: u64,
+    /// Sub-sample code phase residual in samples, < 1.0 (GNSS-SDR Code_phase_samples).
+    pub rem_code_phase_samples: f64,
 }
 
 pub struct DllPllTracking {
@@ -62,6 +66,9 @@ pub struct DllPllTracking {
     bs_buf: [f64; 40], bs_idx: usize,
     bs_energy: [f64; 20], bs_count: u32,
     pub last_pll_in: f64, pub last_fll_in: f64,
+    /// Absolute sample count since tracking start, incremented by
+    /// correlation_length_samples per integration period (GNSS-SDR).
+    sample_counter: u64,
 }
 
 impl DllPllTracking {
@@ -111,6 +118,7 @@ impl DllPllTracking {
             bs_buf: [0.0; 40], bs_idx: 0,
             bs_energy: [0.0; 20], bs_count: 0,
             last_pll_in: 0.0, last_fll_in: 0.0,
+            sample_counter: 0,
         }
     }
 
@@ -179,6 +187,14 @@ impl DllPllTracking {
         self.code_phase_chips += self.code_freq_chips_per_s * self.t;
         self.code_phase_chips %= CODE_LENGTH as f64;
 
+        // GNSS-SDR: increment absolute sample counter (1 ms worth of samples).
+        self.sample_counter += (self.config.fs / 1000.0) as u64;
+        // Sub-sample code phase residual in samples, < 1.0.
+        let rem_code_phase_samples = {
+            let samples = self.code_phase_chips * self.config.fs / GPS_L1_CA_CODE_RATE;
+            samples - samples.floor()
+        };
+
         let doppler = self.carrier_freq_hz - self.config.if_freq;
         self.update_cn0(p);
         self.last_prompt = p;
@@ -189,6 +205,8 @@ impl DllPllTracking {
             code_phase_chips: self.code_phase_chips,
             carrier_doppler_hz: doppler,
             cn0_db_hz: cn0.max(0.0),
+            sample_counter: self.sample_counter,
+            rem_code_phase_samples,
         }
     }
 

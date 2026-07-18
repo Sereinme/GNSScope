@@ -149,6 +149,42 @@ pseudorange = c × traveltime
 
 ---
 
+### 2026-07-18 诊断 session: code_phase 根因确认
+
+**`/diagnosing-bugs` 流程完整执行,Phase 1-4 完成,Phase 5 受阻于架构限制。**
+
+#### Phase 1-2: 反馈环路建立 ✓
+- RED loop: `cargo test -p gnss-core --test pvt_e2e --release -- --nocapture`,断言 `lon_err < 0.005°`
+- 当前 lon_err = 0.0498° → RED ✓ (确定性,45s 一次)
+
+#### Phase 3: 假设确认
+- **#1 (confirmed):** `code_phase_chips` = NCO 累加器,从 acq_cp 初始化后累积 code Doppler。在整数 ms GPS 时间,NDO 不停漂移(每 satellite 不同 Doppler → 不同漂移量),但伪距公式把 NDO 当成 GPS code phase 用 → 每颗星的 sub-ms 误差不一致 → WLS 收敛到偏置位置
+- **#2 (#1 的细化):** acq_cp 误差在 DLL 锁定后保持恒定。PRN 1 误差 ~11 chips(可用),PRN 11 误差 ~679 chips(acq 检测到错误码相位,DLL 无法在 60s 内收敛)
+- **#3 (refuted):** TOW 插值精度不足被排除——残差不一致 (5km) 远超 TOW 20ms 边界误差
+
+#### Phase 4: 探测数据
+- 添加了 `sample_counter` + `rem_code_phase_samples` 到 `DllPllTracking`(`TrackingOutput`)(GNSS-SDR 基础设施)
+- 确认 NDO ≠ GPS code phase,Δ 从 −731 到 +271 chips 跨卫星
+
+#### Phase 5: 尝试过的修复方法(全部失败)
+| 方法 | 效果 |
+|---|---|
+| **NDO subframe correction** | 更差:lat err 0.86°, lon err 0.85° |
+| **acq_cp 替代 NDO** | 灾难:WLS 未收敛(PRN 11 acq 误差 679 chips) |
+| **code_phase_ms = 0**(仅靠整数 ms) | 未实施——会丢失 sub-ms 距离差 |
+
+#### 根因总结
+DLL NCO 是 **phase-continuous**(自由累加),而 GPS L1 C/A code phase 在整数 ms GPS 时间边界处重置为 0(1023*1000 chips/s → 模 1023 整除 = 0)。NCO 随时间漂移(每颗星 Doppler 不同),伪距公式把 NCO 值当 GPS code phase 用 → 每卫星 sub-ms 误差不同 → WLS lat 33m, lon 5.5km。
+
+**正确修复方向:** 让 DLL 的 code 生成器使用 GPS 时间索引(像 GNSS-SDR `d_rem_code_phase_samples = GPS_code_phase_at_current_time`),而不是用 free-running NCO 累加器。或 subframe decode 时注入 GPS 同步。
+
+**正面产出(commit ready):**
+- `DllPllTracking` 新增 `sample_counter: u64` + `rem_code_phase_samples: f64`
+- `pvt_e2e.rs` RED feedback loop 已就位
+- research doc: `docs/debug-pvt-pseudorange-research.md`
+
+---
+
 ## 未应用/可改进项
 
 1. **电离层未实际应用**：Klobuchar 已实现，但 `iono.valid=false`（未解码 sf4 page 18）。需收集 sf4 并调用 `parse_iono`
