@@ -2,3 +2,6 @@
 Cargo.lock
 /data/
 /reference/
+
+.zcode/
+nul
