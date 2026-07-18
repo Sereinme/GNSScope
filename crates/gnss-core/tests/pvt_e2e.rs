@@ -6,11 +6,12 @@
 
 use gnss_core::acquisition::{PcpsAcquisition, PcpsConfig};
 use gnss_core::io::{IqFormat, IqReader};
-use gnss_core::nav::{Ephemeris, EphemerisCollector, EphemerisMap, IonoParams, NavDecoder};
+use gnss_core::nav::{EphemerisCollector, EphemerisMap, IonoParams, NavDecoder};
 use gnss_core::pvt::pseudorange::Pseudorange;
 use gnss_core::pvt::{solve_wls, PvtSolution};
 use gnss_core::tracking::{BitSynchronizer, DllPllTracking, TrackingConfig};
 use num_complex::Complex;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 const DATA_FILE: &str = "../../data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat";
@@ -163,6 +164,9 @@ fn test_pvt_e2e() {
     // Phase 2: for each bit-synced channel, replay prompt_i from the first
     // full bit boundary through NavDecoder + EphemerisCollector. This mirrors
     // real_tracking.rs (which decodes after collecting all prompt_i).
+    // Also record per-symbol TOW for later interpolation.
+    // per_channel_tow[prn] = Vec<(symbol_idx, tow_ms, bit_idx)>
+    let mut per_channel_tow: BTreeMap<u8, Vec<(u32, u64, usize)>> = BTreeMap::new();
     for ch in channels.iter_mut() {
         let boundary = match ch.boundary {
             Some(b) => b,
@@ -178,32 +182,33 @@ fn test_pvt_e2e() {
         }
         eprintln!("PRN {} decoding from first_bit_ms={}", ch.prn, first_bit_ms);
 
+        let mut tow_history: Vec<(u32, u64, usize)> = Vec::new();
         let mut bit_idx = first_bit_ms;
-        let mut sync_count = 0u32;
-        let mut decode_count = 0u32;
+        let mut sym_idx = 0u32;
         while bit_idx + 20 <= ch.prompt_i.len() {
             let sum: f64 = ch.prompt_i[bit_idx..bit_idx + 20].iter().sum();
-            let was_synced = ch.nav.is_synced();
             if ch.nav.feed_symbol(sum) {
                 ch.tow_count = ch.nav.tow;
                 ch.last_subframe_ms = Some(bit_idx + 20);
                 *subframes_decoded_per_prn.entry(ch.prn).or_insert(0) += 1;
-                decode_count += 1;
                 let sf_id = ch.nav.subframe_id;
-                if decode_count <= 5 {
-                    eprintln!("PRN {} subframe {} decoded at bit_idx={} tow={} words.len={}",
-                        ch.prn, sf_id, bit_idx, ch.nav.tow, ch.nav.words.len());
+                if subframes_decoded_per_prn[&ch.prn] <= 2 {
+                    eprintln!("PRN {} subframe {} decoded at bit_idx={} tow={}",
+                        ch.prn, sf_id, bit_idx, ch.nav.tow);
                 }
                 if let Some(eph) = ch.collector.feed(ch.prn, &ch.nav.words) {
                     eprintln!("PRN {} ephemeris complete", ch.prn);
                     ephemerides.insert(ch.prn, eph);
                 }
             }
-            if ch.nav.is_synced() && !was_synced { sync_count += 1; }
+            // Record TOW at each symbol (for interpolation).
+            if ch.nav.tow_set() {
+                tow_history.push((sym_idx, ch.nav.tow_at_current_symbol_ms(), bit_idx));
+            }
+            sym_idx += 1;
             bit_idx += 20;
         }
-        eprintln!("PRN {}: sync_count={} decode_count={}", ch.prn, sync_count, decode_count);
-        // Keep latest cn0/doppler for pseudorange weighting.
+        per_channel_tow.insert(ch.prn, tow_history);
     }
 
     println!("\n=== Ephemeris collection ===");
@@ -223,57 +228,75 @@ fn test_pvt_e2e() {
     // Form pseudoranges: use the latest subframe TOW per channel + ms offset.
     // Pick a common receive epoch: the latest ms where all ephemeris-bearing
     // channels have a known TOW.
-    // Form pseudoranges using per-symbol TOW (GNSS-SDR method).
+    // Form pseudoranges using interpolated per-symbol TOW (GNSS-SDR method).
     //
-    // NavDecoder now maintains tow_at_current_symbol_ms: set to HOW TOW×1000
-    // on subframe decode, +20 ms each subsequent symbol. At a common receive
-    // epoch, each channel's TOW reflects that satellite's transmit time.
+    // Each channel recorded (symbol_idx, tow_ms, bit_idx) per symbol. At a
+    // common receive bit_idx, we linearly interpolate each channel's TOW
+    // between the two surrounding symbol records. This gives 1 ms granularity
+    // (vs 20 ms raw symbol TOW), enough to distinguish satellite ranges.
     //
-    // Receiver TOW is seeded from the max satellite TOW (GNSS-SDR convention),
-    // then we compute traveltime = T_rx_TOW - sat_TOW. The common clock bias
-    // is absorbed by the WLS 4th state.
-    //
-    // We record each channel's TOW at every symbol during phase-2 decode, then
-    // pick a common symbol index where all channels have TOW set.
-    let rx_ms = channels.iter().map(|c| c.prompt_i.len()).max().unwrap_or(0) as u64;
+    // Pseudorange = (T_rx_TOW_ms - interp_TOW_ms) × c, with T_rx seeded from
+    // max satellite TOW + 70 ms (absorbed into WLS clock bias).
+    println!("\n=== Interpolated TOW pseudoranges ===");
 
-    // Per-channel TOW history (one entry per symbol fed to NavDecoder).
-    // We re-run the decode loop but this time record TOW per symbol.
-    // Actually the decode already ran in phase 2; we need to re-capture TOW.
-    // Re-approach: phase 2 already fed symbols. We need TOW at the final symbol.
-    // Let's just read the final tow_at_current_symbol_ms per channel.
-    println!("\n=== Per-channel TOW at end of decode ===");
-    let mut sat_tows: Vec<(u8, u64, f64, f64)> = Vec::new(); // (prn, tow_ms, cn0, doppler)
+    // Find a common bit_idx where ALL ephemeris-bearing channels have TOW.
+    // Use the last bit_idx of the channel with the shortest TOW history.
+    let mut common_bit_idx = usize::MAX;
     for ch in channels.iter() {
-        if !ch.nav.tow_set() { continue; }
         if !ephemerides.contains_key(&ch.prn) { continue; }
-        let tow_ms = ch.nav.tow_at_current_symbol_ms();
-        println!("PRN {}: tow_at_current_symbol_ms={} ({:.3} s)", ch.prn, tow_ms, tow_ms as f64 / 1000.0);
-        sat_tows.push((ch.prn, tow_ms, ch.cn0_db_hz, ch.doppler_hz));
+        if let Some(hist) = per_channel_tow.get(&ch.prn) {
+            if let Some(&(_, _, last_bit_idx)) = hist.last() {
+                common_bit_idx = common_bit_idx.min(last_bit_idx);
+            }
+        }
+    }
+    if common_bit_idx == usize::MAX {
+        panic!("no common bit_idx with TOW across channels");
+    }
+    println!("common_bit_idx = {}", common_bit_idx);
+
+    // Interpolate each channel's TOW at common_bit_idx.
+    let mut sat_tows: Vec<(u8, f64, f64, f64)> = Vec::new(); // (prn, tow_ms, cn0, doppler)
+    for ch in channels.iter() {
+        if !ephemerides.contains_key(&ch.prn) { continue; }
+        let hist = match per_channel_tow.get(&ch.prn) {
+            Some(h) if !h.is_empty() => h,
+            _ => continue,
+        };
+        // Find two consecutive records bracketing common_bit_idx.
+        // Records are (sym_idx, tow_ms, bit_idx). bit_idx increases by 20.
+        let mut interp_tow: Option<f64> = None;
+        for w in hist.windows(2) {
+            let (_, tow1, bi1) = w[0];
+            let (_, tow2, bi2) = w[1];
+            if common_bit_idx >= bi1 && common_bit_idx <= bi2 {
+                let frac = if bi2 > bi1 {
+                    (common_bit_idx - bi1) as f64 / (bi2 - bi1) as f64
+                } else { 0.0 };
+                interp_tow = Some(tow1 as f64 + frac * (tow2 as f64 - tow1 as f64));
+                break;
+            }
+        }
+        // If common_bit_idx is past the last record, use the last TOW.
+        let tow = interp_tow.unwrap_or_else(|| hist.last().unwrap().1 as f64);
+        println!("PRN {}: interp_TOW_ms = {:.1} ({:.6} s)", ch.prn, tow, tow / 1000.0);
+        sat_tows.push((ch.prn, tow, ch.cn0_db_hz, ch.doppler_hz));
     }
     if sat_tows.len() < 4 { panic!("Need ≥4 channels with TOW, got {}", sat_tows.len()); }
 
-    // Receiver TOW: seed from max satellite TOW. The traveltime for the
-    // max-TOW satellite is ~70 ms (shortest path), so T_rx = max_TOW + 70ms.
-    // Other satellites: traveltime = T_rx - their_TOW, which will be > 70ms.
-    // The 70ms estimate only affects the common clock bias (WLS state 4),
-    // not the relative pseudoranges — so position is insensitive to it.
-    let max_tow = sat_tows.iter().map(|&(_, t, _, _)| t).max().unwrap();
-    let t_rx_tow_ms = max_tow + 70; // +70 ms estimate (absorbed into clock bias)
-    println!("T_rx_TOW_ms = {} ({:.3} s)", t_rx_tow_ms, t_rx_tow_ms as f64 / 1000.0);
+    // Receiver TOW: seed from max satellite TOW + 70 ms.
+    let max_tow = sat_tows.iter().map(|&(_, t, _, _)| t).fold(0.0f64, f64::max);
+    let t_rx_tow_ms = max_tow + 70.0;
+    println!("T_rx_TOW_ms = {:.1}", t_rx_tow_ms);
 
     let mut pseudoranges: Vec<Pseudorange> = Vec::new();
     for &(prn, sat_tow_ms, cn0, doppler) in &sat_tows {
-        // traveltime = T_rx - sat_TOW (ms). Handle week rollover.
-        let mut traveltime_ms = t_rx_tow_ms as f64 - sat_tow_ms as f64;
-        if traveltime_ms.abs() > 302_400.0 * 1000.0 {
-            traveltime_ms += 604_800_000.0;
-        }
+        let traveltime_ms = t_rx_tow_ms - sat_tow_ms;
         let pr = Pseudorange {
             prn,
             pseudorange_m: traveltime_ms * 1e-3 * 299_792_458.0,
-            transmit_time_sow: sat_tow_ms as f64 / 1000.0,
-            receive_time_sow: t_rx_tow_ms as f64 / 1000.0,
+            transmit_time_sow: sat_tow_ms / 1000.0,
+            receive_time_sow: t_rx_tow_ms / 1000.0,
             cn0_db_hz: cn0,
             doppler_hz: doppler,
         };
