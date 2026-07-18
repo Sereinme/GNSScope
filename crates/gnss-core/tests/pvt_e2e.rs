@@ -262,6 +262,10 @@ fn test_pvt_e2e() {
         let ms_since_subframe = rx_ms - last_sf_ms;
         let cp_idx = (rx_ms as usize).min(ch.code_phase.len()) - 1;
         let cp_chips = ch.code_phase[cp_idx];
+        // code_phase_chips from DllPllTracking is the local NCO phase, which
+        // equals the signal code phase (traveltime mod 1ms × 1023) plus a
+        // constant offset from the acquisition initialization. DLL lock keeps
+        // this offset constant. cp/1023 gives the sub-ms transmit offset.
         let code_phase_ms = cp_chips / 1023.0;
         let subframe_start_sow = tow_count as f64 * 6.0 - 6.0;
         let tx_sow = subframe_start_sow + ms_since_subframe as f64 * 1e-3 + code_phase_ms * 1e-3;
