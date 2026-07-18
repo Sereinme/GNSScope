@@ -46,6 +46,9 @@ impl NavDecoder {
         }
     }
 
+    /// Whether the decoder has locked onto a preamble (for diagnostics).
+    pub fn is_synced(&self) -> bool { self.synced }
+
     pub fn feed_symbol(&mut self, symbol: f64) -> bool {
         self.sym_buf[self.sym_idx % 16] = symbol;
         self.sym_idx += 1;
@@ -116,12 +119,7 @@ impl NavDecoder {
                 let valid = n_ok >= 2 && self.words[0].parity_ok && self.words[1].parity_ok;
                 let tlm_ok = self.words.get(0).map(|w| w.parity_ok).unwrap_or(false);
                 let how_ok = self.words.get(1).map(|w| w.parity_ok).unwrap_or(false);
-                let tlm_d30 = self.words.get(0).map(|w| w.raw_parity & 1).unwrap_or(0);
-                if tlm_ok && !how_ok {
-                    eprintln!("TLM ok(D30={}) HOW fail", tlm_d30);
-                }
                 if tlm_ok && how_ok {
-                    eprintln!("BOTH PASS!");
                     return true;
                 }
                 self.synced = false;
