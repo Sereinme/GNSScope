@@ -38,15 +38,15 @@ pub struct DllPllTracking {
     carrier_freq_hz: f64, carrier_phase_rad: f64,
     code_phase_chips: f64, code_freq_chips_per_s: f64,
     dll_filter: LoopFilter,
-    pll_filter: LoopFilter,
-    fll_filt: f64,
-    // Coherent accumulator
+    // Coherent accumulator (N ms before loop update)
     coh_count: u32,
     coh_early: Complex<f64>, coh_prompt: Complex<f64>, coh_late: Complex<f64>,
-    // GNSS-SDR Tracking_FLL_PLL_filter state (3rd order)
-    pll_x: f64,  // initialized to 2*acq_doppler
-    pll_w: f64,  // initialized to 0
-    // Filter constants
+    // GNSS-SDR Tracking_FLL_PLL_filter state (carrier loop).
+    // 3rd order: pll_x = 2*acq_doppler, pll_w = 0
+    // 2nd order: pll_w = acq_doppler,   pll_x = 0
+    pll_x: f64,
+    pll_w: f64,
+    // Filter constants (order-dependent, see set_params)
     w0p: f64, w0p2: f64, w0p3: f64,
     b3: f64, a3: f64, a2: f64,
     w0f: f64, w0f2: f64,
@@ -67,32 +67,40 @@ pub struct DllPllTracking {
 impl DllPllTracking {
     pub fn new(prn: usize, doppler_hz: f64, code_phase_chips: f64, config: TrackingConfig) -> Self {
         let t = 0.001;
-        let w0p = config.pll_bw / 0.7845;
+        // Tracking_FLL_PLL_filter::set_params — natural frequencies depend on order.
+        //   3rd order: w0p = pll_bw/0.7845, w0f = fll_bw/0.53
+        //   2nd order: w0p = pll_bw/0.53,   w0f = fll_bw/0.25
+        let (w0p, w0f) = if config.pll_order >= 3 {
+            (config.pll_bw / 0.7845, config.fll_bw / 0.53)
+        } else {
+            (config.pll_bw / 0.53, config.fll_bw / 0.25)
+        };
         let w0p2 = w0p * w0p;
         let w0p3 = w0p2 * w0p;
+        // Tracking_FLL_PLL_filter::initialize — accumulator init depends on order.
+        //   3rd order: pll_x = 2*acq_doppler, pll_w = 0
+        //   2nd order: pll_w = acq_doppler,   pll_x = 0
+        let (pll_x_init, pll_w_init) = if config.pll_order >= 3 {
+            (2.0 * doppler_hz, 0.0)
+        } else {
+            (0.0, doppler_hz)
+        };
         Self {
             config: config.clone(), code: &PRN_CODES[prn], t,
             carrier_freq_hz: config.if_freq + doppler_hz, carrier_phase_rad: 0.0,
             code_phase_chips, code_freq_chips_per_s: GPS_L1_CA_CODE_RATE,
             dll_filter: LoopFilter::new(config.dll_bw, config.damping, 1.0, t),
-            pll_filter: {
-                let mut f = LoopFilter::new_order(config.pll_bw, t, 2);  // 2nd-order
-                f.initialize(doppler_hz);
-                f
-            },
-            fll_filt: 0.0,
             coh_count: 0,
             coh_early: Complex::new(0.0, 0.0), coh_prompt: Complex::new(0.0, 0.0), coh_late: Complex::new(0.0, 0.0),
-            // 2nd-order PLL init: old_nco = acq_doppler, old_error = 0
-            pll_x: 0.0,  // old_carr_error
-            pll_w: doppler_hz,  // old_carr_nco
+            pll_x: pll_x_init,
+            pll_w: pll_w_init,
             w0p, w0p2, w0p3,
             b3: 2.400, a3: 1.100, a2: 1.414,
-            w0f: config.fll_bw / 0.53, w0f2: (config.fll_bw / 0.53).powi(2),
+            w0f, w0f2: w0f * w0f,
             prev_prompt: Complex::new(0.0, 0.0),
             cn0_i2: 0.0, cn0_q2: 0.0, cn0_n: 0,
             tracking_ms: 0,
-            pull_in_time_ms: 4000,  // 4 seconds pull-in
+            pull_in_time_ms: 4000,  // 4 seconds pull in
             pll_bw_pull_in: 50.0,
             w0p_pull_in: 50.0_f64 / 0.7845,
             w0p2_pull_in: (50.0_f64 / 0.7845).powi(2),
@@ -130,28 +138,40 @@ impl DllPllTracking {
             self.coh_late = Complex::new(0.0, 0.0);
             self.coh_count = 0;
 
-            // DLL (update every coherent_ms)
+            // DLL (update every coherent_ms).
+            // dll_discriminator returns spc*(E-L)/(E+L): positive when local code
+            // leads (E>L), negative when it lags (E<L). GNSS-SDR convention:
+            //   code_freq = chip_rate - dll_error_filt
+            // A lead (disc>0) must slow the code → filt>0 → code_freq decreases.
+            // So the discriminator feeds the filter directly (no sign flip).
             let dll_err = discriminators::dll_discriminator(ce, cl, spc_chips);
-            let dll_out = self.dll_filter.update(-dll_err);
+            let dll_out = self.dll_filter.update(dll_err);
             self.code_freq_chips_per_s = GPS_L1_CA_CODE_RATE - dll_out;
             if self.config.carrier_aiding {
                 self.code_freq_chips_per_s += (self.carrier_freq_hz - self.config.if_freq)
                     * GPS_L1_CA_CODE_RATE / GPS_L1_FREQ;
             }
 
-            // PLL: 2nd-order with low k1 (stable integrator)
+            // PLL: exact port of GNSS-SDR Tracking_FLL_PLL_filter::get_carrier_error
+            // (FLL_discriminator = 0 in PLL-only mode). Input is the normalized phase
+            // error atan(Q/I)/(2π); output is the absolute carrier Doppler in Hz.
             let pll_disc = discriminators::pll_discriminator(cp) / TAU;
             self.last_pll_in = pll_disc;
             self.prev_prompt = cp;
 
-            let k1 = self.w0f / self.w0p2;  // accidentally low proportional gain
-            let k2 = t_coh / (2.0 * 1.0 / self.w0p2);
-            let pll_nco = self.pll_w
-                + k1 * (pll_disc - self.pll_x)
-                + k2 * (pll_disc + self.pll_x);
-            self.pll_x = pll_disc;
-            self.pll_w = pll_nco;
-
+            let pll_nco = if self.config.pll_order >= 3 {
+                // 3rd-order PLL with 2nd-order FLL assist.
+                // FLL term (w0f2 * FLL_disc) vanishes when fll_bw = 0.
+                self.pll_w += t_coh * (self.w0p3 * pll_disc);
+                self.pll_x += t_coh * (0.5 * self.pll_w + self.a3 * self.w0p2 * pll_disc);
+                0.5 * self.pll_x + self.b3 * self.w0p * pll_disc
+            } else {
+                // 2nd-order PLL with 1st-order FLL assist.
+                let pll_w_new = self.pll_w + pll_disc * self.w0p2 * t_coh;
+                let nco = 0.5 * (pll_w_new + self.pll_w) + self.a2 * self.w0p * pll_disc;
+                self.pll_w = pll_w_new;
+                nco
+            };
             self.carrier_freq_hz = self.config.if_freq + pll_nco;
         }
 
@@ -181,6 +201,8 @@ impl DllPllTracking {
 
     pub fn code_freq(&self) -> f64 { self.code_freq_chips_per_s }
     pub fn dll_state(&self) -> f64 { self.dll_filter.state() }
+    pub fn carrier_phase_rad(&self) -> f64 { self.carrier_phase_rad }
+    pub fn carrier_freq_hz(&self) -> f64 { self.carrier_freq_hz }
 
     fn correlate(&mut self, samples: &[Complex<f64>], spc_s: f64) -> (Complex<f64>, Complex<f64>, Complex<f64>) {
         let fs = self.config.fs;

@@ -29,10 +29,11 @@ fn test_real_data_tracking_and_decode() {
     assert!(ar.detected);
     println!("Acq: dopp={:.0} cp={:.1}", ar.doppler_hz, ar.code_phase_chips);
 
-    // Fine doppler search: 40 Hz step, 1.5s tracking, single Q/I sample
+    // Fine doppler search: ±250 Hz around acq, 50 Hz step, 1.5s tracking, Q/I sample.
+    // (PLL bw=50 can pull in ±250 Hz; acq quantization is 250 Hz.)
     let mut best_qi = f64::MAX;
     let mut best_dopp = ar.doppler_hz;
-    for offset in (-600..=0).step_by(20) {
+    for offset in (-250..=250).step_by(50) {
         let init_dopp = ar.doppler_hz + offset as f64;
         let cfg = TrackingConfig { fs: FS, ..Default::default() };
         let mut trk = DllPllTracking::new(0, init_dopp, ar.code_phase_chips, cfg);
@@ -43,9 +44,8 @@ fn test_real_data_tracking_and_decode() {
         let qi = (out.prompt.im / (out.prompt.re.abs() + 1e-30)).abs();
         if qi < best_qi { best_qi = qi; best_dopp = init_dopp; }
     }
-    let best_dopp = 6620.0;  // Known good doppler from prior search
+    println!("Best init_dopp={:.0} Q/I={:.3}", best_dopp, best_qi);
     let best_qi = 0.019;
-    println!("Forced init_dopp={:.0} Q/I={:.3}", best_dopp, best_qi);
 
     // Also try fine code phase search
     let mut best_cp = ar.code_phase_chips;
