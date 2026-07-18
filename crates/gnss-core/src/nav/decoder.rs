@@ -30,6 +30,12 @@ pub struct NavDecoder {
     pub tow: u32,
     pub subframe_id: u8,
     pub words: Vec<NavWord>,
+    /// Per-symbol TOW in milliseconds (GNSS-SDR d_TOW_at_current_symbol_ms).
+    /// Set to the decoded HOW TOW × 1000 after a valid subframe decode, then
+    /// incremented by 20 ms (one bit period) on every subsequent symbol.
+    /// 0 means TOW not yet set (no valid subframe decoded).
+    tow_at_current_symbol_ms: u64,
+    tow_set: bool,
 }
 
 impl NavDecoder {
@@ -43,6 +49,8 @@ impl NavDecoder {
             inverted: false,
             tow: 0, subframe_id: 0,
             words: Vec::new(),
+            tow_at_current_symbol_ms: 0,
+            tow_set: false,
         }
     }
 
@@ -51,6 +59,13 @@ impl NavDecoder {
 
     /// Total symbols fed so far (for diagnostics).
     pub fn bit_counter(&self) -> u32 { self.bit_counter }
+
+    /// Current per-symbol TOW in milliseconds (0 if not yet set).
+    /// This is the transmit-time TOW of the most recently fed symbol.
+    pub fn tow_at_current_symbol_ms(&self) -> u64 { self.tow_at_current_symbol_ms }
+
+    /// Whether TOW has been set (at least one valid subframe decoded).
+    pub fn tow_set(&self) -> bool { self.tow_set }
 
     pub fn feed_symbol(&mut self, symbol: f64) -> bool {
         self.sym_buf[self.sym_idx % 16] = symbol;
@@ -116,6 +131,7 @@ impl NavDecoder {
         }
 
         // Check subframe complete
+        let mut just_decoded = false;
         if self.bit_counter - self.preamble_idx >= SUBFRAME_BITS as u32 {
             if self.subframe_idx >= SUBFRAME_BITS {
                 let n_ok = self.words.iter().filter(|w| w.parity_ok).count();
@@ -127,13 +143,27 @@ impl NavDecoder {
                 self.synced = false;
                 self.subframe_idx = 0;
                 if subframe_valid {
+                    // HOW TOW is the TOW of the NEXT subframe's first symbol
+                    // (i.e. the end of this subframe). The current symbol is
+                    // the last symbol of this subframe, whose transmit TOW
+                    // equals the HOW TOW. Per GNSS-SDR d_TOW_at_current_symbol_ms.
+                    self.tow_at_current_symbol_ms = (self.tow as u64) * 1000;
+                    self.tow_set = true;
+                    just_decoded = true;
                     return true;
                 }
+                // TOW update handled below for the non-decode path.
                 return valid && self.subframe_id >= 1 && self.subframe_id <= 5;
             } else {
                 self.synced = false;
                 self.subframe_idx = 0;
             }
+        }
+        // Per-symbol TOW increment (GNSS-SDR: += 20 ms each symbol once set).
+        // When a subframe decodes, the TOW is set above and we return early,
+        // so this increment only runs for non-decode symbols.
+        if !just_decoded && self.tow_set {
+            self.tow_at_current_symbol_ms = (self.tow_at_current_symbol_ms + 20) % 604_800_000;
         }
         false
     }
