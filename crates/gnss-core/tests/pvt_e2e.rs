@@ -38,6 +38,8 @@ struct Channel {
     sync_start_ms: usize,
     /// Per-ms prompt I history (filled each ms).
     prompt_i: Vec<f64>,
+    /// Per-ms code phase (chips) history, parallel to prompt_i.
+    code_phase: Vec<f64>,
     /// ms index (from file start) of the most recent subframe preamble.
     last_subframe_ms: Option<usize>,
     /// TOW count (HOW) of the most recent subframe.
@@ -104,6 +106,7 @@ fn test_pvt_e2e() {
             boundary: None,
             sync_start_ms: 2000,
             prompt_i: Vec::with_capacity(total_ms),
+            code_phase: Vec::with_capacity(total_ms),
             last_subframe_ms: None,
             tow_count: 0,
             cn0_db_hz: 0.0,
@@ -132,6 +135,7 @@ fn test_pvt_e2e() {
             ch.doppler_hz = out.carrier_doppler_hz;
             let prompt_i = out.prompt.re;
             ch.prompt_i.push(prompt_i);
+            ch.code_phase.push(out.code_phase_chips);
 
             if ch.boundary.is_none() && ms >= ch.sync_start_ms {
                 if let Some(b) = ch.bit_sync.update(prompt_i) {
@@ -221,18 +225,19 @@ fn test_pvt_e2e() {
     // channels have a known TOW.
     // Form pseudoranges at a common receive epoch.
     //
-    // Anchor the receiver clock to GPS time using the first decoded subframe:
-    //   anchor_rx_sow = tow_count × 6 - 6  (start of that subframe, GPS SOW)
-    //   anchor_ms     = ms index when that subframe's first bit was received
-    // Then for the common receive epoch `rx_ms` (all channels tracked to here):
+    // Transmit time reconstruction (per IS-GPS-200 / GNSS-SDR):
+    //   tx_sow = subframe_start_sow + ms_since_subframe + code_phase_ms
+    // where subframe_start_sow = tow_count × 6 - 6 (HOW TOW is the next subframe).
+    // code_phase_ms (0..1 ms) is the sub-millisecond part of the transmit time,
+    // read from the tracking loop's code_phase_chips at the receive epoch.
+    //
+    // Receiver time is anchored to GPS time via the first decoded subframe:
     //   rx_sow = anchor_rx_sow + (rx_ms - anchor_ms) / 1000
-    // Per-channel transmit time (from its most recent subframe + ms offset):
-    //   tx_sow = ch.tow_count × 6 - 6 + (rx_ms - ch.last_subframe_ms) / 1000
-    //   (the signal currently being received was transmitted `ms_since_subframe`
-    //    after the subframe start)
+    // All channels share the same rx_sow (common receive epoch).
+    //
+    // Pseudorange = c · (rx_sow - tx_sow).
     let rx_ms = channels.iter().map(|c| c.prompt_i.len()).max().unwrap_or(0) as u64;
 
-    // Anchor: use the earliest decoded subframe across channels.
     let anchor = channels.iter()
         .filter_map(|c| c.last_subframe_ms.map(|m| (m, c.tow_count)))
         .min_by_key(|&(m, _)| m);
@@ -240,9 +245,9 @@ fn test_pvt_e2e() {
         Some(a) => a,
         None => panic!("no subframe decoded on any channel"),
     };
-    let anchor_rx_sow = anchor_tow as f64 * 6.0 - 6.0;
+    let anchor_rx_sow = anchor_tow as f64 * 6.0 - 6.0 + 0.075; // +est. traveltime ~75ms
     let rx_sow = anchor_rx_sow + (rx_ms as f64 - anchor_ms as f64) / 1000.0;
-    println!("\nrx_ms={} anchor_ms={} anchor_tow={} rx_sow={:.3}",
+    println!("\nrx_ms={} anchor_ms={} anchor_tow={} rx_sow={:.6}",
         rx_ms, anchor_ms, anchor_tow, rx_sow);
 
     let mut pseudoranges: Vec<Pseudorange> = Vec::new();
@@ -251,10 +256,18 @@ fn test_pvt_e2e() {
         if !ephemerides.contains_key(&ch.prn) { continue; }
         let tow_count = ch.tow_count;
         if tow_count == 0 { continue; }
-        // ms elapsed since the start of the most recent subframe on this channel.
-        let ms_since_subframe = rx_ms - ch.last_subframe_ms.unwrap() as u64;
-        // Transmit time: subframe start + elapsed.
-        let tx_sow = tow_count as f64 * 6.0 - 6.0 + ms_since_subframe as f64 / 1000.0;
+        let last_sf_ms = ch.last_subframe_ms.unwrap() as u64;
+        if rx_ms <= last_sf_ms { continue; }
+        // ms elapsed since the subframe's first bit was received.
+        let ms_since_subframe = rx_ms - last_sf_ms;
+        // Sub-millisecond transmit-time offset from code phase at rx epoch.
+        // code_phase_chips in [0, 1023); 1023 chips = 1 ms.
+        let cp_idx = (rx_ms as usize).min(ch.code_phase.len()) - 1;
+        let cp_chips = ch.code_phase[cp_idx];
+        let code_phase_ms = cp_chips / 1023.0;
+        // Transmit time (GPS SOW): subframe start + integer ms + fractional ms.
+        let subframe_start_sow = tow_count as f64 * 6.0 - 6.0;
+        let tx_sow = subframe_start_sow + ms_since_subframe as f64 * 1e-3 + code_phase_ms * 1e-3;
         let pseudorange_m = (rx_sow - tx_sow) * 299_792_458.0;
         let pr = Pseudorange {
             prn: ch.prn,
@@ -264,8 +277,8 @@ fn test_pvt_e2e() {
             cn0_db_hz: ch.cn0_db_hz,
             doppler_hz: ch.doppler_hz,
         };
-        println!("PRN {}: PR={:.0} m tow_count={} ms_since_sf={} tx_sow={:.3} cn0={:.1}",
-            ch.prn, pr.pseudorange_m, tow_count, ms_since_subframe, tx_sow, ch.cn0_db_hz);
+        println!("PRN {}: PR={:.0} m tow={} ms_sf={} cp={:.1} tx_sow={:.6} cn0={:.1}",
+            ch.prn, pr.pseudorange_m, tow_count, ms_since_subframe, cp_chips, tx_sow, ch.cn0_db_hz);
         pseudoranges.push(pr);
     }
 

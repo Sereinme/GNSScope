@@ -234,32 +234,23 @@ impl EphemerisCollector {
         if words.len() != 10 { return None; }
         let r = BitReader::new(words);
         let sf = r.read_u(50, 3) as u8;
-        if !(1..=3).contains(&sf) {
-            eprintln!("  [eph] PRN {} sf={} (not 1-3, skipping)", prn, sf);
-            return None;
-        }
+        if !(1..=3).contains(&sf) { return None; }
         let arr: [NavWord; 10] = [
             words[0], words[1], words[2], words[3], words[4],
             words[5], words[6], words[7], words[8], words[9],
         ];
         let entry = self.per_prn.entry(prn).or_default();
         entry.insert(sf, arr);
-        eprintln!("  [eph] PRN {} got sf={}, have {:?}", prn, sf, entry.keys().collect::<Vec<_>>());
         // Need all of 1, 2, 3.
         if !(entry.contains_key(&1) && entry.contains_key(&2) && entry.contains_key(&3)) {
             return None;
         }
         let mut e = match parse_subframe1(&entry[&1], prn) {
             Some(e) => e,
-            None => { eprintln!("  [eph] PRN {} parse_subframe1 failed", prn); return None; }
+            None => return None,
         };
-        if !parse_subframe2(&mut e, &entry[&2]) {
-            eprintln!("  [eph] PRN {} parse_subframe2 failed", prn); return None;
-        }
-        if !parse_subframe3(&mut e, &entry[&3]) {
-            eprintln!("  [eph] PRN {} parse_subframe3 failed (IODE sf2={} sf3={} iodc={})",
-                prn, e.iode, e.iode, e.iodc); return None;
-        }
+        if !parse_subframe2(&mut e, &entry[&2]) { return None; }
+        if !parse_subframe3(&mut e, &entry[&3]) { return None; }
         Some(e)
     }
 }

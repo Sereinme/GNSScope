@@ -68,18 +68,20 @@ pub fn klobuchar_iono(iono: &IonoParams, lat: f64, lon: f64, az: f64, el: f64, g
 /// `lat`, `h`: receiver geodetic latitude [rad], height above ellipsoid [m].
 /// `el`: satellite elevation [rad].
 pub fn saastamoinen_trop(lat: f64, h: f64, el: f64) -> f64 {
-    // Standard meteorological parameters
+    // Standard meteorological parameters at sea level
     let p0 = 1013.25; // sea-level pressure [hPa]
     let t0 = 293.15;  // sea-level temperature [K] (~20°C)
     let rh = 0.5;     // relative humidity
 
-    // Tropospheric model per RTKLIB tropmodel:
     let hgt = h; // height above ellipsoid [m]
     let _ = lat;
 
-    // Pressure/temperature at receiver height (simple lapse)
-    let pres = p0 * (1.0 - 2.2557e-5 * hgt).powf(5.2568);
-    let temp = t0 - 6.5e-3 * hgt;
+    // Pressure/temperature at receiver height (simple lapse). Clamp the
+    // pressure factor to avoid NaN when the WLS iterate is far from the
+    // surface (e.g. Earth-center init → altitude can be negative or huge).
+    let lapse_factor = (1.0 - 2.2557e-5 * hgt).max(0.01);
+    let pres = p0 * lapse_factor.powf(5.2568);
+    let temp = (t0 - 6.5e-3 * hgt).max(220.0); // clamp temperature to >= -53°C
     let e0 = rh * 6.108 * ((17.15 * temp - 4684.0) / (temp - 38.45)).exp();
 
     // Zenith wet delay
