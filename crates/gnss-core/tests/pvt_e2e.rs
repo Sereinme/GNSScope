@@ -228,80 +228,61 @@ fn test_pvt_e2e() {
     // Form pseudoranges: use the latest subframe TOW per channel + ms offset.
     // Pick a common receive epoch: the latest ms where all ephemeris-bearing
     // channels have a known TOW.
-    // Form pseudoranges using interpolated per-symbol TOW (GNSS-SDR method).
+    // Form pseudoranges (75ms-estimate method — gave best position fix).
     //
-    // Each channel recorded (symbol_idx, tow_ms, bit_idx) per symbol. At a
-    // common receive bit_idx, we linearly interpolate each channel's TOW
-    // between the two surrounding symbol records. This gives 1 ms granularity
-    // (vs 20 ms raw symbol TOW), enough to distinguish satellite ranges.
+    // tx_sow = subframe_start + ms_since_subframe + code_phase_ms
+    // rx_sow = subframe_start + 75ms + elapsed (anchored to first subframe)
+    // pseudorange = c · (rx_sow - tx_sow)
     //
-    // Pseudorange = (T_rx_TOW_ms - interp_TOW_ms) × c, with T_rx seeded from
-    // max satellite TOW + 70 ms (absorbed into WLS clock bias).
-    println!("\n=== Interpolated TOW pseudoranges ===");
+    // The integer-ms part of traveltime comes from ms_since_subframe
+    // (each channel decodes the subframe at a different ms — encoding range).
+    // The sub-ms part comes from code_phase_chips / 1023.
+    let rx_ms = channels.iter().map(|c| c.prompt_i.len()).max().unwrap_or(0) as u64;
 
-    // Find a common bit_idx where ALL ephemeris-bearing channels have TOW.
-    // Use the last bit_idx of the channel with the shortest TOW history.
-    let mut common_bit_idx = usize::MAX;
-    for ch in channels.iter() {
-        if !ephemerides.contains_key(&ch.prn) { continue; }
-        if let Some(hist) = per_channel_tow.get(&ch.prn) {
-            if let Some(&(_, _, last_bit_idx)) = hist.last() {
-                common_bit_idx = common_bit_idx.min(last_bit_idx);
-            }
-        }
-    }
-    if common_bit_idx == usize::MAX {
-        panic!("no common bit_idx with TOW across channels");
-    }
-    println!("common_bit_idx = {}", common_bit_idx);
-
-    // Interpolate each channel's TOW at common_bit_idx.
-    let mut sat_tows: Vec<(u8, f64, f64, f64)> = Vec::new(); // (prn, tow_ms, cn0, doppler)
-    for ch in channels.iter() {
-        if !ephemerides.contains_key(&ch.prn) { continue; }
-        let hist = match per_channel_tow.get(&ch.prn) {
-            Some(h) if !h.is_empty() => h,
-            _ => continue,
-        };
-        // Find two consecutive records bracketing common_bit_idx.
-        // Records are (sym_idx, tow_ms, bit_idx). bit_idx increases by 20.
-        let mut interp_tow: Option<f64> = None;
-        for w in hist.windows(2) {
-            let (_, tow1, bi1) = w[0];
-            let (_, tow2, bi2) = w[1];
-            if common_bit_idx >= bi1 && common_bit_idx <= bi2 {
-                let frac = if bi2 > bi1 {
-                    (common_bit_idx - bi1) as f64 / (bi2 - bi1) as f64
-                } else { 0.0 };
-                interp_tow = Some(tow1 as f64 + frac * (tow2 as f64 - tow1 as f64));
-                break;
-            }
-        }
-        // If common_bit_idx is past the last record, use the last TOW.
-        let tow = interp_tow.unwrap_or_else(|| hist.last().unwrap().1 as f64);
-        println!("PRN {}: interp_TOW_ms = {:.1} ({:.6} s)", ch.prn, tow, tow / 1000.0);
-        sat_tows.push((ch.prn, tow, ch.cn0_db_hz, ch.doppler_hz));
-    }
-    if sat_tows.len() < 4 { panic!("Need ≥4 channels with TOW, got {}", sat_tows.len()); }
-
-    // Receiver TOW: seed from max satellite TOW + 70 ms.
-    let max_tow = sat_tows.iter().map(|&(_, t, _, _)| t).fold(0.0f64, f64::max);
-    let t_rx_tow_ms = max_tow + 70.0;
-    println!("T_rx_TOW_ms = {:.1}", t_rx_tow_ms);
+    let anchor = channels.iter()
+        .filter_map(|c| c.last_subframe_ms.map(|m| (m, c.tow_count)))
+        .min_by_key(|&(m, _)| m);
+    let (anchor_ms, anchor_tow) = match anchor {
+        Some(a) => a,
+        None => panic!("no subframe decoded on any channel"),
+    };
+    let anchor_subframe_start = anchor_tow as f64 * 6.0 - 6.0;
+    let anchor_rx_sow = anchor_subframe_start + 0.075;
+    let rx_sow = anchor_rx_sow + (rx_ms as f64 - anchor_ms as f64) / 1000.0;
 
     let mut pseudoranges: Vec<Pseudorange> = Vec::new();
-    for &(prn, sat_tow_ms, cn0, doppler) in &sat_tows {
-        let traveltime_ms = t_rx_tow_ms - sat_tow_ms;
+    println!("\nPRN  tow  last_sf_ms  ms_since_sf  cp_chips  cp_ms  tx_sow  traveltime  PR");
+    for ch in channels.iter() {
+        if ch.last_subframe_ms.is_none() { continue; }
+        if !ephemerides.contains_key(&ch.prn) { continue; }
+        let tow_count = ch.tow_count;
+        if tow_count == 0 { continue; }
+        let last_sf_ms = ch.last_subframe_ms.unwrap() as u64;
+        if rx_ms <= last_sf_ms { continue; }
+        let ms_since_subframe = rx_ms - last_sf_ms;
+        let cp_idx = (rx_ms as usize).min(ch.code_phase.len()) - 1;
+        let cp_chips = ch.code_phase[cp_idx];
+        let code_phase_ms = cp_chips / 1023.0;
+        let subframe_start_sow = tow_count as f64 * 6.0 - 6.0;
+        let tx_sow = subframe_start_sow + ms_since_subframe as f64 * 1e-3 + code_phase_ms * 1e-3;
+        let traveltime = rx_sow - tx_sow;
+        let pseudorange_m = traveltime * 299_792_458.0;
+        println!("{:3} {} {} {} {:.1} {:.4} {:.6} {:.4}ms {:.0}m",
+            ch.prn, tow_count, last_sf_ms, ms_since_subframe, cp_chips, code_phase_ms,
+            tx_sow, traveltime * 1000.0, pseudorange_m);
         let pr = Pseudorange {
-            prn,
-            pseudorange_m: traveltime_ms * 1e-3 * 299_792_458.0,
-            transmit_time_sow: sat_tow_ms / 1000.0,
-            receive_time_sow: t_rx_tow_ms / 1000.0,
-            cn0_db_hz: cn0,
-            doppler_hz: doppler,
+            prn: ch.prn,
+            pseudorange_m,
+            transmit_time_sow: tx_sow,
+            receive_time_sow: rx_sow,
+            cn0_db_hz: ch.cn0_db_hz,
+            doppler_hz: ch.doppler_hz,
         };
-        println!("PRN {}: traveltime={:.3} ms PR={:.0} m", prn, traveltime_ms, pr.pseudorange_m);
         pseudoranges.push(pr);
+    }
+
+    if pseudoranges.len() < 4 {
+        panic!("Need ≥4 pseudoranges, got {}", pseudoranges.len());
     }
 
     // Solve WLS. Bootstrap with a rough a-priori (Earth center / zero alt).
