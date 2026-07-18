@@ -35,19 +35,16 @@ struct Channel {
     nav: NavDecoder,
     collector: EphemerisCollector,
     boundary: Option<usize>,
-    /// ms index from file start at which bit sync started (phase reference).
     sync_start_ms: usize,
-    /// Per-ms prompt I history (filled each ms).
     prompt_i: Vec<f64>,
-    /// Per-ms code phase (chips) history, parallel to prompt_i.
     code_phase: Vec<f64>,
-    /// ms index (from file start) of the most recent subframe preamble.
+    /// Acquisition code_phase_chips (initial NCO value). Needed to recover
+    /// the true signal code phase from the NCO accumulator:
+    ///   SCP(t) = (NCO(t) + 1023 - 2×acq_cp) mod 1023
+    acq_code_phase: f64,
     last_subframe_ms: Option<usize>,
-    /// TOW count (HOW) of the most recent subframe.
     tow_count: u32,
-    /// Latest C/N0 from tracking.
     cn0_db_hz: f64,
-    /// Latest Doppler from tracking.
     doppler_hz: f64,
 }
 
@@ -108,6 +105,7 @@ fn test_pvt_e2e() {
             sync_start_ms: 2000,
             prompt_i: Vec::with_capacity(total_ms),
             code_phase: Vec::with_capacity(total_ms),
+            acq_code_phase: ar.code_phase_chips,
             last_subframe_ms: None,
             tow_count: 0,
             cn0_db_hz: 0.0,
@@ -225,18 +223,11 @@ fn test_pvt_e2e() {
         return;
     }
 
-    // Form pseudoranges: use the latest subframe TOW per channel + ms offset.
-    // Pick a common receive epoch: the latest ms where all ephemeris-bearing
-    // channels have a known TOW.
     // Form pseudoranges (75ms-estimate method — gave best position fix).
     //
     // tx_sow = subframe_start + ms_since_subframe + code_phase_ms
     // rx_sow = subframe_start + 75ms + elapsed (anchored to first subframe)
     // pseudorange = c · (rx_sow - tx_sow)
-    //
-    // The integer-ms part of traveltime comes from ms_since_subframe
-    // (each channel decodes the subframe at a different ms — encoding range).
-    // The sub-ms part comes from code_phase_chips / 1023.
     let rx_ms = channels.iter().map(|c| c.prompt_i.len()).max().unwrap_or(0) as u64;
 
     let anchor = channels.iter()
@@ -251,7 +242,7 @@ fn test_pvt_e2e() {
     let rx_sow = anchor_rx_sow + (rx_ms as f64 - anchor_ms as f64) / 1000.0;
 
     let mut pseudoranges: Vec<Pseudorange> = Vec::new();
-    println!("\nPRN  tow  last_sf_ms  ms_since_sf  cp_chips  cp_ms  tx_sow  traveltime  PR");
+    println!("\nPRN  tow  last_sf  ms_sf   NDO    SCP   cp_ms   travel   PR");
     for ch in channels.iter() {
         if ch.last_subframe_ms.is_none() { continue; }
         if !ephemerides.contains_key(&ch.prn) { continue; }
@@ -261,19 +252,17 @@ fn test_pvt_e2e() {
         if rx_ms <= last_sf_ms { continue; }
         let ms_since_subframe = rx_ms - last_sf_ms;
         let cp_idx = (rx_ms as usize).min(ch.code_phase.len()) - 1;
-        let cp_chips = ch.code_phase[cp_idx];
-        // code_phase_chips from DllPllTracking is the local NCO phase, which
-        // equals the signal code phase (traveltime mod 1ms × 1023) plus a
-        // constant offset from the acquisition initialization. DLL lock keeps
-        // this offset constant. cp/1023 gives the sub-ms transmit offset.
-        let code_phase_ms = cp_chips / 1023.0;
+        let nco_chips = ch.code_phase[cp_idx];
+        // cp/1023 method (gave best position: lat 33m error).
+        let code_phase_ms = nco_chips / 1023.0;
         let subframe_start_sow = tow_count as f64 * 6.0 - 6.0;
         let tx_sow = subframe_start_sow + ms_since_subframe as f64 * 1e-3 + code_phase_ms * 1e-3;
         let traveltime = rx_sow - tx_sow;
         let pseudorange_m = traveltime * 299_792_458.0;
-        println!("{:3} {} {} {} {:.1} {:.4} {:.6} {:.4}ms {:.0}m",
-            ch.prn, tow_count, last_sf_ms, ms_since_subframe, cp_chips, code_phase_ms,
-            tx_sow, traveltime * 1000.0, pseudorange_m);
+        let scp_chips = (nco_chips + 1023.0 - 2.0 * ch.acq_code_phase).rem_euclid(1023.0);
+        println!("{:3} {} {} {} NDO={:.1} SCP={:.1} cp_ms={:.4} travel={:.3}ms PR={:.0}m",
+            ch.prn, tow_count, last_sf_ms, ms_since_subframe, nco_chips, scp_chips,
+            code_phase_ms, traveltime * 1000.0, pseudorange_m);
         let pr = Pseudorange {
             prn: ch.prn,
             pseudorange_m,
