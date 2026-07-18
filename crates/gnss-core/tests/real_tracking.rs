@@ -3,7 +3,7 @@
 use gnss_core::acquisition::{PcpsAcquisition, PcpsConfig};
 use gnss_core::io::{IqFormat, IqReader};
 use gnss_core::nav::NavDecoder;
-use gnss_core::tracking::{DllPllTracking, TrackingConfig};
+use gnss_core::tracking::{BitSynchronizer, DllPllTracking, TrackingConfig};
 use num_complex::Complex;
 use std::path::Path;
 
@@ -128,48 +128,53 @@ fn test_real_data_tracking_and_decode() {
             if sum > 0.0 { "+" } else { "-" });
     }
 
-    // 20-phase bit sync + NavDecoder
-    // Use 10s window to avoid code phase drift
-    let skip_ms = 6000;
-    let window_ms = 10000;
-    let mut best_sf = 0u32;
-    let mut best_boundary = 0;
-    for boundary in 0..20 {
-        let mut dec = NavDecoder::new();
-        let mut sf_count = 0u32;
-        let mut tlm_pass = 0u32;
-        let mut how_pass = 0u32;
-        let mut total_frames = 0u32;
-        let mut bit_idx = skip_ms + boundary;
-        let end_idx = (skip_ms + window_ms).min(prompt_i.len());
-        while bit_idx + 20 <= end_idx {
-            // Majority vote: count positive vs negative
-            let mut pos = 0i32;
-            let mut neg = 0i32;
-            for j in 0..20 {
-                if prompt_i[bit_idx + j] > 0.0 { pos += 1; } else { neg += 1; }
-            }
-            // Use sum but with majority-vote sign
-            let sum: f64 = prompt_i[bit_idx..bit_idx + 20].iter().sum();
-            let sym = if pos > neg { sum.abs() } else { -sum.abs() };
-            if dec.feed_symbol(sym) {
-                sf_count += 1;
-                if sf_count <= 3 {
-                    println!("B{}: SF={} TOW={}", boundary, dec.subframe_id, dec.tow);
-                }
-            }
-            if dec.words.len() >= 2 {
-                total_frames += 1;
-                if dec.words[0].parity_ok { tlm_pass += 1; }
-                if dec.words[1].parity_ok { how_pass += 1; }
-            }
-            bit_idx += 20;
+    // Histogram bit synchronization: find the 20 ms bit boundary from sign
+    // transitions in the 1 ms prompt stream. Skip the first 2 s (pull-in).
+    println!("\n=== Histogram bit sync ===");
+    let mut bit_sync = BitSynchronizer::new();
+    let sync_start = 2000;
+    let mut boundary = None;
+    for ms in sync_start..prompt_i.len() {
+        if let Some(b) = bit_sync.update(prompt_i[ms]) {
+            boundary = Some(b);
+            println!("Bit sync locked at ms={} boundary={}", ms, b);
+            break;
         }
-        if tlm_pass > 0 || how_pass > 0 {
-            println!("  b{:2}: sf={} tlm={}/{} how={}/{}", boundary, sf_count, tlm_pass, total_frames, how_pass, total_frames);
-        }
-        if sf_count > best_sf { best_sf = sf_count; best_boundary = boundary; }
     }
-    println!("Best: b={} sf={}", best_boundary, best_sf);
-    assert!(best_sf >= 1, "Expected ≥1 subframe");
+    let boundary = match boundary {
+        Some(b) => b,
+        None => panic!("Bit sync did not lock"),
+    };
+
+    // Compute the absolute ms index where the first full bit starts after sync.
+    // bit_sync locked at some ms; the boundary is the phase within the 20 ms
+    // cycle. We advance to the next occurrence of that phase.
+    let mut first_bit_ms = sync_start;
+    while first_bit_ms < prompt_i.len() && (first_bit_ms - sync_start) % 20 != boundary {
+        first_bit_ms += 1;
+    }
+    println!("First full bit at ms={} (boundary={})", first_bit_ms, boundary);
+
+    // Feed NavDecoder: coherent 20 ms sum per symbol.
+    let mut dec = NavDecoder::new();
+    let mut sym_idx = 0u32;
+    let mut bit_idx = first_bit_ms;
+    let mut decoded = false;
+    while bit_idx + 20 <= prompt_i.len() {
+        let sum: f64 = prompt_i[bit_idx..bit_idx + 20].iter().sum();
+        if dec.feed_symbol(sum) {
+            println!("\n*** SUBFRAME DECODED at symbol {}! sf={} tow={} ***",
+                sym_idx, dec.subframe_id, dec.tow);
+            println!("  TLM parity_ok={} raw=0x{:08X}", dec.words[0].parity_ok, dec.words[0].raw_parity);
+            println!("  HOW parity_ok={} raw=0x{:08X}", dec.words[1].parity_ok, dec.words[1].raw_parity);
+            decoded = true;
+            break;
+        }
+        sym_idx += 1;
+        bit_idx += 20;
+    }
+    if !decoded {
+        println!("\nNot decoded. Final synced={}", dec.is_synced());
+    }
+    assert!(decoded, "Expected subframe decode with bit sync");
 }
