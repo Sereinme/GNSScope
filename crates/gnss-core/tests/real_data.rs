@@ -47,6 +47,7 @@ fn test_real_data_acquisition() {
         doppler_max: 10_000.0,
         doppler_step: 250.0, // finer step for real data
         coherent_integration_ms: 1.0,
+        noncoherent_integrations: 1,
         threshold: 15.0, // Real GPS data has high noise floor
     };
     let mut acq = PcpsAcquisition::new(config);
@@ -89,12 +90,13 @@ fn test_real_data_acquisition_with_noncoherent_integration() {
     let mut buffer = vec![Complex::new(0.0, 0.0); samples_per_ms * 20];
     reader.read(&mut buffer, samples_per_ms * 20).unwrap();
 
-    // Simple non-coherent: run acquisition on each 1ms, accumulate magnitudes
+    // PCPS non-coherent integration: accumulate 10 coherent 1ms power maps.
     let config = PcpsConfig {
         fs: FS,
         doppler_max: 10_000.0,
         doppler_step: 250.0,
         coherent_integration_ms: 1.0,
+        noncoherent_integrations: 10,
         threshold: 2.2,
         ..Default::default()
     };
@@ -102,18 +104,9 @@ fn test_real_data_acquisition_with_noncoherent_integration() {
     let mut detections = Vec::new();
 
     for prn in 0..PRN_COUNT {
-        // Try multiple 1ms windows
-        let mut best_peak = 0.0;
-        for ms in 0..10 {
-            let chunk = &buffer[ms * samples_per_ms..(ms + 1) * samples_per_ms];
-            let result = acq.acquire(prn, chunk);
-            if result.peak_to_mean > best_peak {
-                best_peak = result.peak_to_mean;
-            }
-            if result.detected && result.peak_to_mean > 3.0 {
-                detections.push(result);
-                break;
-            }
+        let result = acq.acquire(prn, &buffer[..samples_per_ms * 10]);
+        if result.detected && result.peak_to_mean > 3.0 {
+            detections.push(result);
         }
     }
 

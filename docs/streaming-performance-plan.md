@@ -59,6 +59,7 @@ Acceptance:
 
 ### Phase C: Replace Legacy Fine Doppler
 
+- Status: PCPS non-coherent integration API is implemented and covered by synthetic and CTTC real-data acquisition tests. The e2e path still keeps legacy fine Doppler until the next migration step.
 - Remove hard-coded `REF_DOPPLERS`.
 - Remove 2 s fine Doppler search and its temporary cache.
 - Extend PCPS acquisition to support non-coherent integration:

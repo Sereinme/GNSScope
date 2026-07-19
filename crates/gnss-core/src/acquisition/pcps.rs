@@ -40,6 +40,8 @@ pub struct PcpsConfig {
     pub doppler_step: f64,
     /// Coherent integration time in seconds (typically 0.001 for 1ms)
     pub coherent_integration_ms: f64,
+    /// Number of coherent integrations to accumulate non-coherently.
+    pub noncoherent_integrations: usize,
     /// Detection threshold: peak/mean ratio
     pub threshold: f64,
 }
@@ -52,6 +54,7 @@ impl Default for PcpsConfig {
             doppler_max: 10_000.0,
             doppler_step: 500.0,
             coherent_integration_ms: 1.0,
+            noncoherent_integrations: 1,
             threshold: 2.5,
         }
     }
@@ -73,8 +76,8 @@ impl PcpsAcquisition {
 
     /// Acquire a single PRN on the given signal samples.
     ///
-    /// `samples` must contain exactly `samples_per_code` complex samples
-    /// (1 ms of data at the configured sample rate).
+    /// `samples` must contain `noncoherent_integrations` coherent windows.
+    /// With the default config this is exactly one 1 ms GPS L1 C/A code.
     pub fn acquire(&mut self, prn: usize, samples: &[Complex<f64>]) -> AcquisitionResult {
         self.acquire_at_sample(prn, samples, 0)
     }
@@ -85,13 +88,31 @@ impl PcpsAcquisition {
         samples: &[Complex<f64>],
         sample_index: u64,
     ) -> AcquisitionResult {
+        self.acquire_noncoherent_at_sample(
+            prn,
+            samples,
+            sample_index,
+            self.config.noncoherent_integrations,
+        )
+    }
+
+    pub fn acquire_noncoherent_at_sample(
+        &mut self,
+        prn: usize,
+        samples: &[Complex<f64>],
+        sample_index: u64,
+        noncoherent_integrations: usize,
+    ) -> AcquisitionResult {
         let samples_per_code =
             (self.config.fs * self.config.coherent_integration_ms / 1000.0) as usize;
+        let noncoherent_integrations = noncoherent_integrations.max(1);
+        let expected_samples = samples_per_code * noncoherent_integrations;
         debug_assert_eq!(
             samples.len(),
-            samples_per_code,
-            "Expected {} samples, got {}",
-            samples_per_code,
+            expected_samples,
+            "Expected {} samples for {} non-coherent integrations, got {}",
+            expected_samples,
+            noncoherent_integrations,
             samples.len()
         );
 
@@ -104,7 +125,30 @@ impl PcpsAcquisition {
         // Step 2: Allocate magnitude grid [doppler_bins × fft_size]
         let mut magnitude_grid = vec![vec![0.0f64; fft_size]; doppler_bins.len()];
 
-        // Step 3: Doppler search loop (cf. GNSS-SDR doppler_grid)
+        // Step 3: Doppler search per coherent window, accumulated as power.
+        for integration_idx in 0..noncoherent_integrations {
+            let start = integration_idx * samples_per_code;
+            let end = start + samples_per_code;
+            self.accumulate_coherent_grid(
+                &samples[start..end],
+                &doppler_bins,
+                &local_code_fft_conj,
+                &mut magnitude_grid,
+            );
+        }
+
+        // Step 4: Compute statistics (cf. GNSS-SDR compute_statistics)
+        self.compute_result(prn, sample_index, &doppler_bins, &magnitude_grid, fft_size)
+    }
+
+    fn accumulate_coherent_grid(
+        &mut self,
+        samples: &[Complex<f64>],
+        doppler_bins: &[i32],
+        local_code_fft_conj: &[Complex<f64>],
+        magnitude_grid: &mut [Vec<f64>],
+    ) {
+        let fft_size = samples.len();
         for (bin_idx, &doppler) in doppler_bins.iter().enumerate() {
             let doppler_with_if = doppler as f64 + self.config.if_freq;
 
@@ -142,12 +186,10 @@ impl PcpsAcquisition {
 
             // Normalize IFFT and compute magnitude squared
             let n = fft_size as f64;
-            let mag_sq: Vec<f64> = ifft_input.iter().map(|v| v.norm_sqr() / (n * n)).collect();
-            magnitude_grid[bin_idx] = mag_sq;
+            for (code_idx, value) in ifft_input.iter().enumerate() {
+                magnitude_grid[bin_idx][code_idx] += value.norm_sqr() / (n * n);
+            }
         }
-
-        // Step 4: Compute statistics (cf. GNSS-SDR compute_statistics)
-        self.compute_result(prn, sample_index, &doppler_bins, &magnitude_grid, fft_size)
     }
 
     /// Generate the FFT of the local PRN code, conjugated.
@@ -245,6 +287,45 @@ impl PcpsAcquisition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f64::consts::TAU;
+
+    fn synthetic_signal_ms(
+        prn: usize,
+        doppler_hz: f64,
+        code_phase_chips: f64,
+        fs: f64,
+        amp: f64,
+        start_sample: usize,
+        samples: usize,
+    ) -> Vec<Complex<f64>> {
+        let samples_per_chip = fs / 1.023e6;
+        let code = &PRN_CODES[prn];
+        (0..samples)
+            .map(|idx| {
+                let sample_index = start_sample + idx;
+                let phase = TAU * doppler_hz * sample_index as f64 / fs;
+                let chip_idx = ((sample_index as f64 / samples_per_chip + code_phase_chips)
+                    as usize)
+                    % CODE_LENGTH;
+                let chip = code[chip_idx] as f64;
+                Complex::new(phase.cos(), phase.sin()) * Complex::new(amp * chip, 0.0)
+            })
+            .collect()
+    }
+
+    fn deterministic_noise(sample_index: usize) -> Complex<f64> {
+        let x = ((sample_index as u64)
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407)
+            >> 32) as u32;
+        let y = ((sample_index as u64)
+            .wrapping_mul(1442695040888963407)
+            .wrapping_add(6364136223846793005)
+            >> 32) as u32;
+        let re = (x as f64 / u32::MAX as f64) * 2.0 - 1.0;
+        let im = (y as f64 / u32::MAX as f64) * 2.0 - 1.0;
+        Complex::new(re, im)
+    }
 
     #[test]
     fn test_no_signal_returns_no_detection() {
@@ -266,5 +347,53 @@ mod tests {
         let result = acq.acquire_at_sample(0, &noise, 123_456);
 
         assert_eq!(result.sample_index, 123_456);
+    }
+
+    #[test]
+    fn test_noncoherent_acquisition_accumulates_1ms_power_maps() {
+        let fs = 4_000_000.0;
+        let samples_per_ms = fs as usize / 1000;
+        let integrations = 10;
+        let prn = 5;
+        let doppler = 1500.0;
+        let code_phase = 512.0;
+        let amp = 1.2;
+        let mut signal = synthetic_signal_ms(
+            prn,
+            doppler,
+            code_phase,
+            fs,
+            amp,
+            0,
+            samples_per_ms * integrations,
+        );
+        for (idx, sample) in signal.iter_mut().enumerate() {
+            *sample += deterministic_noise(idx);
+        }
+
+        let config = PcpsConfig {
+            fs,
+            doppler_max: 5_000.0,
+            doppler_step: 500.0,
+            threshold: 3.0,
+            noncoherent_integrations: integrations,
+            ..Default::default()
+        };
+        let mut noncoherent = PcpsAcquisition::new(config);
+        let result = noncoherent.acquire_at_sample(prn, &signal, 42_000);
+
+        assert!(result.detected);
+        assert_eq!(result.sample_index, 42_000);
+        assert_eq!(result.prn, (prn + 1) as u8);
+        assert!(
+            (result.doppler_hz - doppler).abs() <= 500.0,
+            "Doppler error: expected {doppler}, got {}",
+            result.doppler_hz
+        );
+        assert!(
+            (result.code_phase_chips - code_phase).abs() < 2.0,
+            "Code phase error: expected {code_phase}, got {}",
+            result.code_phase_chips
+        );
     }
 }
