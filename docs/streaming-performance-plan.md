@@ -336,6 +336,14 @@ peak_working_set_mib=194.43
 peak_private_mib=166.77
 ```
 
+Current deterministic tracking-parallel baseline:
+
+```text
+elapsed_s=132.38
+peak_working_set_mib=194.13
+peak_private_mib=167.74
+```
+
 ## Open Calibration Items
 
 - PCPS non-coherent integration threshold.

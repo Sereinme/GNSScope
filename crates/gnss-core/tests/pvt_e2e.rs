@@ -22,6 +22,9 @@ use gnss_core::tracking::{BitSynchronizer, DllPllTracking, TrackingConfig};
 use num_complex::Complex;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 
 const DATA_FILE: &str =
     "../../data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat";
@@ -62,6 +65,30 @@ struct Channel {
     tow_count: u32,
     cn0_db_hz: f64,
     doppler_hz: f64,
+}
+
+struct TrackingWorker {
+    command_tx: SyncSender<TrackingWorkerCommand>,
+    report_rx: Receiver<TrackingStepReport>,
+    join: JoinHandle<Channel>,
+}
+
+enum TrackingWorkerCommand {
+    Process {
+        ms: usize,
+        chunk: Arc<[Complex<f64>]>,
+    },
+    Finish,
+}
+
+#[derive(Debug, Clone)]
+struct TrackingStepReport {
+    prn: u8,
+    ms: usize,
+    doppler_hz: f64,
+    cn0_db_hz: f64,
+    prompt_i_abs: f64,
+    bit_sync_boundary: Option<usize>,
 }
 
 #[test]
@@ -203,51 +230,69 @@ fn test_pvt_e2e() {
         .unwrap_or("none");
     let mut subframes_decoded_per_prn: std::collections::BTreeMap<u8, u32> = Default::default();
 
-    // Phase 1: track all channels, collect prompt_i, run bit sync.
-    let mut stream_reader = IqReader::open(data_path, IqFormat::Int16).unwrap();
-    let mut stream_chunk = vec![Complex::new(0.0, 0.0); spm * STREAM_CHUNK_MS];
-    for ms in 0..total_ms {
-        read_iq_exact(&mut stream_reader, &mut stream_chunk, spm);
-        let chunk = &stream_chunk[..spm];
-        for ch in channels.iter_mut() {
-            let out = ch.trk.process(chunk);
-            ch.cn0_db_hz = out.cn0_db_hz;
-            ch.doppler_hz = out.carrier_doppler_hz;
-            let prompt_i = out.prompt.re;
-            ch.prompt_i.push(prompt_i);
-            ch.code_phase.push(out.code_phase_chips);
-            ch.sample_counter.push(out.sample_counter);
-            ch.tracking_sample_counter.push(out.tracking_sample_counter);
-            ch.rem_code_phase_samples.push(out.rem_code_phase_samples);
-            ch.dll_error_history_chips.push(out.dll_error.abs());
-            ch.cn0_history_db_hz.push(out.cn0_db_hz);
-            ch.doppler_history_hz.push(out.carrier_doppler_hz);
+    channels.sort_by_key(|ch| ch.prn);
 
-            if ch.boundary.is_none() && ms >= ch.sync_start_ms {
-                if let Some(b) = ch.bit_sync.update(prompt_i) {
-                    ch.boundary = Some(b);
-                    ch.trk.set_bit_boundary_from_sync(b, ch.sync_start_ms);
-                    eprintln!("PRN {} bit sync locked at ms={} boundary={}", ch.prn, ms, b);
-                }
-            }
+    // Phase 1: track all channels in parallel, collect prompt_i, run bit sync.
+    let mut stream_reader = IqReader::open(data_path, IqFormat::Int16).unwrap();
+    let workers: Vec<TrackingWorker> = channels.into_iter().map(spawn_tracking_worker).collect();
+    for ms in 0..total_ms {
+        let mut chunk = vec![Complex::new(0.0, 0.0); spm * STREAM_CHUNK_MS];
+        read_iq_exact(&mut stream_reader, &mut chunk, spm);
+        let chunk: Arc<[Complex<f64>]> = Arc::from(chunk.into_boxed_slice());
+        for worker in &workers {
+            worker
+                .command_tx
+                .send(TrackingWorkerCommand::Process {
+                    ms,
+                    chunk: Arc::clone(&chunk),
+                })
+                .expect("tracking worker should accept process command");
+        }
+
+        let mut reports = Vec::with_capacity(workers.len());
+        for worker in &workers {
+            reports.push(
+                worker
+                    .report_rx
+                    .recv()
+                    .expect("tracking worker should report each ms"),
+            );
+        }
+        reports.sort_by_key(|report| report.prn);
+
+        for report in reports
+            .iter()
+            .filter(|report| report.bit_sync_boundary.is_some())
+        {
+            eprintln!(
+                "PRN {} bit sync locked at ms={} boundary={}",
+                report.prn,
+                report.ms,
+                report.bit_sync_boundary.unwrap()
+            );
         }
 
         // Periodic tracking-quality diagnostic (every 5 s).
         if ms > 0 && ms % 5000 == 0 {
-            for ch in channels.iter() {
-                let qi = (ch.prompt_i.last().unwrap_or(&0.0).abs()) / 1.0;
-                let _ = qi;
-                // Re-read latest prompt magnitude from the tracker's last output is not stored;
-                // use |prompt_i| as a proxy for |I|.
-                let last_i = ch.prompt_i.last().copied().unwrap_or(0.0);
-                let abs_p = last_i.abs();
+            for report in &reports {
                 eprintln!(
                     "  [ms={:>6}] PRN {:2} dopp={:+.0} |I|={:.0} cn0={:.1}",
-                    ms, ch.prn, ch.doppler_hz, abs_p, ch.cn0_db_hz
+                    ms, report.prn, report.doppler_hz, report.prompt_i_abs, report.cn0_db_hz
                 );
             }
         }
     }
+    let mut channels: Vec<Channel> = workers
+        .into_iter()
+        .map(|worker| {
+            worker
+                .command_tx
+                .send(TrackingWorkerCommand::Finish)
+                .expect("tracking worker should accept finish command");
+            worker.join.join().expect("tracking worker should join")
+        })
+        .collect();
+    channels.sort_by_key(|ch| ch.prn);
 
     // Phase 2: for each bit-synced channel, replay prompt_i from the first
     // full bit boundary through NavDecoder + EphemerisCollector. This mirrors
@@ -979,6 +1024,74 @@ fn kalman_speed_mps(solution: &gnss_core::pvt::KalmanSolution) -> f64 {
         + solution.ecef_velocity_mps[1].powi(2)
         + solution.ecef_velocity_mps[2].powi(2))
     .sqrt()
+}
+
+fn spawn_tracking_worker(mut channel: Channel) -> TrackingWorker {
+    let (command_tx, command_rx) = sync_channel::<TrackingWorkerCommand>(1);
+    let (report_tx, report_rx) = sync_channel::<TrackingStepReport>(1);
+    let join = thread::spawn(move || {
+        while let Ok(command) = command_rx.recv() {
+            match command {
+                TrackingWorkerCommand::Process { ms, chunk } => {
+                    let report = process_tracking_ms(&mut channel, &chunk, ms);
+                    report_tx
+                        .send(report)
+                        .expect("main thread should receive tracking reports");
+                }
+                TrackingWorkerCommand::Finish => break,
+            }
+        }
+        channel
+    });
+
+    TrackingWorker {
+        command_tx,
+        report_rx,
+        join,
+    }
+}
+
+fn process_tracking_ms(
+    channel: &mut Channel,
+    chunk: &[Complex<f64>],
+    ms: usize,
+) -> TrackingStepReport {
+    let out = channel.trk.process(chunk);
+    channel.cn0_db_hz = out.cn0_db_hz;
+    channel.doppler_hz = out.carrier_doppler_hz;
+    let prompt_i = out.prompt.re;
+    channel.prompt_i.push(prompt_i);
+    channel.code_phase.push(out.code_phase_chips);
+    channel.sample_counter.push(out.sample_counter);
+    channel
+        .tracking_sample_counter
+        .push(out.tracking_sample_counter);
+    channel
+        .rem_code_phase_samples
+        .push(out.rem_code_phase_samples);
+    channel.dll_error_history_chips.push(out.dll_error.abs());
+    channel.cn0_history_db_hz.push(out.cn0_db_hz);
+    channel.doppler_history_hz.push(out.carrier_doppler_hz);
+
+    let mut bit_sync_boundary = None;
+    if channel.boundary.is_none() && ms >= channel.sync_start_ms {
+        if let Some(boundary) = channel.bit_sync.update(prompt_i) {
+            channel.boundary = Some(boundary);
+            channel
+                .trk
+                .set_bit_boundary_from_sync(boundary, channel.sync_start_ms);
+            bit_sync_boundary = Some(boundary);
+        }
+    }
+
+    TrackingStepReport {
+        prn: channel.prn,
+        ms,
+        doppler_hz: channel.doppler_hz,
+        cn0_db_hz: channel.cn0_db_hz,
+        prompt_i_abs: prompt_i.abs(),
+        bit_sync_boundary,
+    }
 }
 
 fn read_iq_window_ms(
