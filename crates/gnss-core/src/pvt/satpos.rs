@@ -81,6 +81,14 @@ pub fn satellite_position(eph: &Ephemeris, t: f64) -> SatPos {
     }
 }
 
+/// Satellite clock drift [s/s] at GPS system time `t`.
+pub fn satellite_clock_drift(eph: &Ephemeris, t: f64) -> f64 {
+    const DT_S: f64 = 0.5;
+    (satellite_position(eph, t + DT_S).clock_correction_s
+        - satellite_position(eph, t - DT_S).clock_correction_s)
+        / (2.0 * DT_S)
+}
+
 /// Satellite velocity (ECEF, m/s) via analytical derivatives. Useful for
 /// Doppler-based velocity solution (not required for M2 position-only, but
 /// cheap to derive).

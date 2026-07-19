@@ -30,7 +30,10 @@ This plan captures the agreed optimization design before changing the receiver p
 - Acquisition and tracking are currently sequential at startup; per-epoch tracking is deterministic parallel.
 - The test now uses 10 ms non-coherent PCPS acquisition Doppler instead of hard-coded GNSS-SDR reference Dopplers and the slow 2 s fine Doppler search.
 - Continuous PVT currently builds epochs at 1 Hz, while the GNSS-SDR CTTC config uses `PVT.output_rate_ms=100`.
-- Position is already close to GNSS-SDR/NMEA reference, but velocity and time are not yet strict GNSS-SDR comparisons.
+- Position is already close to the GNSS-SDR/NMEA reference. All 739 CTTC `$GPRMC` records report `0.00 kn`, but this is not a raw instantaneous-Doppler reference: the fixture configuration enables arithmetic PVT averaging (`PVT.flag_averaging=true`, `PVT.averaging_depth=10`), and it contains no observables dump or PVT Monitor output. The exact zero in every record therefore cannot validate the four-state Doppler solution or receiver clock drift.
+- The local `reference/gnss-sdr` checkout is the authoritative GNSS-SDR source for this work and must be inspected locally rather than searched online. Other technical questions may still use online sources when needed.
+- GNSS-SDR's current RTKLIB path solves velocity and receiver clock drift together with an unweighted, instantaneous four-state least-squares equation. GNSScope now matches that equation, including satellite clock drift and Earth-rotation range-rate correction, and linearly interpolates per-channel Doppler to a common receive epoch.
+- On the CTTC five-satellite epoch, the corrected unsmoothed solution is `2.184 m/s` with receiver clock drift `-1582.455 m/s` (`-5.279 ppm`). Its Doppler residual RMS is about `0.13 m/s`; with only one redundant observation, that small measurement noise is strongly amplified into the unconstrained three-dimensional velocity. Static ground truth does not mathematically force a noisy single-epoch kinematic estimate to exactly zero.
 
 ## Current Implementation Status (2026-07-19)
 

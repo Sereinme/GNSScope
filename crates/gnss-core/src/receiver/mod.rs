@@ -850,6 +850,7 @@ struct ActiveTrackingChannel {
     collector: EphemerisCollector,
     bit_boundary: Option<usize>,
     nav_symbol_accumulator: Vec<f64>,
+    previous_tracking_output: Option<TrackingOutput>,
     latest_tracking_output: Option<TrackingOutput>,
 }
 
@@ -862,6 +863,7 @@ impl ActiveTrackingChannel {
             collector: EphemerisCollector::new(),
             bit_boundary: None,
             nav_symbol_accumulator: Vec::with_capacity(20),
+            previous_tracking_output: None,
             latest_tracking_output: None,
         }
     }
@@ -879,6 +881,26 @@ struct StreamingTrackingStepResult {
     output: TrackingOutput,
     pre_update_events: Vec<StreamingPvtEvent>,
     nav_events: Vec<StreamingPvtEvent>,
+}
+
+fn interpolate_tracking_doppler(
+    previous: &TrackingOutput,
+    current: &TrackingOutput,
+    common_rx_sample: f64,
+) -> Option<f64> {
+    let previous_rx_sample =
+        previous.tracking_sample_counter as f64 + previous.rem_code_phase_samples;
+    let current_rx_sample = current.tracking_sample_counter as f64 + current.rem_code_phase_samples;
+    if current_rx_sample <= previous_rx_sample
+        || !(previous_rx_sample..=current_rx_sample).contains(&common_rx_sample)
+    {
+        return None;
+    }
+    let factor = (common_rx_sample - previous_rx_sample) / (current_rx_sample - previous_rx_sample);
+    Some(
+        previous.carrier_doppler_hz
+            + (current.carrier_doppler_hz - previous.carrier_doppler_hz) * factor,
+    )
 }
 
 pub struct StreamingPvtRunner {
@@ -965,6 +987,13 @@ impl StreamingPvtRunner {
     }
 
     pub fn tracking_channel_snapshots(&self) -> Vec<TrackingChannelSnapshot<'_>> {
+        self.tracking_channel_snapshots_at(self.acquisition_ring.next_sample_index() as f64)
+    }
+
+    pub fn tracking_channel_snapshots_at(
+        &self,
+        common_rx_sample: f64,
+    ) -> Vec<TrackingChannelSnapshot<'_>> {
         self.channels
             .pvt_eligible_prns()
             .into_iter()
@@ -972,6 +1001,13 @@ impl StreamingPvtRunner {
                 let active = self.active_tracking.get(&prn)?;
                 let output = active.latest_tracking_output.as_ref()?;
                 let nav = self.nav_state.channel(prn)?;
+                let doppler_hz = active
+                    .previous_tracking_output
+                    .as_ref()
+                    .and_then(|previous| {
+                        interpolate_tracking_doppler(previous, output, common_rx_sample)
+                    })
+                    .unwrap_or(output.carrier_doppler_hz);
                 Some(TrackingChannelSnapshot {
                     prn,
                     tow_count: nav.last_tow_count?,
@@ -981,7 +1017,7 @@ impl StreamingPvtRunner {
                     rem_code_phase_samples: output.rem_code_phase_samples,
                     tow_history: nav.tow_history.as_slice(),
                     cn0_db_hz: output.cn0_db_hz,
-                    doppler_hz: output.carrier_doppler_hz,
+                    doppler_hz,
                     tracking_jitter_chips: output.dll_error.abs(),
                 })
             })
@@ -989,7 +1025,7 @@ impl StreamingPvtRunner {
     }
 
     pub fn observables_input(&self, common_rx_sample: f64) -> ObservablesInputSet<'_> {
-        let snapshots = self.tracking_channel_snapshots();
+        let snapshots = self.tracking_channel_snapshots_at(common_rx_sample);
         ObservablesInputBuilder::new(common_rx_sample, self.config.sample_rate_hz)
             .with_channel_snapshots(&snapshots)
             .build()
@@ -1266,7 +1302,7 @@ impl StreamingPvtRunner {
             self.config.nav_tow_tag_latency_ms,
             self.config.samples_per_ms(),
         );
-        active.latest_tracking_output = Some(output.clone());
+        active.previous_tracking_output = active.latest_tracking_output.replace(output.clone());
 
         StreamingTrackingStepResult {
             prn,
@@ -2347,7 +2383,6 @@ mod tests {
                 ionosphere: None,
             },
         )));
-
         let snapshots = runner.tracking_channel_snapshots();
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].prn, prn);
@@ -2366,6 +2401,17 @@ mod tests {
             .expect("pseudorange epoch");
         assert_eq!(epoch.pseudoranges.len(), 1);
         assert_eq!(epoch.pseudoranges[0].prn, prn);
+    }
+
+    #[test]
+    fn streaming_runner_interpolates_doppler_to_common_receive_epoch() {
+        let previous = tracking_output(4_000, 4_000, 1_000.0);
+        let current = tracking_output(8_000, 8_000, 1_200.0);
+
+        let doppler = interpolate_tracking_doppler(&previous, &current, 6_000.25)
+            .expect("common epoch is bracketed");
+
+        assert!((doppler - 1_100.0).abs() < 1e-12);
     }
 
     #[test]

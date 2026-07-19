@@ -6,7 +6,7 @@
 use crate::nav::ephemeris::{Ephemeris, EphemerisMap};
 use crate::pvt::coords::{ecef_to_lla, Ecef};
 use crate::pvt::pseudorange::Pseudorange;
-use crate::pvt::satpos::satellite_position;
+use crate::pvt::satpos::{satellite_clock_drift, satellite_position};
 use nalgebra::{DMatrix, DVector, Matrix4, Vector4};
 
 const C_LIGHT: f64 = 299_792_458.0;
@@ -21,9 +21,13 @@ pub struct DopplerVelocityObservation {
     pub line_of_sight: Ecef,
     /// Satellite velocity in the same ECEF frame as `line_of_sight` [m/s].
     pub satellite_velocity_mps: Ecef,
+    /// Satellite position at the transmit epoch [m].
+    pub satellite_ecef: Ecef,
+    /// Satellite clock drift at the transmit epoch [s/s].
+    pub satellite_clock_drift_sps: f64,
     /// Carrier Doppler from tracking [Hz].
     pub doppler_hz: f64,
-    /// Carrier-to-noise density [dB-Hz], used as a light weighting term.
+    /// Carrier-to-noise density [dB-Hz], retained for quality diagnostics.
     pub cn0_db_hz: f64,
 }
 
@@ -74,49 +78,52 @@ pub fn solve_doppler_velocity_from_observations(
     }
 
     let n = observations.len();
-    let mut y = DVector::<f64>::zeros(n);
-    let mut h = DMatrix::<f64>::zeros(n, 4);
-    let mut w_diag = DVector::<f64>::zeros(n);
-    let mut used_prns = Vec::with_capacity(n);
+    let used_prns = observations.iter().map(|obs| obs.prn).collect::<Vec<_>>();
+    let mut state = Vector4::<f64>::zeros();
 
-    for (row, obs) in observations.iter().enumerate() {
-        let los = normalize(obs.line_of_sight);
-        let sat_range_rate = dot(los, obs.satellite_velocity_mps);
-        let observed_range_rate = -GPS_L1_WAVELENGTH_M * obs.doppler_hz;
+    for _ in 0..4 {
+        let mut residuals = DVector::<f64>::zeros(n);
+        let mut h = DMatrix::<f64>::zeros(n, 4);
+        for (row, obs) in observations.iter().enumerate() {
+            let los = normalize(obs.line_of_sight);
+            let observed_range_rate = -GPS_L1_WAVELENGTH_M * obs.doppler_hz;
+            residuals[row] = observed_range_rate
+                - predicted_range_rate(
+                    obs,
+                    receiver_ecef,
+                    [state[0], state[1], state[2]],
+                    state[3],
+                );
+            h[(row, 0)] = -los[0];
+            h[(row, 1)] = -los[1];
+            h[(row, 2)] = -los[2];
+            h[(row, 3)] = 1.0;
+        }
 
-        y[row] = observed_range_rate - sat_range_rate;
-        h[(row, 0)] = -los[0];
-        h[(row, 1)] = -los[1];
-        h[(row, 2)] = -los[2];
-        h[(row, 3)] = 1.0;
-        w_diag[row] = doppler_weight_from_cn0(obs.cn0_db_hz);
-        used_prns.push(obs.prn);
+        let ht = h.transpose();
+        let normal: Matrix4<f64> = (&ht * &h).fixed_resize::<4, 4>(0.0);
+        let rhs: Vector4<f64> = (&ht * residuals).fixed_resize::<4, 1>(0.0);
+        let Some(delta) = normal.try_inverse().map(|inverse| inverse * rhs) else {
+            return VelocitySolution {
+                used_prns,
+                ..Default::default()
+            };
+        };
+        state += delta;
+        if delta.norm() < 1e-7 {
+            break;
+        }
     }
 
-    let w = DMatrix::from_diagonal(&w_diag);
-    let htw = &h.transpose() * &w;
-    let normal = &htw * &h;
-    let normal4: Matrix4<f64> = normal.fixed_resize::<4, 4>(0.0);
-    let rhs = &h.transpose() * &w * &y;
-    let rhs4: Vector4<f64> = rhs.fixed_resize::<4, 1>(0.0);
-
-    let Some(inv) = normal4.try_inverse() else {
-        return VelocitySolution {
-            used_prns,
-            ..Default::default()
-        };
-    };
-    let x = inv * rhs4;
-    let ecef_velocity_mps = [x[0], x[1], x[2]];
-    let clock_drift_mps = x[3];
+    let ecef_velocity_mps = [state[0], state[1], state[2]];
+    let clock_drift_mps = state[3];
 
     let residuals_mps = observations
         .iter()
         .map(|obs| {
-            let los = normalize(obs.line_of_sight);
             let observed_range_rate = -GPS_L1_WAVELENGTH_M * obs.doppler_hz;
-            let predicted = dot(los, obs.satellite_velocity_mps) - dot(los, ecef_velocity_mps)
-                + clock_drift_mps;
+            let predicted =
+                predicted_range_rate(obs, receiver_ecef, ecef_velocity_mps, clock_drift_mps);
             observed_range_rate - predicted
         })
         .collect();
@@ -143,29 +150,17 @@ pub fn doppler_velocity_observations(
             let eph = ephemerides.get(&pr.prn)?;
             let sat = satellite_position(eph, pr.transmit_time_sow);
             let sat_vel = satellite_velocity_finite_difference(eph, pr.transmit_time_sow);
-            let tau = pr.pseudorange_m / C_LIGHT;
-            let theta = OMEGA_E * tau;
-            let cos_th = theta.cos();
-            let sin_th = theta.sin();
-            let sat_ecef = [
-                cos_th * sat.ecef[0] + sin_th * sat.ecef[1],
-                -sin_th * sat.ecef[0] + cos_th * sat.ecef[1],
-                sat.ecef[2],
-            ];
-            let sat_velocity_mps = [
-                cos_th * sat_vel[0] + sin_th * sat_vel[1],
-                -sin_th * sat_vel[0] + cos_th * sat_vel[1],
-                sat_vel[2],
-            ];
             let line_of_sight = [
-                sat_ecef[0] - receiver_ecef[0],
-                sat_ecef[1] - receiver_ecef[1],
-                sat_ecef[2] - receiver_ecef[2],
+                sat.ecef[0] - receiver_ecef[0],
+                sat.ecef[1] - receiver_ecef[1],
+                sat.ecef[2] - receiver_ecef[2],
             ];
             Some(DopplerVelocityObservation {
                 prn: pr.prn,
                 line_of_sight: normalize(line_of_sight),
-                satellite_velocity_mps: sat_velocity_mps,
+                satellite_velocity_mps: sat_vel,
+                satellite_ecef: sat.ecef,
+                satellite_clock_drift_sps: satellite_clock_drift(eph, pr.transmit_time_sow),
                 doppler_hz: pr.doppler_hz,
                 cn0_db_hz: pr.cn0_db_hz,
             })
@@ -173,9 +168,25 @@ pub fn doppler_velocity_observations(
         .collect()
 }
 
-fn doppler_weight_from_cn0(cn0_db_hz: f64) -> f64 {
-    let sigma_mps = 10.0_f64.powf((45.0 - cn0_db_hz) / 20.0).clamp(0.05, 20.0);
-    1.0 / (sigma_mps * sigma_mps)
+fn predicted_range_rate(
+    observation: &DopplerVelocityObservation,
+    receiver_ecef: Ecef,
+    receiver_velocity_mps: Ecef,
+    receiver_clock_drift_mps: f64,
+) -> f64 {
+    let los = normalize(observation.line_of_sight);
+    let relative_velocity = [
+        observation.satellite_velocity_mps[0] - receiver_velocity_mps[0],
+        observation.satellite_velocity_mps[1] - receiver_velocity_mps[1],
+        observation.satellite_velocity_mps[2] - receiver_velocity_mps[2],
+    ];
+    let earth_rotation = OMEGA_E / C_LIGHT
+        * (observation.satellite_velocity_mps[1] * receiver_ecef[0]
+            + observation.satellite_ecef[1] * receiver_velocity_mps[0]
+            - observation.satellite_velocity_mps[0] * receiver_ecef[1]
+            - observation.satellite_ecef[0] * receiver_velocity_mps[1]);
+    dot(los, relative_velocity) + earth_rotation + receiver_clock_drift_mps
+        - C_LIGHT * observation.satellite_clock_drift_sps
 }
 
 fn satellite_velocity_finite_difference(eph: &Ephemeris, transmit_time_sow: f64) -> Ecef {
@@ -329,6 +340,61 @@ mod tests {
         assert!((solution.clock_drift_mps - clock_drift).abs() < 1e-8);
     }
 
+    #[test]
+    fn test_doppler_velocity_matches_rtklib_unweighted_lsq() {
+        let receiver_velocity = [3.0, -2.0, 0.5];
+        let clock_drift = -12.0;
+        let mut observations = vec![
+            make_obs(
+                1,
+                [1.0, 0.0, 0.0],
+                [200.0, 10.0, -5.0],
+                receiver_velocity,
+                clock_drift,
+            ),
+            make_obs(
+                2,
+                [0.0, 1.0, 0.0],
+                [-50.0, 250.0, 8.0],
+                receiver_velocity,
+                clock_drift,
+            ),
+            make_obs(
+                3,
+                [0.0, 0.0, 1.0],
+                [20.0, -30.0, 180.0],
+                receiver_velocity,
+                clock_drift,
+            ),
+            make_obs(
+                4,
+                normalize([1.0, 1.0, 1.0]),
+                [120.0, 90.0, 60.0],
+                receiver_velocity,
+                clock_drift,
+            ),
+            make_obs(
+                5,
+                normalize([-0.4, 0.8, 0.3]),
+                [-80.0, 140.0, 30.0],
+                receiver_velocity,
+                clock_drift,
+            ),
+        ];
+        observations[4].doppler_hz += 1.0;
+
+        let reference = solve_doppler_velocity_from_observations(&observations, [0.0; 3]);
+        observations[0].cn0_db_hz = 20.0;
+        observations[1].cn0_db_hz = 60.0;
+        observations[2].cn0_db_hz = 25.0;
+        observations[3].cn0_db_hz = 55.0;
+        observations[4].cn0_db_hz = 30.0;
+        let varied_cn0 = solve_doppler_velocity_from_observations(&observations, [0.0; 3]);
+
+        assert_eq!(reference.ecef_velocity_mps, varied_cn0.ecef_velocity_mps);
+        assert_eq!(reference.clock_drift_mps, varied_cn0.clock_drift_mps);
+    }
+
     fn make_obs(
         prn: u8,
         line_of_sight: Ecef,
@@ -343,6 +409,8 @@ mod tests {
             prn,
             line_of_sight,
             satellite_velocity_mps,
+            satellite_ecef: [0.0; 3],
+            satellite_clock_drift_sps: 0.0,
             doppler_hz: -range_rate / GPS_L1_WAVELENGTH_M,
             cn0_db_hz: 45.0,
         }
