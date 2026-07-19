@@ -7,7 +7,8 @@
 use crate::acquisition::{AcquisitionResult, PcpsAcquisition, PcpsConfig};
 use crate::io::{IqFormat, IqReader};
 use crate::nav::{
-    parse_iono, Ephemeris, EphemerisCollector, IonoParams, NavDecoder, RinexNavConfig,
+    load_optional_rinex_nav_capabilities, parse_iono, Ephemeris, EphemerisCatalog,
+    EphemerisCollector, IonoParams, NavDecoder, RinexNavConfig,
 };
 use crate::pvt::{
     ContinuousPvtConfig, ContinuousPvtRunner, ObservablesInputBuilder, ObservablesInputSet,
@@ -17,7 +18,7 @@ use crate::tracking::{BitSynchronizer, DllPllTracking, TrackingConfig, TrackingO
 use num_complex::Complex;
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiverChannelState {
@@ -561,8 +562,10 @@ impl StreamingChannelNavState {
 #[derive(Debug, Clone, Default)]
 pub struct StreamingNavState {
     pub ephemerides: BTreeMap<u8, Ephemeris>,
+    pub ephemeris_catalog: EphemerisCatalog,
     pub ionosphere: IonoParams,
     pub ionosphere_source: Option<String>,
+    pub rinex_nav_source: Option<String>,
     pub channels: BTreeMap<u8, StreamingChannelNavState>,
 }
 
@@ -822,7 +825,7 @@ impl StreamingPvtRunner {
         let acquisition_ring = AcquisitionRingBuffer::new(config.acquisition_ring_samples(), 0);
         let continuous_pvt = ContinuousPvtRunner::new(config.continuous_pvt.clone());
         let next_pvt_output_ms = config.pvt_output_rate_ms.max(1);
-        Self {
+        let mut runner = Self {
             config,
             channels,
             acquisition_scheduler,
@@ -831,7 +834,11 @@ impl StreamingPvtRunner {
             nav_state: StreamingNavState::default(),
             continuous_pvt,
             next_pvt_output_ms,
+        };
+        if let Some(path) = runner.config.iq_path.clone() {
+            runner.load_configured_rinex_nav_for_iq_path(&path);
         }
+        runner
     }
 
     pub fn config(&self) -> &StreamingPvtConfig {
@@ -861,6 +868,22 @@ impl StreamingPvtRunner {
 
     pub fn nav_state(&self) -> &StreamingNavState {
         &self.nav_state
+    }
+
+    pub fn load_configured_rinex_nav_for_iq_path(&mut self, iq_path: &Path) -> bool {
+        let Some(capabilities) =
+            load_optional_rinex_nav_capabilities(iq_path, &self.config.rinex_nav)
+        else {
+            return false;
+        };
+
+        if let Some(ionosphere) = capabilities.iono.filter(|params| params.valid) {
+            self.nav_state.ionosphere = ionosphere;
+            self.nav_state.ionosphere_source = Some(capabilities.candidate.source_label.clone());
+        }
+        self.nav_state.ephemeris_catalog = capabilities.ephemeris_catalog;
+        self.nav_state.rinex_nav_source = Some(capabilities.candidate.path.display().to_string());
+        true
     }
 
     pub fn tracking_channel_snapshots(&self) -> Vec<TrackingChannelSnapshot<'_>> {
@@ -915,11 +938,22 @@ impl StreamingPvtRunner {
     pub fn solve_pvt_epoch_at(&mut self, common_rx_sample: f64) -> Option<PvtEpochOutput> {
         let epoch = self.pseudorange_epoch_at(common_rx_sample)?;
         let ephemerides = self.nav_state.ephemerides.clone();
+        let ephemeris_catalog = self.nav_state.ephemeris_catalog.clone();
         let ionosphere = self.nav_state.ionosphere.clone();
-        self.continuous_pvt
-            .solve_epochs(&[epoch], &ephemerides, &ionosphere, 0.0, 0.0, 0.0)
-            .pop()
-            .map(|result| result.to_output())
+        let mut results = if ephemeris_catalog.is_empty() {
+            self.continuous_pvt
+                .solve_epochs(&[epoch], &ephemerides, &ionosphere, 0.0, 0.0, 0.0)
+        } else {
+            self.continuous_pvt.solve_epochs_with_catalog(
+                &[epoch],
+                &ephemeris_catalog,
+                &ionosphere,
+                0.0,
+                0.0,
+                0.0,
+            )
+        };
+        results.pop().map(|result| result.to_output())
     }
 
     pub fn solve_pvt_epoch_at_latest_sample(&mut self) -> Option<PvtEpochOutput> {
@@ -1519,6 +1553,22 @@ mod tests {
         path
     }
 
+    fn write_rinex_iono_file() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "gnsscope_stream_rinex_nav_{}_{}.13n",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        let rinex = "\
+     2.10           N: GPS NAV DATA                         RINEX VERSION / TYPE
+ 0.1212D-07  0.7451D-08 -0.5960D-07 -0.1192D-06          ION ALPHA
+ 0.9626D+05  0.0000D+00 -0.1966D+06 -0.6554D+05          ION BETA
+                                                            END OF HEADER
+";
+        fs::write(&path, rinex).expect("write temporary RINEX nav");
+        path
+    }
+
     #[test]
     fn health_observation_maps_tracking_output_lock_fields() {
         let output = TrackingOutput {
@@ -1710,6 +1760,39 @@ mod tests {
         assert_eq!(runner.state_snapshot().next_pvt_output_ms, 200);
         assert!(runner.maybe_emit_pvt(350, None).is_none());
         assert_eq!(runner.state_snapshot().next_pvt_output_ms, 400);
+    }
+
+    #[test]
+    fn streaming_runner_loads_optional_rinex_nav_at_startup() {
+        let rinex_path = write_rinex_iono_file();
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![1]);
+        config.iq_path = Some(PathBuf::from("signal.dat"));
+        config.rinex_nav =
+            RinexNavConfig::with_explicit_path(rinex_path.clone()).without_environment();
+
+        let runner = StreamingPvtRunner::new(config);
+        fs::remove_file(rinex_path).ok();
+
+        assert!(runner.nav_state().ionosphere.valid);
+        assert_eq!(
+            runner.nav_state().ionosphere_source.as_deref(),
+            Some("rinex-nav-explicit")
+        );
+        assert!(runner.nav_state().rinex_nav_source.is_some());
+    }
+
+    #[test]
+    fn streaming_runner_keeps_iq_only_mode_when_optional_rinex_nav_is_absent() {
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![1]);
+        config.iq_path = Some(PathBuf::from("signal.dat"));
+        config.rinex_nav =
+            RinexNavConfig::with_explicit_path("missing-brdc0940.13n").without_environment();
+
+        let runner = StreamingPvtRunner::new(config);
+
+        assert!(!runner.nav_state().ionosphere.valid);
+        assert!(runner.nav_state().rinex_nav_source.is_none());
+        assert!(runner.nav_state().ephemeris_catalog.is_empty());
     }
 
     #[test]
