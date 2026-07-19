@@ -244,27 +244,29 @@ impl PcpsAcquisition {
             }
         }
 
-        // Compute mean (excluding a small region around the peak for robustness)
-        let exclude_start = if max_code_idx >= 2 {
-            max_code_idx - 2
-        } else {
-            fft_size + max_code_idx - 2
-        };
-        let exclude_end = (max_code_idx + 3) % fft_size;
+        // Compute mean excluding a small circular region around the peak for
+        // robustness. Tiny synthetic windows cannot support a five-bin
+        // exclusion region, so exclude only the peak bin there.
         let mut sum = 0.0f64;
         let mut count = 0usize;
         for (code_idx, &val) in magnitude_grid[max_bin].iter().enumerate() {
-            let in_exclude = if exclude_start <= exclude_end {
-                code_idx >= exclude_start && code_idx < exclude_end
+            let in_exclude = if fft_size > 5 {
+                let forward = code_idx.abs_diff(max_code_idx);
+                let circular = forward.min(fft_size - forward);
+                circular <= 2
             } else {
-                code_idx >= exclude_start || code_idx < exclude_end
+                code_idx == max_code_idx
             };
             if !in_exclude {
                 sum += val;
                 count += 1;
             }
         }
-        let mean = if count > 0 { sum / count as f64 } else { 1.0 };
+        let mean = if count > 0 {
+            sum / count as f64
+        } else {
+            max_val.max(1e-30)
+        };
         let peak_to_mean = max_val / mean;
 
         // Convert code index to chips.

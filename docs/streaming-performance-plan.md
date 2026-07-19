@@ -105,7 +105,7 @@ Expected static CTTC behavior:
 
 ### Phase E: Minimal StreamingPvtRunner
 
-- Status: initial backend runner contract is implemented in `gnss_core::receiver`. `StreamingPvtConfig` covers IQ/nav policy, chunk size, output rate, acquisition, channel admission, tracking, and continuous PVT config. `StreamingPvtRunner` owns deterministic channel state, periodic acquisition scan planning, the acquisition ring buffer, structured PVT output events, and can now stream an IQ file through configured chunks into the runner. The next step is migrating the real-data acquisition/tracking/nav/PVT loop out of `pvt_e2e.rs` into this runner.
+- Status: initial backend runner contract is implemented in `gnss_core::receiver`. `StreamingPvtConfig` covers IQ/nav policy, chunk size, output rate, acquisition, channel admission, tracking, and continuous PVT config. `StreamingPvtRunner` owns deterministic channel state, periodic acquisition scan planning, the acquisition ring buffer, structured PVT output events, can stream an IQ file through configured chunks, and now executes PCPS acquisition scans from the ring buffer while updating channel state. The next step is migrating tracking/nav/PVT epoch processing out of `pvt_e2e.rs` into this runner.
 - Extract the stable e2e flow into core receiver modules:
   - `StreamingPvtConfig` - initial contract implemented.
   - `StreamingPvtRunner` - initial contract implemented.
@@ -114,7 +114,7 @@ Expected static CTTC behavior:
 - Keep the first runner small:
   - open IQ - initial configured file streaming implemented.
   - stream samples - implemented for chunked IQ input into runner.
-  - acquire configured PRNs
+  - acquire configured PRNs - PCPS scan execution implemented.
   - track
   - decode nav
   - build observables

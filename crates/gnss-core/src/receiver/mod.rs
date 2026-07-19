@@ -4,7 +4,7 @@
 //! acquisition buffering deterministic. They are intentionally independent from
 //! GUI workers and async runtimes.
 
-use crate::acquisition::AcquisitionResult;
+use crate::acquisition::{AcquisitionResult, PcpsAcquisition, PcpsConfig};
 use crate::io::{IqFormat, IqReader};
 use crate::nav::RinexNavConfig;
 use crate::pvt::{ContinuousPvtConfig, PvtEpochOutput};
@@ -311,6 +311,7 @@ pub struct AcquisitionSchedulerConfig {
     pub acq_window_ms: usize,
     pub doppler_max_hz: f64,
     pub doppler_step_hz: f64,
+    pub threshold: f64,
     pub noncoherent_integrations: usize,
     pub fixed_prns: Option<Vec<u8>>,
 }
@@ -324,6 +325,7 @@ impl Default for AcquisitionSchedulerConfig {
             acq_window_ms: 10,
             doppler_max_hz: 10_000.0,
             doppler_step_hz: 250.0,
+            threshold: 3.0,
             noncoherent_integrations: 10,
             fixed_prns: None,
         }
@@ -530,8 +532,15 @@ pub struct StreamingAcquisitionScan {
 }
 
 #[derive(Debug, Clone)]
+pub struct StreamingAcquisitionScanResult {
+    pub scan: StreamingAcquisitionScan,
+    pub results: Vec<AcquisitionResult>,
+}
+
+#[derive(Debug, Clone)]
 pub enum StreamingPvtEvent {
     AcquisitionScanPlanned(StreamingAcquisitionScan),
+    AcquisitionScanCompleted(StreamingAcquisitionScanResult),
     PvtOutput(Box<PvtEpochOutput>),
 }
 
@@ -625,7 +634,10 @@ impl StreamingPvtRunner {
         self.acquisition_ring.push_samples(samples);
         let mut events = Vec::new();
         if let Some(scan) = self.plan_acquisition_scan(now_ms) {
-            events.push(StreamingPvtEvent::AcquisitionScanPlanned(scan));
+            events.push(StreamingPvtEvent::AcquisitionScanPlanned(scan.clone()));
+            if let Some(result) = self.execute_acquisition_scan(&scan, now_ms) {
+                events.push(StreamingPvtEvent::AcquisitionScanCompleted(result));
+            }
         }
         events
     }
@@ -655,6 +667,48 @@ impl StreamingPvtRunner {
     ) -> Option<(u64, Vec<Complex<f64>>)> {
         let (sample_index, window) = self.acquisition_ring.latest_window(scan.sample_count)?;
         (sample_index == scan.sample_index).then_some((sample_index, window))
+    }
+
+    pub fn execute_acquisition_scan(
+        &mut self,
+        scan: &StreamingAcquisitionScan,
+        now_ms: u64,
+    ) -> Option<StreamingAcquisitionScanResult> {
+        let (sample_index, window) = self.acquisition_window_for_scan(scan)?;
+        let mut acquisition = PcpsAcquisition::new(self.pcps_config());
+        let mut results = Vec::with_capacity(scan.plan.prns.len());
+
+        for &prn in &scan.plan.prns {
+            let result = acquisition.acquire_noncoherent_at_sample(
+                (prn - 1) as usize,
+                &window,
+                sample_index,
+                scan.plan.noncoherent_integrations,
+            );
+            if result.detected {
+                self.accept_acquisition(result.clone(), now_ms);
+            } else {
+                self.reject_acquisition(prn, now_ms);
+            }
+            results.push(result);
+        }
+
+        Some(StreamingAcquisitionScanResult {
+            scan: scan.clone(),
+            results,
+        })
+    }
+
+    fn pcps_config(&self) -> PcpsConfig {
+        PcpsConfig {
+            fs: self.config.sample_rate_hz,
+            if_freq: self.config.intermediate_frequency_hz,
+            doppler_max: self.config.acquisition.doppler_max_hz,
+            doppler_step: self.config.acquisition.doppler_step_hz,
+            noncoherent_integrations: self.config.acquisition.noncoherent_integrations,
+            threshold: self.config.acquisition.threshold,
+            ..Default::default()
+        }
     }
 
     pub fn accept_acquisition(&mut self, result: AcquisitionResult, now_ms: u64) {
@@ -816,6 +870,8 @@ impl AcquisitionRingBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gnss_data::gps_l1ca::{CODE_LENGTH, PRN_CODES};
+    use std::f64::consts::TAU;
     use std::fs;
 
     fn acq(prn: u8, doppler_hz: f64) -> AcquisitionResult {
@@ -844,6 +900,28 @@ mod tests {
     fn samples(count: usize) -> Vec<Complex<f64>> {
         (0..count)
             .map(|i| Complex::new(i as f64, -(i as f64)))
+            .collect()
+    }
+
+    fn synthetic_signal_ms(
+        prn_idx: usize,
+        doppler_hz: f64,
+        code_phase_chips: f64,
+        fs: f64,
+        amp: f64,
+        samples: usize,
+    ) -> Vec<Complex<f64>> {
+        let samples_per_chip = fs / 1.023e6;
+        let code = &PRN_CODES[prn_idx];
+        (0..samples)
+            .map(|sample_index| {
+                let phase = TAU * doppler_hz * sample_index as f64 / fs;
+                let chip_idx = ((sample_index as f64 / samples_per_chip + code_phase_chips)
+                    as usize)
+                    % CODE_LENGTH;
+                let chip = code[chip_idx] as f64;
+                Complex::new(phase.cos(), phase.sin()) * Complex::new(amp * chip, 0.0)
+            })
             .collect()
     }
 
@@ -991,15 +1069,16 @@ mod tests {
     #[test]
     fn streaming_runner_plans_fixed_prn_cold_acquisition_from_ring() {
         let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![1, 11, 17]);
-        config.acquisition.cold_acq_interval_ms = 1;
+        config.acquisition.cold_acq_interval_ms = 100;
         config.acquisition.max_acq_prns_per_scan = 2;
         config.acquisition.acq_window_ms = 10;
+        config.acquisition.threshold = f64::INFINITY;
         config.acquisition_ring_ms = 10;
         let mut runner = StreamingPvtRunner::new(config);
 
         let events = runner.ingest_samples(&samples(40_000), 1);
 
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         let StreamingPvtEvent::AcquisitionScanPlanned(scan) = &events[0] else {
             panic!("expected acquisition scan");
         };
@@ -1007,14 +1086,19 @@ mod tests {
         assert_eq!(scan.plan.prns, vec![1, 11]);
         assert_eq!(scan.sample_index, 0);
         assert_eq!(scan.sample_count, 40_000);
-        assert_eq!(runner.channels().state(1), ReceiverChannelState::Acquiring);
+        let StreamingPvtEvent::AcquisitionScanCompleted(completed) = &events[1] else {
+            panic!("expected completed acquisition scan");
+        };
+        assert_eq!(completed.results.len(), 2);
+        assert!(completed.results.iter().all(|result| !result.detected));
+        assert_eq!(runner.channels().state(1), ReceiverChannelState::Absent);
         assert_eq!(runner.channels().state(17), ReceiverChannelState::Absent);
     }
 
     #[test]
     fn streaming_runner_prioritizes_lost_channel_reacquisition() {
         let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![1, 11, 17]);
-        config.acquisition.cold_acq_interval_ms = 1;
+        config.acquisition.cold_acq_interval_ms = 100;
         config.acquisition.reacq_interval_ms = 1;
         config.channel_admission.probation_good_epochs = 1;
         config.channel_admission.lost_bad_epochs = 1;
@@ -1059,8 +1143,9 @@ mod tests {
         config.sample_rate_hz = 1_000.0;
         config.chunk_ms = 5;
         config.acquisition.acq_window_ms = 10;
-        config.acquisition.cold_acq_interval_ms = 1;
+        config.acquisition.cold_acq_interval_ms = 100;
         config.acquisition.max_acq_prns_per_scan = 2;
+        config.acquisition.threshold = f64::INFINITY;
         config.acquisition_ring_ms = 10;
         let mut runner = StreamingPvtRunner::new(config);
         let mut steps = Vec::new();
@@ -1072,7 +1157,7 @@ mod tests {
 
         assert_eq!(summary.samples_read, 20);
         assert_eq!(summary.steps, 4);
-        assert_eq!(summary.events_emitted, 1);
+        assert_eq!(summary.events_emitted, 2);
         assert_eq!(
             steps
                 .iter()
@@ -1086,6 +1171,7 @@ mod tests {
             .flat_map(|step| step.events.iter())
             .filter_map(|event| match event {
                 StreamingPvtEvent::AcquisitionScanPlanned(scan) => Some(scan),
+                StreamingPvtEvent::AcquisitionScanCompleted(_) => None,
                 StreamingPvtEvent::PvtOutput(_) => None,
             })
             .collect();
@@ -1094,7 +1180,63 @@ mod tests {
         assert_eq!(scans[0].sample_index, 0);
         assert_eq!(scans[0].sample_count, 10);
         assert_eq!(scans[0].plan.prns, vec![1, 11]);
+        let completions: Vec<&StreamingAcquisitionScanResult> = steps
+            .iter()
+            .flat_map(|step| step.events.iter())
+            .filter_map(|event| match event {
+                StreamingPvtEvent::AcquisitionScanCompleted(result) => Some(result),
+                StreamingPvtEvent::AcquisitionScanPlanned(_) | StreamingPvtEvent::PvtOutput(_) => {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].results.len(), 2);
         assert_eq!(runner.state_snapshot().sample_index, 20);
+    }
+
+    #[test]
+    fn streaming_runner_executes_pcps_scan_and_accepts_detection() {
+        let fs = 4_000_000.0;
+        let prn_idx = 5;
+        let prn = (prn_idx + 1) as u8;
+        let doppler = 1_500.0;
+        let code_phase = 512.0;
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![prn]);
+        config.sample_rate_hz = fs;
+        config.acquisition.acq_window_ms = 1;
+        config.acquisition.noncoherent_integrations = 1;
+        config.acquisition.cold_acq_interval_ms = 1;
+        config.acquisition.doppler_max_hz = 2_000.0;
+        config.acquisition.doppler_step_hz = 500.0;
+        config.acquisition.threshold = 4.0;
+        config.acquisition_ring_ms = 1;
+        let mut runner = StreamingPvtRunner::new(config);
+
+        let events = runner.ingest_samples(
+            &synthetic_signal_ms(prn_idx, doppler, code_phase, fs, 10.0, fs as usize / 1000),
+            1,
+        );
+
+        let completed = events
+            .iter()
+            .find_map(|event| match event {
+                StreamingPvtEvent::AcquisitionScanCompleted(result) => Some(result),
+                StreamingPvtEvent::AcquisitionScanPlanned(_) | StreamingPvtEvent::PvtOutput(_) => {
+                    None
+                }
+            })
+            .expect("completed acquisition scan");
+        assert_eq!(completed.results.len(), 1);
+        let result = &completed.results[0];
+        assert!(result.detected, "peak/mean={:.2}", result.peak_to_mean);
+        assert_eq!(result.prn, prn);
+        assert!((result.doppler_hz - doppler).abs() <= 500.0);
+        assert!((result.code_phase_chips - code_phase).abs() < 2.0);
+        assert_eq!(
+            runner.channels().state(prn),
+            ReceiverChannelState::TrackingProbation
+        );
     }
 
     #[test]
