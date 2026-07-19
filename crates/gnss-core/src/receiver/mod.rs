@@ -874,6 +874,13 @@ impl ActiveTrackingChannel {
     }
 }
 
+struct StreamingTrackingStepResult {
+    prn: u8,
+    output: TrackingOutput,
+    pre_update_events: Vec<StreamingPvtEvent>,
+    nav_events: Vec<StreamingPvtEvent>,
+}
+
 pub struct StreamingPvtRunner {
     config: StreamingPvtConfig,
     channels: ChannelManager,
@@ -1190,59 +1197,32 @@ impl StreamingPvtRunner {
         let mut lost_prns = Vec::new();
 
         for prn in prns {
-            let (output, nav_events) = {
-                let active = self
-                    .active_tracking
-                    .get_mut(&prn)
-                    .expect("active PRN should have a tracker");
-                let output = active.tracker.process(samples);
-                let prompt_i = output.prompt.re;
-
-                if active.bit_boundary.is_none() && now_ms >= self.config.bit_sync_start_ms {
-                    if let Some(boundary) = active.bit_sync.update(prompt_i) {
-                        active.set_bit_boundary(boundary, self.config.bit_sync_start_ms);
-                        events.push(StreamingPvtEvent::BitSyncUpdated(StreamingBitSyncUpdate {
-                            prn,
-                            now_ms,
-                            boundary_ms: boundary,
-                        }));
-                    }
-                }
-
-                let nav_events = process_nav_symbol(
-                    prn,
-                    now_ms,
-                    active,
-                    prompt_i,
-                    &output,
-                    self.config.nav_tow_tag_latency_ms,
-                    self.config.samples_per_ms(),
-                );
-                active.latest_tracking_output = Some(output.clone());
-                (output, nav_events)
-            };
+            let step = self.process_tracking_channel_step(prn, samples, now_ms);
+            events.extend(step.pre_update_events);
 
             let observation = ChannelHealthObservation::from_tracking_output(
-                &output,
-                nav_time_available(prn),
-                ephemeris_available(prn),
+                &step.output,
+                nav_time_available(step.prn),
+                ephemeris_available(step.prn),
             );
-            let state = self.channels.observe_tracking(prn, observation, now_ms);
+            let state = self
+                .channels
+                .observe_tracking(step.prn, observation, now_ms);
             if state == ReceiverChannelState::Lost {
-                lost_prns.push(prn);
+                lost_prns.push(step.prn);
             }
             events.push(StreamingPvtEvent::TrackingUpdated(
                 StreamingTrackingUpdate {
-                    prn,
+                    prn: step.prn,
                     now_ms,
-                    output: output.clone(),
+                    output: step.output.clone(),
                     state,
                 },
             ));
-            for event in &nav_events {
+            for event in &step.nav_events {
                 self.record_nav_event(event);
             }
-            events.extend(nav_events);
+            events.extend(step.nav_events);
         }
 
         for prn in lost_prns {
@@ -1250,6 +1230,50 @@ impl StreamingPvtRunner {
         }
 
         events
+    }
+
+    fn process_tracking_channel_step(
+        &mut self,
+        prn: u8,
+        samples: &[Complex<f64>],
+        now_ms: u64,
+    ) -> StreamingTrackingStepResult {
+        let active = self
+            .active_tracking
+            .get_mut(&prn)
+            .expect("active PRN should have a tracker");
+        let output = active.tracker.process(samples);
+        let prompt_i = output.prompt.re;
+        let mut pre_update_events = Vec::new();
+
+        if active.bit_boundary.is_none() && now_ms >= self.config.bit_sync_start_ms {
+            if let Some(boundary) = active.bit_sync.update(prompt_i) {
+                active.set_bit_boundary(boundary, self.config.bit_sync_start_ms);
+                pre_update_events.push(StreamingPvtEvent::BitSyncUpdated(StreamingBitSyncUpdate {
+                    prn,
+                    now_ms,
+                    boundary_ms: boundary,
+                }));
+            }
+        }
+
+        let nav_events = process_nav_symbol(
+            prn,
+            now_ms,
+            active,
+            prompt_i,
+            &output,
+            self.config.nav_tow_tag_latency_ms,
+            self.config.samples_per_ms(),
+        );
+        active.latest_tracking_output = Some(output.clone());
+
+        StreamingTrackingStepResult {
+            prn,
+            output,
+            pre_update_events,
+            nav_events,
+        }
     }
 
     pub fn maybe_emit_pvt(
@@ -2213,6 +2237,51 @@ mod tests {
         assert_eq!(nav_symbols[0].prn, prn);
         assert_eq!(nav_symbols[0].now_ms, 21);
         assert!(nav_symbols[0].symbol.abs() > 0.0);
+    }
+
+    #[test]
+    fn streaming_runner_emits_nav_symbol_after_tracking_update_for_same_step() {
+        let fs = 4_000_000.0;
+        let prn_idx = 5;
+        let prn = (prn_idx + 1) as u8;
+        let samples = synthetic_signal_ms(prn_idx, 1_500.0, 512.0, fs, 10.0, fs as usize / 1000);
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![prn]);
+        config.sample_rate_hz = fs;
+        config.acquisition.acq_window_ms = 1;
+        config.acquisition.noncoherent_integrations = 1;
+        config.acquisition.cold_acq_interval_ms = 1;
+        config.acquisition.doppler_max_hz = 2_000.0;
+        config.acquisition.doppler_step_hz = 500.0;
+        config.acquisition.threshold = 4.0;
+        config.acquisition_ring_ms = 1;
+        config.channel_admission.probation_good_epochs = 1;
+        config.channel_admission.min_cn0_db_hz = 0.0;
+        config.channel_admission.min_pll_lock_metric = 0.0;
+        config.bit_sync_start_ms = 0;
+        let mut runner = StreamingPvtRunner::new(config);
+        runner.ingest_samples(&samples, 1);
+        assert!(runner.set_tracking_bit_boundary(prn, 0));
+
+        let mut events = Vec::new();
+        for now_ms in 2..=21 {
+            events = runner.process_tracking_ms(&samples, now_ms, |_| true, |_| true);
+            if events
+                .iter()
+                .any(|event| matches!(event, StreamingPvtEvent::NavSymbolReady(_)))
+            {
+                break;
+            }
+        }
+
+        let tracking_idx = events
+            .iter()
+            .position(|event| matches!(event, StreamingPvtEvent::TrackingUpdated(_)))
+            .expect("tracking update");
+        let nav_idx = events
+            .iter()
+            .position(|event| matches!(event, StreamingPvtEvent::NavSymbolReady(_)))
+            .expect("nav symbol");
+        assert!(tracking_idx < nav_idx);
     }
 
     #[test]

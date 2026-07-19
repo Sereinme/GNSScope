@@ -26,6 +26,14 @@ This plan captures the agreed optimization design before changing the receiver p
 - Continuous PVT currently builds epochs at 1 Hz, while the GNSS-SDR CTTC config uses `PVT.output_rate_ms=100`.
 - Position is already close to GNSS-SDR/NMEA reference, but velocity and time are not yet strict GNSS-SDR comparisons.
 
+## Current Implementation Status (2026-07-19)
+
+- `StreamingPvtRunner` consumes chunked IQ input through its reader entry point. The default chunk is 1 ms, and `chunk_ms` is configurable; the reader reuses a bounded chunk buffer instead of loading the complete IQ file.
+- Each complete 1 ms epoch is ingested by the acquisition ring and then passed to active channels for tracking. Channel-state updates and emitted events remain ordered deterministically on the runner thread.
+- The per-channel tracking operation is now isolated in `process_tracking_channel_step`. It returns tracking output and pending navigation events before the runner applies channel health, loss, and navigation state. This is an architectural prerequisite for worker-based parallel tracking.
+- No worker pool, Rayon parallel loop, or async I/O is enabled yet. Parallel tracking must preserve per-channel tracker ownership and the current main-thread ordering for health and navigation events.
+- The real-data memory and throughput acceptance measurements are still pending. The legacy `pvt_e2e` full-file path remains the 3.84 GB baseline until the streaming runner is benchmarked on the CTTC dataset.
+
 ## Phases
 
 ### Phase A: Streaming E2E, Single Thread
@@ -116,7 +124,7 @@ Expected static CTTC behavior:
   - load optional nav - RINEX nav explicit/env/colocated discovery is wired into runner startup; missing nav keeps IQ-only mode.
   - stream samples - implemented for chunked IQ input into runner; reader now handles short reads, advances acquisition, 1 ms tracking, and PVT cadence internally.
   - acquire configured PRNs - PCPS scan execution implemented with deterministic PRN-ordered parallel acquisition.
-  - track - active tracking initialization and deterministic per-ms stepping implemented.
+  - track - active tracking initialization and deterministic per-ms stepping implemented; tracking step results are separated from main-thread channel-state application for future worker/async execution.
   - decode nav - bit sync, 20 ms symbol emission, NavDecoder, and EphemerisCollector entry points implemented.
   - build observables - implemented for healthy channel snapshots with TOW history and tracking timestamp inputs.
   - solve continuous PVT - runner entry point implemented.
