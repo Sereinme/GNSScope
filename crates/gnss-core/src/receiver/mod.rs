@@ -695,11 +695,68 @@ pub struct StreamingPvtRunSummary {
     pub samples_read: usize,
     pub steps: usize,
     pub events_emitted: usize,
+    pub event_counts: StreamingPvtEventCounts,
 }
 
 impl StreamingPvtRunSummary {
     pub fn ms_read(&self, sample_rate_hz: f64) -> f64 {
         self.samples_read as f64 * 1000.0 / sample_rate_hz
+    }
+
+    fn observe_events(&mut self, events: &[StreamingPvtEvent]) {
+        self.events_emitted += events.len();
+        self.event_counts.observe_events(events);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StreamingPvtEventCounts {
+    pub acquisition_scans_planned: usize,
+    pub acquisition_scans_completed: usize,
+    pub acquisition_detections: usize,
+    pub tracking_updates: usize,
+    pub bit_sync_updates: usize,
+    pub nav_symbols: usize,
+    pub nav_subframes: usize,
+    pub pvt_outputs: usize,
+}
+
+impl StreamingPvtEventCounts {
+    pub fn observe_events(&mut self, events: &[StreamingPvtEvent]) {
+        for event in events {
+            self.observe_event(event);
+        }
+    }
+
+    pub fn observe_event(&mut self, event: &StreamingPvtEvent) {
+        match event {
+            StreamingPvtEvent::AcquisitionScanPlanned(_) => {
+                self.acquisition_scans_planned += 1;
+            }
+            StreamingPvtEvent::AcquisitionScanCompleted(result) => {
+                self.acquisition_scans_completed += 1;
+                self.acquisition_detections += result
+                    .results
+                    .iter()
+                    .filter(|result| result.detected)
+                    .count();
+            }
+            StreamingPvtEvent::TrackingUpdated(_) => {
+                self.tracking_updates += 1;
+            }
+            StreamingPvtEvent::BitSyncUpdated(_) => {
+                self.bit_sync_updates += 1;
+            }
+            StreamingPvtEvent::NavSymbolReady(_) => {
+                self.nav_symbols += 1;
+            }
+            StreamingPvtEvent::NavSubframeDecoded(_) => {
+                self.nav_subframes += 1;
+            }
+            StreamingPvtEvent::PvtOutput(_) => {
+                self.pvt_outputs += 1;
+            }
+        }
     }
 }
 
@@ -1157,7 +1214,7 @@ impl StreamingPvtRunner {
             let events = self.process_stream_samples(&buffer[..samples_read], start_sample_index);
             summary.samples_read += samples_read;
             summary.steps += 1;
-            summary.events_emitted += events.len();
+            summary.observe_events(&events);
             on_step(StreamingPvtReadStep {
                 start_sample_index,
                 samples_read,
@@ -1666,6 +1723,10 @@ mod tests {
         assert_eq!(summary.samples_read, 20);
         assert_eq!(summary.steps, 4);
         assert_eq!(summary.events_emitted, 2);
+        assert_eq!(summary.event_counts.acquisition_scans_planned, 1);
+        assert_eq!(summary.event_counts.acquisition_scans_completed, 1);
+        assert_eq!(summary.event_counts.acquisition_detections, 0);
+        assert_eq!(summary.event_counts.tracking_updates, 0);
         assert_eq!(
             steps
                 .iter()
@@ -1745,6 +1806,9 @@ mod tests {
 
         assert_eq!(summary.steps, 3);
         assert_eq!(summary.samples_read, 12_000);
+        assert_eq!(summary.event_counts.acquisition_detections, 1);
+        assert_eq!(summary.event_counts.tracking_updates, 3);
+        assert_eq!(summary.event_counts.pvt_outputs, 0);
         let mut saw_acquisition = false;
         let mut tracking_updates = 0usize;
         for event in steps.iter().flat_map(|step| step.events.iter()) {
