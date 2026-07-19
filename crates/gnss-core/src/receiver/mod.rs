@@ -5,12 +5,13 @@
 //! GUI workers and async runtimes.
 
 use crate::acquisition::AcquisitionResult;
-use crate::io::IqFormat;
+use crate::io::{IqFormat, IqReader};
 use crate::nav::RinexNavConfig;
 use crate::pvt::{ContinuousPvtConfig, PvtEpochOutput};
 use crate::tracking::{TrackingConfig, TrackingOutput};
 use num_complex::Complex;
 use std::collections::{BTreeMap, VecDeque};
+use std::io;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -534,6 +535,39 @@ pub enum StreamingPvtEvent {
     PvtOutput(Box<PvtEpochOutput>),
 }
 
+#[derive(Debug)]
+pub enum StreamingPvtError {
+    MissingIqPath,
+    Io(io::Error),
+}
+
+impl From<io::Error> for StreamingPvtError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamingPvtReadStep {
+    pub start_sample_index: u64,
+    pub samples_read: usize,
+    pub now_ms: u64,
+    pub events: Vec<StreamingPvtEvent>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StreamingPvtRunSummary {
+    pub samples_read: usize,
+    pub steps: usize,
+    pub events_emitted: usize,
+}
+
+impl StreamingPvtRunSummary {
+    pub fn ms_read(&self, sample_rate_hz: f64) -> f64 {
+        self.samples_read as f64 * 1000.0 / sample_rate_hz
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StreamingPvtRunner {
     config: StreamingPvtConfig,
@@ -597,10 +631,13 @@ impl StreamingPvtRunner {
     }
 
     pub fn plan_acquisition_scan(&mut self, now_ms: u64) -> Option<StreamingAcquisitionScan> {
+        let sample_count = self.config.acquisition_window_samples();
+        if self.acquisition_ring.len() < sample_count {
+            return None;
+        }
         let plan = self
             .acquisition_scheduler
             .plan_scan(now_ms, &self.channels)?;
-        let sample_count = plan.window_ms * self.config.samples_per_ms();
         let (sample_index, _) = self.acquisition_ring.latest_window(sample_count)?;
         for prn in &plan.prns {
             self.channels.set_acquiring(*prn, now_ms);
@@ -650,6 +687,74 @@ impl StreamingPvtRunner {
         }
         output.map(|output| StreamingPvtEvent::PvtOutput(Box::new(output)))
     }
+
+    pub fn stream_iq_file_until_ms<F>(
+        &mut self,
+        max_ms: usize,
+        mut on_step: F,
+    ) -> Result<StreamingPvtRunSummary, StreamingPvtError>
+    where
+        F: FnMut(StreamingPvtReadStep),
+    {
+        let path = self
+            .config
+            .iq_path
+            .clone()
+            .ok_or(StreamingPvtError::MissingIqPath)?;
+        let mut reader = IqReader::open(path, self.config.iq_format)?;
+        self.stream_iq_reader_until_ms(&mut reader, max_ms, &mut on_step)
+    }
+
+    pub fn stream_iq_reader_until_ms<F>(
+        &mut self,
+        reader: &mut IqReader,
+        max_ms: usize,
+        mut on_step: F,
+    ) -> Result<StreamingPvtRunSummary, StreamingPvtError>
+    where
+        F: FnMut(StreamingPvtReadStep),
+    {
+        let max_samples = max_ms * self.config.samples_per_ms();
+        let chunk_samples = self.config.chunk_samples().max(1);
+        let mut summary = StreamingPvtRunSummary::default();
+        let mut buffer = vec![Complex::new(0.0, 0.0); chunk_samples.min(max_samples.max(1))];
+
+        while summary.samples_read < max_samples {
+            let requested = chunk_samples.min(max_samples - summary.samples_read);
+            if buffer.len() != requested {
+                buffer.resize(requested, Complex::new(0.0, 0.0));
+            }
+            let start_sample_index = self.acquisition_ring.next_sample_index();
+            let samples_read = reader.read(&mut buffer, requested)?;
+            if samples_read == 0 {
+                break;
+            }
+
+            let now_sample_index = start_sample_index + samples_read as u64;
+            let now_ms = samples_to_ceil_ms(now_sample_index, self.config.samples_per_ms());
+            let events = self.ingest_samples(&buffer[..samples_read], now_ms);
+            summary.samples_read += samples_read;
+            summary.steps += 1;
+            summary.events_emitted += events.len();
+            on_step(StreamingPvtReadStep {
+                start_sample_index,
+                samples_read,
+                now_ms,
+                events,
+            });
+
+            if samples_read < requested {
+                break;
+            }
+        }
+
+        Ok(summary)
+    }
+}
+
+fn samples_to_ceil_ms(samples: u64, samples_per_ms: usize) -> u64 {
+    let samples_per_ms = samples_per_ms.max(1) as u64;
+    samples.div_ceil(samples_per_ms)
 }
 
 #[derive(Debug, Clone)]
@@ -711,6 +816,7 @@ impl AcquisitionRingBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn acq(prn: u8, doppler_hz: f64) -> AcquisitionResult {
         AcquisitionResult {
@@ -739,6 +845,23 @@ mod tests {
         (0..count)
             .map(|i| Complex::new(i as f64, -(i as f64)))
             .collect()
+    }
+
+    fn write_i16_iq_file(sample_count: usize) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "gnsscope_stream_test_{}_{}.dat",
+            std::process::id(),
+            sample_count
+        ));
+        let mut bytes = Vec::with_capacity(sample_count * 4);
+        for i in 0..sample_count {
+            let i_sample = i as i16;
+            let q_sample = -(i as i16);
+            bytes.extend_from_slice(&i_sample.to_le_bytes());
+            bytes.extend_from_slice(&q_sample.to_le_bytes());
+        }
+        fs::write(&path, bytes).expect("write temp iq file");
+        path
     }
 
     #[test]
@@ -926,6 +1049,52 @@ mod tests {
         assert_eq!(runner.state_snapshot().next_pvt_output_ms, 200);
         assert!(runner.maybe_emit_pvt(350, None).is_none());
         assert_eq!(runner.state_snapshot().next_pvt_output_ms, 400);
+    }
+
+    #[test]
+    fn streaming_runner_reads_iq_file_in_configured_chunks() {
+        let path = write_i16_iq_file(20);
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![1, 11]);
+        config.iq_path = Some(path.clone());
+        config.sample_rate_hz = 1_000.0;
+        config.chunk_ms = 5;
+        config.acquisition.acq_window_ms = 10;
+        config.acquisition.cold_acq_interval_ms = 1;
+        config.acquisition.max_acq_prns_per_scan = 2;
+        config.acquisition_ring_ms = 10;
+        let mut runner = StreamingPvtRunner::new(config);
+        let mut steps = Vec::new();
+
+        let summary = runner
+            .stream_iq_file_until_ms(20, |step| steps.push(step))
+            .expect("stream temp iq file");
+        fs::remove_file(path).ok();
+
+        assert_eq!(summary.samples_read, 20);
+        assert_eq!(summary.steps, 4);
+        assert_eq!(summary.events_emitted, 1);
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.start_sample_index)
+                .collect::<Vec<_>>(),
+            vec![0, 5, 10, 15]
+        );
+
+        let scans: Vec<&StreamingAcquisitionScan> = steps
+            .iter()
+            .flat_map(|step| step.events.iter())
+            .filter_map(|event| match event {
+                StreamingPvtEvent::AcquisitionScanPlanned(scan) => Some(scan),
+                StreamingPvtEvent::PvtOutput(_) => None,
+            })
+            .collect();
+
+        assert_eq!(scans.len(), 1);
+        assert_eq!(scans[0].sample_index, 0);
+        assert_eq!(scans[0].sample_count, 10);
+        assert_eq!(scans[0].plan.prns, vec![1, 11]);
+        assert_eq!(runner.state_snapshot().sample_index, 20);
     }
 
     #[test]
