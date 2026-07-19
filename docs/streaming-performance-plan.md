@@ -114,7 +114,7 @@ Expected static CTTC behavior:
 - Keep the first runner small:
   - open IQ - initial configured file streaming implemented.
   - load optional nav - RINEX nav explicit/env/colocated discovery is wired into runner startup; missing nav keeps IQ-only mode.
-  - stream samples - implemented for chunked IQ input into runner; reader now advances acquisition, 1 ms tracking, and PVT cadence internally.
+  - stream samples - implemented for chunked IQ input into runner; reader now handles short reads, advances acquisition, 1 ms tracking, and PVT cadence internally.
   - acquire configured PRNs - PCPS scan execution implemented.
   - track - active tracking initialization and deterministic per-ms stepping implemented.
   - decode nav - bit sync, 20 ms symbol emission, NavDecoder, and EphemerisCollector entry points implemented.
@@ -122,6 +122,10 @@ Expected static CTTC behavior:
   - solve continuous PVT - runner entry point implemented.
   - emit structured results - configured-rate `PvtOutput` event entry point implemented; read steps and run summary include state snapshots, latest PVT output, and structured acquisition/tracking/nav/PVT event counts.
 - Do not include GUI worker, async runtime, multi-constellation, or full UI schema yet.
+
+Real-data smoke coverage:
+
+- `streaming_runner_real` verifies the runner-owned path loads colocated CTTC RINEX nav, acquires the fixed CTTC PRNs, and advances tracking directly from the IQ reader.
 
 ### Phase F: Dynamic Acquisition and Reacquisition
 

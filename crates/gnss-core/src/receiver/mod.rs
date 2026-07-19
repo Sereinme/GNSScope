@@ -1267,10 +1267,6 @@ impl StreamingPvtRunner {
                 state,
                 events,
             });
-
-            if samples_read < requested {
-                break;
-            }
         }
 
         Ok(summary)
