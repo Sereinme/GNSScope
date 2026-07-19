@@ -54,6 +54,12 @@ pub struct TrackingOutput {
     pub code_phase_chips: f64,
     pub carrier_doppler_hz: f64,
     pub cn0_db_hz: f64,
+    /// Prompt-phase coherence metric in the range 0..1.
+    ///
+    /// A value near 1 means the prompt correlator phase is stable over the
+    /// current lock window; values near 0 indicate phase scatter or loss of
+    /// carrier lock.
+    pub pll_lock_metric: f64,
     /// Integration-boundary sample counter since tracking start.
     pub sample_counter: u64,
     /// Code-aligned integer receiver sample tag for observables.
@@ -267,6 +273,7 @@ impl DllPllTracking {
         self.update_cn0(p);
         self.last_prompt = p;
         let cn0 = self.compute_cn0();
+        let pll_lock_metric = self.compute_pll_lock_metric();
 
         TrackingOutput {
             prompt: p,
@@ -275,6 +282,7 @@ impl DllPllTracking {
             code_phase_chips: self.code_phase_chips,
             carrier_doppler_hz: doppler,
             cn0_db_hz: cn0.max(0.0),
+            pll_lock_metric,
             sample_counter: self.sample_counter,
             tracking_sample_counter,
             rem_code_phase_samples,
@@ -374,6 +382,21 @@ impl DllPllTracking {
 
     fn compute_cn0(&self) -> f64 {
         self.cn0_smoothed_db_hz.unwrap_or(0.0)
+    }
+
+    fn compute_pll_lock_metric(&self) -> f64 {
+        let n = self.cn0_prompt_buffer.len();
+        if n == 0 {
+            return 0.0;
+        }
+
+        let coherent_sum: Complex<f64> = self.cn0_prompt_buffer.iter().copied().sum();
+        let wideband_power: f64 = self.cn0_prompt_buffer.iter().map(|p| p.norm_sqr()).sum();
+        if wideband_power <= 1e-30 {
+            return 0.0;
+        }
+
+        (coherent_sum.norm_sqr() / (n as f64 * wideband_power)).clamp(0.0, 1.0)
     }
 
     fn compute_cn0_nwpr(&self) -> Option<f64> {
@@ -500,6 +523,28 @@ mod tests {
 
         assert_eq!(trk.cn0_prompt_buffer.len(), 20);
         assert!(trk.compute_cn0() > 0.0);
+    }
+
+    #[test]
+    fn test_pll_lock_metric_tracks_prompt_phase_coherence() {
+        let config = TrackingConfig {
+            cn0_samples: 20,
+            cn0_smoother_alpha: 1.0,
+            ..Default::default()
+        };
+        let mut locked = DllPllTracking::new(0, 0.0, 0.0, config.clone(), 0);
+        let mut unlocked = DllPllTracking::new(0, 0.0, 0.0, config, 0);
+
+        for _ in 0..20 {
+            locked.update_cn0(Complex::new(1.0, 0.0));
+        }
+        for i in 0..20 {
+            let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
+            unlocked.update_cn0(Complex::new(sign, 0.0));
+        }
+
+        assert!(locked.compute_pll_lock_metric() > 0.99);
+        assert!(unlocked.compute_pll_lock_metric() < 0.01);
     }
 
     #[test]

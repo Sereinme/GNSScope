@@ -5,6 +5,7 @@
 //! GUI workers and async runtimes.
 
 use crate::acquisition::AcquisitionResult;
+use crate::tracking::TrackingOutput;
 use num_complex::Complex;
 use std::collections::{BTreeMap, VecDeque};
 
@@ -69,6 +70,24 @@ pub struct ChannelHealthObservation {
     pub doppler_hz: f64,
     pub nav_time_available: bool,
     pub ephemeris_available: bool,
+}
+
+impl ChannelHealthObservation {
+    pub fn from_tracking_output(
+        output: &TrackingOutput,
+        nav_time_available: bool,
+        ephemeris_available: bool,
+    ) -> Self {
+        Self {
+            pll_lock_metric: output.pll_lock_metric,
+            cn0_db_hz: output.cn0_db_hz,
+            dll_error_chips: output.dll_error,
+            pll_error_cycles: 0.0,
+            doppler_hz: output.carrier_doppler_hz,
+            nav_time_available,
+            ephemeris_available,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -471,6 +490,33 @@ mod tests {
             nav_time_available: true,
             ephemeris_available: true,
         }
+    }
+
+    #[test]
+    fn health_observation_maps_tracking_output_lock_fields() {
+        let output = TrackingOutput {
+            prompt: Complex::new(12.0, 1.0),
+            early_mag: 11.0,
+            late_mag: 10.0,
+            code_phase_chips: 42.0,
+            carrier_doppler_hz: 7_250.0,
+            cn0_db_hz: 43.0,
+            pll_lock_metric: 0.87,
+            sample_counter: 4_000,
+            tracking_sample_counter: 4_123,
+            rem_code_phase_samples: 0.25,
+            ms_within_bit: 3,
+            dll_error: 0.03,
+        };
+
+        let observation = ChannelHealthObservation::from_tracking_output(&output, true, false);
+
+        assert_eq!(observation.pll_lock_metric, 0.87);
+        assert_eq!(observation.cn0_db_hz, 43.0);
+        assert_eq!(observation.dll_error_chips, 0.03);
+        assert_eq!(observation.doppler_hz, 7_250.0);
+        assert!(observation.nav_time_available);
+        assert!(!observation.ephemeris_available);
     }
 
     #[test]

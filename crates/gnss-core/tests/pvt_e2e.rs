@@ -81,6 +81,7 @@ struct TrackingStepReport {
     ms: usize,
     doppler_hz: f64,
     cn0_db_hz: f64,
+    pll_lock_metric: f64,
     prompt_i_abs: f64,
     bit_sync_boundary: Option<usize>,
 }
@@ -238,8 +239,13 @@ fn test_pvt_e2e() {
         if ms > 0 && ms % 5000 == 0 {
             for report in &reports {
                 eprintln!(
-                    "  [ms={:>6}] PRN {:2} dopp={:+.0} |I|={:.0} cn0={:.1}",
-                    ms, report.prn, report.doppler_hz, report.prompt_i_abs, report.cn0_db_hz
+                    "  [ms={:>6}] PRN {:2} dopp={:+.0} |I|={:.0} cn0={:.1} pll={:.2}",
+                    ms,
+                    report.prn,
+                    report.doppler_hz,
+                    report.prompt_i_abs,
+                    report.cn0_db_hz,
+                    report.pll_lock_metric
                 );
             }
         }
@@ -1051,6 +1057,7 @@ fn process_tracking_ms(
         ms,
         doppler_hz: channel.doppler_hz,
         cn0_db_hz: channel.cn0_db_hz,
+        pll_lock_metric: out.pll_lock_metric,
         prompt_i_abs: prompt_i.abs(),
         bit_sync_boundary,
     }

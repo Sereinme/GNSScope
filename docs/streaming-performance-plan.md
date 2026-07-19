@@ -217,7 +217,9 @@ This prevents a newly acquired or recently reacquired signal from disturbing WLS
 
 Use PLL lock metric as a core lock indicator, not C/N0 alone.
 
-Recommended tracking output addition:
+Status: `TrackingOutput::pll_lock_metric` is implemented as a prompt-phase coherence metric over the current lock window, and `ChannelHealthObservation::from_tracking_output` carries it into receiver channel admission. The metric is now visible in the real-data e2e tracking diagnostics for calibration.
+
+Implemented tracking output:
 
 ```rust
 pll_lock_metric: f64 // 0..1
