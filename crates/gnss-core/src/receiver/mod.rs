@@ -6,9 +6,11 @@
 
 use crate::acquisition::{AcquisitionResult, PcpsAcquisition, PcpsConfig};
 use crate::io::{IqFormat, IqReader};
-use crate::nav::RinexNavConfig;
+use crate::nav::{
+    parse_iono, Ephemeris, EphemerisCollector, IonoParams, NavDecoder, RinexNavConfig,
+};
 use crate::pvt::{ContinuousPvtConfig, PvtEpochOutput};
-use crate::tracking::{DllPllTracking, TrackingConfig, TrackingOutput};
+use crate::tracking::{BitSynchronizer, DllPllTracking, TrackingConfig, TrackingOutput};
 use num_complex::Complex;
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
@@ -455,6 +457,7 @@ pub struct StreamingPvtConfig {
     pub tracking: TrackingConfig,
     pub continuous_pvt: ContinuousPvtConfig,
     pub acquisition_ring_ms: usize,
+    pub bit_sync_start_ms: u64,
 }
 
 impl Default for StreamingPvtConfig {
@@ -474,6 +477,7 @@ impl Default for StreamingPvtConfig {
             channel_admission: ChannelAdmissionConfig::default(),
             tracking: TrackingConfig::default(),
             continuous_pvt: ContinuousPvtConfig::default(),
+            bit_sync_start_ms: 2_000,
         }
     }
 }
@@ -548,10 +552,38 @@ pub struct StreamingTrackingUpdate {
 }
 
 #[derive(Debug, Clone)]
+pub struct StreamingBitSyncUpdate {
+    pub prn: u8,
+    pub now_ms: u64,
+    pub boundary_ms: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamingNavSymbol {
+    pub prn: u8,
+    pub now_ms: u64,
+    pub symbol: f64,
+    pub decoded_tow_sow: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamingNavDecode {
+    pub prn: u8,
+    pub now_ms: u64,
+    pub subframe_id: u8,
+    pub tow_count: u32,
+    pub ephemeris: Option<Box<Ephemeris>>,
+    pub ionosphere: Option<IonoParams>,
+}
+
+#[derive(Debug, Clone)]
 pub enum StreamingPvtEvent {
     AcquisitionScanPlanned(StreamingAcquisitionScan),
     AcquisitionScanCompleted(StreamingAcquisitionScanResult),
     TrackingUpdated(StreamingTrackingUpdate),
+    BitSyncUpdated(StreamingBitSyncUpdate),
+    NavSymbolReady(StreamingNavSymbol),
+    NavSubframeDecoded(Box<StreamingNavDecode>),
     PvtOutput(Box<PvtEpochOutput>),
 }
 
@@ -588,12 +620,41 @@ impl StreamingPvtRunSummary {
     }
 }
 
+struct ActiveTrackingChannel {
+    tracker: DllPllTracking,
+    bit_sync: BitSynchronizer,
+    nav: NavDecoder,
+    collector: EphemerisCollector,
+    bit_boundary: Option<usize>,
+    nav_symbol_accumulator: Vec<f64>,
+}
+
+impl ActiveTrackingChannel {
+    fn new(tracker: DllPllTracking) -> Self {
+        Self {
+            tracker,
+            bit_sync: BitSynchronizer::new(),
+            nav: NavDecoder::new(),
+            collector: EphemerisCollector::new(),
+            bit_boundary: None,
+            nav_symbol_accumulator: Vec::with_capacity(20),
+        }
+    }
+
+    fn set_bit_boundary(&mut self, boundary: usize, sync_start_ms: u64) {
+        self.bit_boundary = Some(boundary % 20);
+        self.nav_symbol_accumulator.clear();
+        self.tracker
+            .set_bit_boundary_from_sync(boundary, sync_start_ms as usize);
+    }
+}
+
 pub struct StreamingPvtRunner {
     config: StreamingPvtConfig,
     channels: ChannelManager,
     acquisition_scheduler: AcquisitionScheduler,
     acquisition_ring: AcquisitionRingBuffer,
-    active_tracking: BTreeMap<u8, DllPllTracking>,
+    active_tracking: BTreeMap<u8, ActiveTrackingChannel>,
     next_pvt_output_ms: u64,
 }
 
@@ -640,6 +701,15 @@ impl StreamingPvtRunner {
 
     pub fn active_tracking_prns(&self) -> Vec<u8> {
         self.active_tracking.keys().copied().collect()
+    }
+
+    pub fn set_tracking_bit_boundary(&mut self, prn: u8, boundary: usize) -> bool {
+        if let Some(active) = self.active_tracking.get_mut(&prn) {
+            active.set_bit_boundary(boundary, self.config.bit_sync_start_ms);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn ingest_samples(
@@ -744,7 +814,8 @@ impl StreamingPvtRunner {
                 self.tracking_config(),
                 result.sample_index,
             );
-            self.active_tracking.insert(result.prn, tracker);
+            self.active_tracking
+                .insert(result.prn, ActiveTrackingChannel::new(tracker));
         }
         self.channels.accept_acquisition(result, now_ms);
     }
@@ -775,11 +846,12 @@ impl StreamingPvtRunner {
         let mut lost_prns = Vec::new();
 
         for prn in prns {
-            let output = self
+            let active = self
                 .active_tracking
                 .get_mut(&prn)
-                .expect("active PRN should have a tracker")
-                .process(samples);
+                .expect("active PRN should have a tracker");
+            let output = active.tracker.process(samples);
+            let prompt_i = output.prompt.re;
             let observation = ChannelHealthObservation::from_tracking_output(
                 &output,
                 nav_time_available(prn),
@@ -797,6 +869,19 @@ impl StreamingPvtRunner {
                     state,
                 },
             ));
+
+            if active.bit_boundary.is_none() && now_ms >= self.config.bit_sync_start_ms {
+                if let Some(boundary) = active.bit_sync.update(prompt_i) {
+                    active.set_bit_boundary(boundary, self.config.bit_sync_start_ms);
+                    events.push(StreamingPvtEvent::BitSyncUpdated(StreamingBitSyncUpdate {
+                        prn,
+                        now_ms,
+                        boundary_ms: boundary,
+                    }));
+                }
+            }
+
+            events.extend(process_nav_symbol(prn, now_ms, active, prompt_i));
         }
 
         for prn in lost_prns {
@@ -887,6 +972,53 @@ impl StreamingPvtRunner {
 fn samples_to_ceil_ms(samples: u64, samples_per_ms: usize) -> u64 {
     let samples_per_ms = samples_per_ms.max(1) as u64;
     samples.div_ceil(samples_per_ms)
+}
+
+fn process_nav_symbol(
+    prn: u8,
+    now_ms: u64,
+    active: &mut ActiveTrackingChannel,
+    prompt_i: f64,
+) -> Vec<StreamingPvtEvent> {
+    if active.bit_boundary.is_none() {
+        return Vec::new();
+    }
+
+    active.nav_symbol_accumulator.push(prompt_i);
+    if active.nav_symbol_accumulator.len() < 20 {
+        return Vec::new();
+    }
+
+    let symbol: f64 = active.nav_symbol_accumulator.iter().sum();
+    active.nav_symbol_accumulator.clear();
+    let decoded = active.nav.feed_symbol(symbol);
+    let decoded_tow_sow = active
+        .nav
+        .tow_set()
+        .then(|| active.nav.tow_at_current_symbol_ms() as f64 * 1e-3);
+    let mut events = vec![StreamingPvtEvent::NavSymbolReady(StreamingNavSymbol {
+        prn,
+        now_ms,
+        symbol,
+        decoded_tow_sow,
+    })];
+
+    if decoded {
+        let ephemeris = active.collector.feed(prn, &active.nav.words).map(Box::new);
+        let ionosphere = parse_iono(&active.nav.words);
+        events.push(StreamingPvtEvent::NavSubframeDecoded(Box::new(
+            StreamingNavDecode {
+                prn,
+                now_ms,
+                subframe_id: active.nav.subframe_id,
+                tow_count: active.nav.tow,
+                ephemeris,
+                ionosphere,
+            },
+        )));
+    }
+
+    events
 }
 
 #[derive(Debug, Clone)]
@@ -1251,6 +1383,9 @@ mod tests {
                 StreamingPvtEvent::AcquisitionScanPlanned(scan) => Some(scan),
                 StreamingPvtEvent::AcquisitionScanCompleted(_) => None,
                 StreamingPvtEvent::TrackingUpdated(_) => None,
+                StreamingPvtEvent::BitSyncUpdated(_) => None,
+                StreamingPvtEvent::NavSymbolReady(_) => None,
+                StreamingPvtEvent::NavSubframeDecoded(_) => None,
                 StreamingPvtEvent::PvtOutput(_) => None,
             })
             .collect();
@@ -1266,6 +1401,9 @@ mod tests {
                 StreamingPvtEvent::AcquisitionScanCompleted(result) => Some(result),
                 StreamingPvtEvent::AcquisitionScanPlanned(_)
                 | StreamingPvtEvent::TrackingUpdated(_)
+                | StreamingPvtEvent::BitSyncUpdated(_)
+                | StreamingPvtEvent::NavSymbolReady(_)
+                | StreamingPvtEvent::NavSubframeDecoded(_)
                 | StreamingPvtEvent::PvtOutput(_) => None,
             })
             .collect();
@@ -1303,6 +1441,9 @@ mod tests {
                 StreamingPvtEvent::AcquisitionScanCompleted(result) => Some(result),
                 StreamingPvtEvent::AcquisitionScanPlanned(_)
                 | StreamingPvtEvent::TrackingUpdated(_)
+                | StreamingPvtEvent::BitSyncUpdated(_)
+                | StreamingPvtEvent::NavSymbolReady(_)
+                | StreamingPvtEvent::NavSubframeDecoded(_)
                 | StreamingPvtEvent::PvtOutput(_) => None,
             })
             .expect("completed acquisition scan");
@@ -1361,6 +1502,47 @@ mod tests {
         assert_eq!(update.state, ReceiverChannelState::Healthy);
         assert_eq!(runner.channels().state(prn), ReceiverChannelState::Healthy);
         assert_eq!(runner.channels().pvt_eligible_prns(), vec![prn]);
+    }
+
+    #[test]
+    fn streaming_runner_accumulates_twenty_ms_nav_symbol_after_bit_boundary() {
+        let fs = 4_000_000.0;
+        let prn_idx = 5;
+        let prn = (prn_idx + 1) as u8;
+        let doppler = 1_500.0;
+        let code_phase = 512.0;
+        let samples =
+            synthetic_signal_ms(prn_idx, doppler, code_phase, fs, 10.0, fs as usize / 1000);
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![prn]);
+        config.sample_rate_hz = fs;
+        config.acquisition.acq_window_ms = 1;
+        config.acquisition.noncoherent_integrations = 1;
+        config.acquisition.cold_acq_interval_ms = 1;
+        config.acquisition.doppler_max_hz = 2_000.0;
+        config.acquisition.doppler_step_hz = 500.0;
+        config.acquisition.threshold = 4.0;
+        config.acquisition_ring_ms = 1;
+        config.channel_admission.probation_good_epochs = 1;
+        config.channel_admission.min_cn0_db_hz = 0.0;
+        config.channel_admission.min_pll_lock_metric = 0.0;
+        config.bit_sync_start_ms = 0;
+        let mut runner = StreamingPvtRunner::new(config);
+        runner.ingest_samples(&samples, 1);
+        assert!(runner.set_tracking_bit_boundary(prn, 0));
+
+        let mut nav_symbols = Vec::new();
+        for now_ms in 2..22 {
+            for event in runner.process_tracking_ms(&samples, now_ms, |_| true, |_| true) {
+                if let StreamingPvtEvent::NavSymbolReady(symbol) = event {
+                    nav_symbols.push(symbol);
+                }
+            }
+        }
+
+        assert_eq!(nav_symbols.len(), 1);
+        assert_eq!(nav_symbols[0].prn, prn);
+        assert_eq!(nav_symbols[0].now_ms, 21);
+        assert!(nav_symbols[0].symbol.abs() > 0.0);
     }
 
     #[test]
