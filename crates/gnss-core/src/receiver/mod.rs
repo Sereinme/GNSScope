@@ -10,8 +10,8 @@ use crate::nav::{
     parse_iono, Ephemeris, EphemerisCollector, IonoParams, NavDecoder, RinexNavConfig,
 };
 use crate::pvt::{
-    ContinuousPvtConfig, ObservablesInputBuilder, ObservablesInputSet, PvtEpochOutput, TowSample,
-    TrackingChannelSnapshot,
+    ContinuousPvtConfig, ContinuousPvtRunner, ObservablesBuilder, ObservablesInputBuilder,
+    ObservablesInputSet, PseudorangeEpoch, PvtEpochOutput, TowSample, TrackingChannelSnapshot,
 };
 use crate::tracking::{BitSynchronizer, DllPllTracking, TrackingConfig, TrackingOutput};
 use num_complex::Complex;
@@ -741,6 +741,7 @@ pub struct StreamingPvtRunner {
     acquisition_ring: AcquisitionRingBuffer,
     active_tracking: BTreeMap<u8, ActiveTrackingChannel>,
     nav_state: StreamingNavState,
+    continuous_pvt: ContinuousPvtRunner,
     next_pvt_output_ms: u64,
 }
 
@@ -753,6 +754,7 @@ impl StreamingPvtRunner {
         let channels = ChannelManager::new(prns, config.channel_admission.clone());
         let acquisition_scheduler = AcquisitionScheduler::new(config.acquisition.clone());
         let acquisition_ring = AcquisitionRingBuffer::new(config.acquisition_ring_samples(), 0);
+        let continuous_pvt = ContinuousPvtRunner::new(config.continuous_pvt.clone());
         let next_pvt_output_ms = config.pvt_output_rate_ms.max(1);
         Self {
             config,
@@ -761,6 +763,7 @@ impl StreamingPvtRunner {
             acquisition_ring,
             active_tracking: BTreeMap::new(),
             nav_state: StreamingNavState::default(),
+            continuous_pvt,
             next_pvt_output_ms,
         }
     }
@@ -827,6 +830,44 @@ impl StreamingPvtRunner {
 
     pub fn observables_input_at_latest_sample(&self) -> ObservablesInputSet<'_> {
         self.observables_input(self.acquisition_ring.next_sample_index() as f64)
+    }
+
+    pub fn pseudorange_epoch_at(&self, common_rx_sample: f64) -> Option<PseudorangeEpoch> {
+        let inputs = self.observables_input(common_rx_sample);
+        let observables = ObservablesBuilder::new(common_rx_sample, self.config.sample_rate_hz)
+            .with_tracking_timestamp_observations(&inputs.tracking_timestamp)
+            .with_nco_reference_observations(&inputs.nco_reference)
+            .build();
+
+        (!observables.pseudoranges.is_empty()).then_some(PseudorangeEpoch {
+            pseudoranges: observables.pseudoranges,
+        })
+    }
+
+    pub fn pseudorange_epoch_at_latest_sample(&self) -> Option<PseudorangeEpoch> {
+        self.pseudorange_epoch_at(self.acquisition_ring.next_sample_index() as f64)
+    }
+
+    pub fn solve_pvt_epoch_at(&mut self, common_rx_sample: f64) -> Option<PvtEpochOutput> {
+        let epoch = self.pseudorange_epoch_at(common_rx_sample)?;
+        let ephemerides = self.nav_state.ephemerides.clone();
+        let ionosphere = self.nav_state.ionosphere.clone();
+        self.continuous_pvt
+            .solve_epochs(&[epoch], &ephemerides, &ionosphere, 0.0, 0.0, 0.0)
+            .pop()
+            .map(|result| result.to_output())
+    }
+
+    pub fn solve_pvt_epoch_at_latest_sample(&mut self) -> Option<PvtEpochOutput> {
+        self.solve_pvt_epoch_at(self.acquisition_ring.next_sample_index() as f64)
+    }
+
+    pub fn solve_and_maybe_emit_pvt(&mut self, now_ms: u64) -> Option<StreamingPvtEvent> {
+        if now_ms < self.next_pvt_output_ms {
+            return None;
+        }
+        let output = self.solve_pvt_epoch_at_latest_sample();
+        self.maybe_emit_pvt(now_ms, output)
     }
 
     pub fn set_tracking_bit_boundary(&mut self, prn: u8, boundary: usize) -> bool {
@@ -1281,6 +1322,27 @@ mod tests {
             doppler_hz,
             nav_time_available: true,
             ephemeris_available: true,
+        }
+    }
+
+    fn tracking_output(
+        sample_counter: u64,
+        tracking_sample_counter: u64,
+        doppler_hz: f64,
+    ) -> TrackingOutput {
+        TrackingOutput {
+            prompt: Complex::new(12.0, 1.0),
+            early_mag: 11.0,
+            late_mag: 10.0,
+            code_phase_chips: 42.0,
+            carrier_doppler_hz: doppler_hz,
+            cn0_db_hz: 43.0,
+            pll_lock_metric: 0.87,
+            sample_counter,
+            tracking_sample_counter,
+            rem_code_phase_samples: 0.25,
+            ms_within_bit: 3,
+            dll_error: 0.03,
         }
     }
 
@@ -1798,6 +1860,75 @@ mod tests {
         assert_eq!(inputs.tracking_timestamp.len(), 1);
         assert_eq!(inputs.tracking_timestamp[0].prn, prn);
         assert!(inputs.tracking_timestamp[0].tracking_jitter_chips >= 0.0);
+
+        let epoch = runner
+            .pseudorange_epoch_at(40_400_000.0)
+            .expect("pseudorange epoch");
+        assert_eq!(epoch.pseudoranges.len(), 1);
+        assert_eq!(epoch.pseudoranges[0].prn, prn);
+    }
+
+    #[test]
+    fn streaming_runner_solves_and_emits_pvt_output_from_observables_epoch() {
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![1, 2, 3, 4]);
+        config.channel_admission.probation_good_epochs = 1;
+        config.channel_admission.min_cn0_db_hz = 0.0;
+        config.channel_admission.min_pll_lock_metric = 0.0;
+        config.pvt_output_rate_ms = 100;
+        let mut runner = StreamingPvtRunner::new(config);
+        runner.acquisition_ring = AcquisitionRingBuffer::new(1, 40_400_000);
+
+        for prn in 1..=4 {
+            let doppler_hz = -1_000.0 - prn as f64 * 10.0;
+            runner.accept_acquisition(acq(prn, doppler_hz), 1);
+            runner.observe_tracking(prn, good_obs(doppler_hz), 2);
+            runner
+                .active_tracking
+                .get_mut(&prn)
+                .expect("active tracking")
+                .latest_tracking_output = Some(tracking_output(
+                40_400_000,
+                40_400_000 + prn as u64,
+                doppler_hz,
+            ));
+            runner.record_nav_event(&StreamingPvtEvent::NavSymbolReady(StreamingNavSymbol {
+                prn,
+                now_ms: 6_000,
+                symbol: 1.0,
+                decoded_tow_sow: Some(600.0 + prn as f64 * 0.001),
+                rx_sample: Some(40_000_000.0),
+            }));
+            runner.record_nav_event(&StreamingPvtEvent::NavSymbolReady(StreamingNavSymbol {
+                prn,
+                now_ms: 6_100,
+                symbol: 1.0,
+                decoded_tow_sow: Some(600.1 + prn as f64 * 0.001),
+                rx_sample: Some(40_400_000.0),
+            }));
+            runner.record_nav_event(&StreamingPvtEvent::NavSubframeDecoded(Box::new(
+                StreamingNavDecode {
+                    prn,
+                    now_ms: 6_000,
+                    rx_sample: 40_000_000,
+                    subframe_id: 1,
+                    tow_count: 100,
+                    ephemeris: None,
+                    ionosphere: None,
+                },
+            )));
+        }
+
+        let event = runner
+            .solve_and_maybe_emit_pvt(100)
+            .expect("PVT output event");
+        let StreamingPvtEvent::PvtOutput(output) = event else {
+            panic!("expected PVT output");
+        };
+        assert_eq!(output.epoch_index, 0);
+        assert_eq!(output.quality.n_sats, 0);
+        let receiver_time_sow = output.time.receiver_time_sow.expect("receiver SOW");
+        assert!((600.0..601.0).contains(&receiver_time_sow));
+        assert_eq!(runner.state_snapshot().next_pvt_output_ms, 200);
     }
 
     #[test]
