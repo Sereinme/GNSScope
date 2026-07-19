@@ -6,4 +6,5 @@ pub mod acquisition;
 pub mod io;
 pub mod nav;
 pub mod pvt;
+pub mod receiver;
 pub mod tracking;

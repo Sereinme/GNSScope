@@ -123,11 +123,12 @@ Expected static CTTC behavior:
 
 ### Phase F: Dynamic Acquisition and Reacquisition
 
+- Status: backend primitives are implemented in `gnss_core::receiver`: deterministic channel state/admission, periodic acquisition scheduling, reacquisition priority, and a bounded acquisition ring buffer. The next step is wiring these primitives into the streaming runner/e2e processing loop.
 - Introduce:
-  - `AcquisitionScheduler`
-  - `ChannelManager`
-  - `ReceiverChannelState`
-  - `AcquisitionRingBuffer`
+  - `AcquisitionScheduler` - implemented.
+  - `ChannelManager` - implemented.
+  - `ReceiverChannelState` - implemented.
+  - `AcquisitionRingBuffer` - implemented.
 - Use periodic acquisition scans, not continuous background scanning.
 - Prioritize reacquisition before cold acquisition.
 - Use a short acquisition ring buffer for cold acquisition and reacquisition windows.
