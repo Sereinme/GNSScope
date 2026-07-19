@@ -10,8 +10,8 @@ use crate::nav::{
     parse_iono, Ephemeris, EphemerisCollector, IonoParams, NavDecoder, RinexNavConfig,
 };
 use crate::pvt::{
-    ContinuousPvtConfig, ContinuousPvtRunner, ObservablesBuilder, ObservablesInputBuilder,
-    ObservablesInputSet, PseudorangeEpoch, PvtEpochOutput, TowSample, TrackingChannelSnapshot,
+    ContinuousPvtConfig, ContinuousPvtRunner, ObservablesInputBuilder, ObservablesInputSet,
+    PseudorangeEpoch, PvtEpochOutput, TowSample, TrackingChannelSnapshot,
 };
 use crate::tracking::{BitSynchronizer, DllPllTracking, TrackingConfig, TrackingOutput};
 use num_complex::Complex;
@@ -834,14 +834,12 @@ impl StreamingPvtRunner {
 
     pub fn pseudorange_epoch_at(&self, common_rx_sample: f64) -> Option<PseudorangeEpoch> {
         let inputs = self.observables_input(common_rx_sample);
-        let observables = ObservablesBuilder::new(common_rx_sample, self.config.sample_rate_hz)
-            .with_tracking_timestamp_observations(&inputs.tracking_timestamp)
-            .with_nco_reference_observations(&inputs.nco_reference)
-            .build();
-
-        (!observables.pseudoranges.is_empty()).then_some(PseudorangeEpoch {
-            pseudoranges: observables.pseudoranges,
-        })
+        PseudorangeEpoch::from_observables_input(
+            &inputs,
+            common_rx_sample,
+            self.config.sample_rate_hz,
+            0.075,
+        )
     }
 
     pub fn pseudorange_epoch_at_latest_sample(&self) -> Option<PseudorangeEpoch> {

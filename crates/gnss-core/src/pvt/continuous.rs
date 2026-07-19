@@ -6,7 +6,11 @@ use crate::nav::ephemeris::{
 };
 use crate::pvt::coords::{lla_to_ecef, Ecef};
 use crate::pvt::kalman::{KalmanConfig, KalmanSolution, PositionVelocityKalman};
-use crate::pvt::pseudorange::{resolve_integer_ms_ambiguities, Pseudorange};
+use crate::pvt::pseudorange::{
+    from_tracking_timestamp_common_receive_epoch, resolve_integer_ms_ambiguities,
+    ObservablesBuilder, ObservablesInputSet, Pseudorange, TrackingObservation,
+    TrackingTimestampObservation,
+};
 use crate::pvt::satpos::satellite_position;
 use crate::pvt::smoothing::{HatchConfig, HatchSmoother};
 use crate::pvt::solver::{solve_wls_with_config, PvtSolution, WlsConfig};
@@ -18,6 +22,53 @@ const OMEGA_E: f64 = 7.292_115_146_7e-5;
 #[derive(Debug, Clone)]
 pub struct PseudorangeEpoch {
     pub pseudoranges: Vec<Pseudorange>,
+}
+
+impl PseudorangeEpoch {
+    pub fn from_observables_input(
+        input: &ObservablesInputSet<'_>,
+        common_rx_sample: f64,
+        fs: f64,
+        nominal_anchor_travel_time_s: f64,
+    ) -> Option<Self> {
+        let observables = ObservablesBuilder::new(common_rx_sample, fs)
+            .with_nominal_anchor_travel_time_s(nominal_anchor_travel_time_s)
+            .with_tracking_timestamp_observations(&input.tracking_timestamp)
+            .with_nco_reference_observations(&input.nco_reference)
+            .build();
+        Self::from_pseudoranges(observables.pseudoranges)
+    }
+
+    pub fn from_tracking_timestamp_observations(
+        observations: &[TrackingTimestampObservation<'_>],
+        common_rx_sample: f64,
+        fs: f64,
+        nominal_anchor_travel_time_s: f64,
+    ) -> Option<Self> {
+        Self::from_pseudoranges(from_tracking_timestamp_common_receive_epoch(
+            observations,
+            common_rx_sample,
+            fs,
+            nominal_anchor_travel_time_s,
+        ))
+    }
+
+    pub fn from_tracking_observations(
+        observations: &[TrackingObservation],
+        common_rx_sample: f64,
+        fs: f64,
+        nominal_anchor_travel_time_s: f64,
+    ) -> Option<Self> {
+        let observables = ObservablesBuilder::new(common_rx_sample, fs)
+            .with_nominal_anchor_travel_time_s(nominal_anchor_travel_time_s)
+            .with_nco_reference_observations(observations)
+            .build();
+        Self::from_pseudoranges(observables.pseudoranges)
+    }
+
+    fn from_pseudoranges(pseudoranges: Vec<Pseudorange>) -> Option<Self> {
+        (!pseudoranges.is_empty()).then_some(Self { pseudoranges })
+    }
 }
 
 #[derive(Debug, Clone)]

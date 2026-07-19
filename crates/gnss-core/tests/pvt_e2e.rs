@@ -11,10 +11,9 @@ use gnss_core::nav::{
     RinexNavConfig,
 };
 use gnss_core::pvt::{
-    from_common_receive_epoch, from_tow_history_common_receive_epoch,
-    from_tracking_timestamp_common_receive_epoch, pseudorange_delta_stats, solve_wls,
-    ContinuousPvtConfig, ContinuousPvtRunner, HatchConfig, IntegerMsAmbiguityConfig, KalmanConfig,
-    ObservablesBuilder, ObservablesInputBuilder, ObservablesSource, PseudorangeEpoch,
+    from_common_receive_epoch, from_tow_history_common_receive_epoch, pseudorange_delta_stats,
+    solve_wls, ContinuousPvtConfig, ContinuousPvtRunner, HatchConfig, IntegerMsAmbiguityConfig,
+    KalmanConfig, ObservablesBuilder, ObservablesInputBuilder, ObservablesSource, PseudorangeEpoch,
     PvtEpochOutput, PvtEpochSolutionKind, PvtSolution, TowSample, TrackingChannelSnapshot,
     TrackingTimestampObservation,
 };
@@ -943,13 +942,13 @@ fn build_continuous_epochs(
                     })
                 })
                 .collect();
-            let pseudoranges = from_tracking_timestamp_common_receive_epoch(
+            PseudorangeEpoch::from_tracking_timestamp_observations(
                 &observations,
                 rx_sample as f64,
                 FS,
                 0.075,
-            );
-            (pseudoranges.len() >= 4).then_some(PseudorangeEpoch { pseudoranges })
+            )
+            .filter(|epoch| epoch.pseudoranges.len() >= 4)
         })
         .collect()
 }
