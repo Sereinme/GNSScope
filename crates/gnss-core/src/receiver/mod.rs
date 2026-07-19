@@ -489,6 +489,8 @@ impl Default for StreamingPvtConfig {
 }
 
 impl StreamingPvtConfig {
+    pub const CTTC_SPAIN_GPS_L1_CA_PRNS: [u8; 5] = [1, 11, 17, 20, 32];
+
     pub fn cttc_fixed_prns(prns: Vec<u8>) -> Self {
         let acquisition = AcquisitionSchedulerConfig {
             fixed_prns: Some(prns.clone()),
@@ -499,6 +501,22 @@ impl StreamingPvtConfig {
             acquisition,
             ..Default::default()
         }
+    }
+
+    pub fn cttc_spain_real_data(iq_path: impl Into<PathBuf>) -> Self {
+        let mut config = Self::cttc_fixed_prns(Self::CTTC_SPAIN_GPS_L1_CA_PRNS.to_vec());
+        config.iq_path = Some(iq_path.into());
+        config.iq_format = IqFormat::Int16;
+        config.sample_rate_hz = 4_000_000.0;
+        config.intermediate_frequency_hz = 0.0;
+        config.chunk_ms = 1;
+        config.acquisition.acq_window_ms = 10;
+        config.acquisition.noncoherent_integrations = 10;
+        config.acquisition.cold_acq_interval_ms = 1;
+        config.acquisition.max_acq_prns_per_scan = Self::CTTC_SPAIN_GPS_L1_CA_PRNS.len();
+        config.acquisition.threshold = 3.0;
+        config.acquisition_ring_ms = 10;
+        config
     }
 
     pub fn samples_per_ms(&self) -> usize {
@@ -1687,6 +1705,24 @@ mod tests {
 
         let config = config.with_chunk_ms(20);
         assert_eq!(config.chunk_samples(), 80_000);
+    }
+
+    #[test]
+    fn streaming_config_cttc_real_data_sets_known_dataset_defaults() {
+        let config = StreamingPvtConfig::cttc_spain_real_data("cttc.dat");
+
+        assert_eq!(config.iq_path, Some(PathBuf::from("cttc.dat")));
+        assert_eq!(config.iq_format, IqFormat::Int16);
+        assert_eq!(config.sample_rate_hz, 4_000_000.0);
+        assert_eq!(
+            config.fixed_prns,
+            Some(StreamingPvtConfig::CTTC_SPAIN_GPS_L1_CA_PRNS.to_vec())
+        );
+        assert_eq!(config.acquisition.acq_window_ms, 10);
+        assert_eq!(config.acquisition.noncoherent_integrations, 10);
+        assert_eq!(config.acquisition.max_acq_prns_per_scan, 5);
+        assert_eq!(config.acquisition_ring_ms, 10);
+        assert_eq!(config.chunk_ms, 1);
     }
 
     #[test]

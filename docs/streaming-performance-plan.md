@@ -126,6 +126,7 @@ Expected static CTTC behavior:
 Real-data smoke coverage:
 
 - `streaming_runner_real` verifies the runner-owned path loads colocated CTTC RINEX nav, acquires the fixed CTTC PRNs, and advances tracking directly from the IQ reader.
+- `StreamingPvtConfig::cttc_spain_real_data` captures the CTTC dataset defaults used by the smoke path, so future e2e migration and GUI presets share one configuration source.
 
 ### Phase F: Dynamic Acquisition and Reacquisition
 

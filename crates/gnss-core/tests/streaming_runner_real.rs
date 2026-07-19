@@ -5,14 +5,11 @@
 //! PRNs, and advance tracking from the IQ reader without the legacy e2e test
 //! hand-driving those stages.
 
-use gnss_core::io::IqFormat;
 use gnss_core::receiver::{ReceiverChannelState, StreamingPvtConfig, StreamingPvtRunner};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const DATA_FILE: &str =
     "../../data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat";
-const FS: f64 = 4_000_000.0;
-const CTTC_PRNS: &[u8] = &[1, 11, 17, 20, 32];
 
 #[test]
 fn test_streaming_runner_real_data_smoke() {
@@ -22,16 +19,7 @@ fn test_streaming_runner_real_data_smoke() {
         return;
     }
 
-    let mut config = StreamingPvtConfig::cttc_fixed_prns(CTTC_PRNS.to_vec());
-    config.iq_path = Some(PathBuf::from(DATA_FILE));
-    config.iq_format = IqFormat::Int16;
-    config.sample_rate_hz = FS;
-    config.acquisition.acq_window_ms = 10;
-    config.acquisition.noncoherent_integrations = 10;
-    config.acquisition.cold_acq_interval_ms = 1;
-    config.acquisition.max_acq_prns_per_scan = CTTC_PRNS.len();
-    config.acquisition.threshold = 3.0;
-    config.acquisition_ring_ms = 10;
+    let mut config = StreamingPvtConfig::cttc_spain_real_data(DATA_FILE);
     config.channel_admission.probation_good_epochs = 1;
     config.channel_admission.min_cn0_db_hz = 0.0;
     config.channel_admission.min_pll_lock_metric = 0.0;
