@@ -9,7 +9,10 @@ use crate::io::{IqFormat, IqReader};
 use crate::nav::{
     parse_iono, Ephemeris, EphemerisCollector, IonoParams, NavDecoder, RinexNavConfig,
 };
-use crate::pvt::{ContinuousPvtConfig, PvtEpochOutput, TowSample};
+use crate::pvt::{
+    ContinuousPvtConfig, ObservablesInputBuilder, ObservablesInputSet, PvtEpochOutput, TowSample,
+    TrackingChannelSnapshot,
+};
 use crate::tracking::{BitSynchronizer, DllPllTracking, TrackingConfig, TrackingOutput};
 use num_complex::Complex;
 use std::collections::{BTreeMap, VecDeque};
@@ -539,6 +542,7 @@ pub struct StreamingChannelNavState {
     pub subframes_decoded: u32,
     pub last_subframe_ms: Option<u64>,
     pub last_subframe_sample: Option<u64>,
+    pub last_tow_count: Option<u32>,
 }
 
 impl StreamingChannelNavState {
@@ -549,6 +553,7 @@ impl StreamingChannelNavState {
             subframes_decoded: 0,
             last_subframe_ms: None,
             last_subframe_sample: None,
+            last_tow_count: None,
         }
     }
 }
@@ -587,6 +592,7 @@ impl StreamingNavState {
         prn: u8,
         now_ms: u64,
         rx_sample: u64,
+        tow_count: u32,
         ephemeris: Option<Ephemeris>,
         ionosphere: Option<IonoParams>,
     ) {
@@ -594,6 +600,7 @@ impl StreamingNavState {
         channel.subframes_decoded += 1;
         channel.last_subframe_ms = Some(now_ms);
         channel.last_subframe_sample = Some(rx_sample);
+        channel.last_tow_count = Some(tow_count);
         if let Some(ephemeris) = ephemeris {
             self.ephemerides.insert(prn, ephemeris);
         }
@@ -703,6 +710,7 @@ struct ActiveTrackingChannel {
     collector: EphemerisCollector,
     bit_boundary: Option<usize>,
     nav_symbol_accumulator: Vec<f64>,
+    latest_tracking_output: Option<TrackingOutput>,
 }
 
 impl ActiveTrackingChannel {
@@ -714,6 +722,7 @@ impl ActiveTrackingChannel {
             collector: EphemerisCollector::new(),
             bit_boundary: None,
             nav_symbol_accumulator: Vec::with_capacity(20),
+            latest_tracking_output: None,
         }
     }
 
@@ -783,6 +792,41 @@ impl StreamingPvtRunner {
 
     pub fn nav_state(&self) -> &StreamingNavState {
         &self.nav_state
+    }
+
+    pub fn tracking_channel_snapshots(&self) -> Vec<TrackingChannelSnapshot<'_>> {
+        self.channels
+            .pvt_eligible_prns()
+            .into_iter()
+            .filter_map(|prn| {
+                let active = self.active_tracking.get(&prn)?;
+                let output = active.latest_tracking_output.as_ref()?;
+                let nav = self.nav_state.channel(prn)?;
+                Some(TrackingChannelSnapshot {
+                    prn,
+                    tow_count: nav.last_tow_count?,
+                    how_epoch_rx_sample: nav.last_subframe_sample? as f64,
+                    code_phase_chips: output.code_phase_chips,
+                    tracking_sample_counter: output.tracking_sample_counter,
+                    rem_code_phase_samples: output.rem_code_phase_samples,
+                    tow_history: nav.tow_history.as_slice(),
+                    cn0_db_hz: output.cn0_db_hz,
+                    doppler_hz: output.carrier_doppler_hz,
+                    tracking_jitter_chips: output.dll_error.abs(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn observables_input(&self, common_rx_sample: f64) -> ObservablesInputSet<'_> {
+        let snapshots = self.tracking_channel_snapshots();
+        ObservablesInputBuilder::new(common_rx_sample, self.config.sample_rate_hz)
+            .with_channel_snapshots(&snapshots)
+            .build()
+    }
+
+    pub fn observables_input_at_latest_sample(&self) -> ObservablesInputSet<'_> {
+        self.observables_input(self.acquisition_ring.next_sample_index() as f64)
     }
 
     pub fn set_tracking_bit_boundary(&mut self, prn: u8, boundary: usize) -> bool {
@@ -956,6 +1000,7 @@ impl StreamingPvtRunner {
                     self.config.nav_tow_tag_latency_ms,
                     self.config.samples_per_ms(),
                 );
+                active.latest_tracking_output = Some(output.clone());
                 (output, nav_events)
             };
 
@@ -1017,6 +1062,7 @@ impl StreamingPvtRunner {
                     decoded.prn,
                     decoded.now_ms,
                     decoded.rx_sample,
+                    decoded.tow_count,
                     decoded.ephemeris.as_ref().map(|eph| (**eph).clone()),
                     decoded.ionosphere.clone(),
                 );
@@ -1691,6 +1737,67 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].rx_sample, 24_000_000.0);
         assert_eq!(history[0].tow_sow, 345_600.02);
+    }
+
+    #[test]
+    fn streaming_runner_builds_observables_input_from_healthy_tracking_channels() {
+        let fs = 4_000_000.0;
+        let prn_idx = 5;
+        let prn = (prn_idx + 1) as u8;
+        let samples = synthetic_signal_ms(prn_idx, 1_500.0, 512.0, fs, 10.0, fs as usize / 1000);
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![prn]);
+        config.sample_rate_hz = fs;
+        config.acquisition.acq_window_ms = 1;
+        config.acquisition.noncoherent_integrations = 1;
+        config.acquisition.cold_acq_interval_ms = 1;
+        config.acquisition.doppler_max_hz = 2_000.0;
+        config.acquisition.doppler_step_hz = 500.0;
+        config.acquisition.threshold = 4.0;
+        config.acquisition_ring_ms = 1;
+        config.channel_admission.probation_good_epochs = 1;
+        config.channel_admission.min_cn0_db_hz = 0.0;
+        config.channel_admission.min_pll_lock_metric = 0.0;
+        let mut runner = StreamingPvtRunner::new(config);
+        runner.ingest_samples(&samples, 1);
+        runner.process_tracking_ms(&samples, 2, |_| true, |_| true);
+        runner.record_nav_event(&StreamingPvtEvent::NavSymbolReady(StreamingNavSymbol {
+            prn,
+            now_ms: 6_000,
+            symbol: 1.0,
+            decoded_tow_sow: Some(600.0),
+            rx_sample: Some(40_000_000.0),
+        }));
+        runner.record_nav_event(&StreamingPvtEvent::NavSymbolReady(StreamingNavSymbol {
+            prn,
+            now_ms: 6_100,
+            symbol: 1.0,
+            decoded_tow_sow: Some(600.1),
+            rx_sample: Some(40_400_000.0),
+        }));
+        runner.record_nav_event(&StreamingPvtEvent::NavSubframeDecoded(Box::new(
+            StreamingNavDecode {
+                prn,
+                now_ms: 6_000,
+                rx_sample: 40_000_000,
+                subframe_id: 1,
+                tow_count: 100,
+                ephemeris: None,
+                ionosphere: None,
+            },
+        )));
+
+        let snapshots = runner.tracking_channel_snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].prn, prn);
+        assert_eq!(snapshots[0].tow_count, 100);
+        assert_eq!(snapshots[0].how_epoch_rx_sample, 40_000_000.0);
+        assert_eq!(snapshots[0].tow_history.len(), 2);
+
+        let inputs = runner.observables_input(40_400_000.0);
+        assert_eq!(inputs.nco_reference.len(), 1);
+        assert_eq!(inputs.tracking_timestamp.len(), 1);
+        assert_eq!(inputs.tracking_timestamp[0].prn, prn);
+        assert!(inputs.tracking_timestamp[0].tracking_jitter_chips >= 0.0);
     }
 
     #[test]

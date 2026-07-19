@@ -110,13 +110,13 @@ pub struct ObservablesInputSet<'a> {
     pub tow_history_delta_max_ms: f64,
 }
 
-pub struct ObservablesInputBuilder<'a> {
+pub struct ObservablesInputBuilder<'a, 'b> {
     common_rx_sample: f64,
     fs: f64,
-    channel_snapshots: &'a [TrackingChannelSnapshot<'a>],
+    channel_snapshots: &'b [TrackingChannelSnapshot<'a>],
 }
 
-impl<'a> ObservablesInputBuilder<'a> {
+impl<'a, 'b> ObservablesInputBuilder<'a, 'b> {
     pub fn new(common_rx_sample: f64, fs: f64) -> Self {
         Self {
             common_rx_sample,
@@ -125,7 +125,7 @@ impl<'a> ObservablesInputBuilder<'a> {
         }
     }
 
-    pub fn with_channel_snapshots(mut self, snapshots: &'a [TrackingChannelSnapshot<'a>]) -> Self {
+    pub fn with_channel_snapshots(mut self, snapshots: &'b [TrackingChannelSnapshot<'a>]) -> Self {
         self.channel_snapshots = snapshots;
         self
     }

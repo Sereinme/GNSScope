@@ -105,7 +105,7 @@ Expected static CTTC behavior:
 
 ### Phase E: Minimal StreamingPvtRunner
 
-- Status: initial backend runner contract is implemented in `gnss_core::receiver`. `StreamingPvtConfig` covers IQ/nav policy, chunk size, output rate, acquisition, channel admission, tracking, and continuous PVT config. `StreamingPvtRunner` owns deterministic channel state, periodic acquisition scan planning, the acquisition ring buffer, structured PVT output events, can stream an IQ file through configured chunks, executes PCPS acquisition scans from the ring buffer, initializes tracking directly from acquisition results, advances active tracking channels in deterministic PRN order, maintains bit sync plus 20 ms nav-symbol accumulation/decoding state per channel, and now stores navigation state including ephemerides, ionosphere, subframe counts, and per-PRN TOW history. The next step is migrating observables/PVT epoch processing out of `pvt_e2e.rs` into this runner.
+- Status: initial backend runner contract is implemented in `gnss_core::receiver`. `StreamingPvtConfig` covers IQ/nav policy, chunk size, output rate, acquisition, channel admission, tracking, and continuous PVT config. `StreamingPvtRunner` owns deterministic channel state, periodic acquisition scan planning, the acquisition ring buffer, structured PVT output events, can stream an IQ file through configured chunks, executes PCPS acquisition scans from the ring buffer, initializes tracking directly from acquisition results, advances active tracking channels in deterministic PRN order, maintains bit sync plus 20 ms nav-symbol accumulation/decoding state per channel, stores navigation state including ephemerides, ionosphere, subframe counts, and per-PRN TOW history, and now forms PVT-eligible `ObservablesInputSet` snapshots from healthy tracking channels. The next step is migrating continuous PVT epoch solving/output out of `pvt_e2e.rs` into this runner.
 - Extract the stable e2e flow into core receiver modules:
   - `StreamingPvtConfig` - initial contract implemented.
   - `StreamingPvtRunner` - initial contract implemented.
@@ -117,7 +117,7 @@ Expected static CTTC behavior:
   - acquire configured PRNs - PCPS scan execution implemented.
   - track - active tracking initialization and deterministic per-ms stepping implemented.
   - decode nav - bit sync, 20 ms symbol emission, NavDecoder, and EphemerisCollector entry points implemented.
-  - build observables
+  - build observables - implemented for healthy channel snapshots with TOW history and tracking timestamp inputs.
   - solve continuous PVT
   - emit structured results
 - Do not include GUI worker, async runtime, multi-constellation, or full UI schema yet.
