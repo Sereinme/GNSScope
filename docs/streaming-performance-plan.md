@@ -10,6 +10,12 @@ This plan captures the agreed optimization design before changing the receiver p
 - Prepare the receiver architecture for dynamic acquisition, reacquisition, and future GUI worker integration.
 - Add GNSS-SDR NMEA comparison baselines for position, speed, and time.
 
+## Reference Implementation
+
+- GNSS-SDR source code is available locally under `reference/` and is the primary implementation reference for observables, velocity, and receiver-time fixes.
+- Do not search online for GNSS-SDR source or documentation while the local clone is available. Use the local checkout to inspect behavior and formulas.
+- This restriction applies only to GNSS-SDR. Other external questions may use online research when current, primary, or otherwise unavailable local information is needed.
+
 ## Non-Goals
 
 - Do not introduce async runtime or async I/O before GUI implementation.
