@@ -505,6 +505,7 @@ pub struct StreamingPvtConfig {
     pub intermediate_frequency_hz: f64,
     pub chunk_ms: usize,
     pub pvt_output_rate_ms: u64,
+    pub average_doppler_over_pvt_epoch: bool,
     pub fixed_prns: Option<Vec<u8>>,
     pub rinex_nav: RinexNavConfig,
     pub acquisition: AcquisitionSchedulerConfig,
@@ -527,6 +528,7 @@ impl Default for StreamingPvtConfig {
             intermediate_frequency_hz: 0.0,
             chunk_ms: 1,
             pvt_output_rate_ms: 1_000,
+            average_doppler_over_pvt_epoch: true,
             fixed_prns: None,
             rinex_nav: RinexNavConfig::default(),
             acquisition_ring_ms: acquisition.acq_window_ms.max(20),
@@ -563,6 +565,7 @@ impl StreamingPvtConfig {
         config.sample_rate_hz = 4_000_000.0;
         config.intermediate_frequency_hz = 0.0;
         config.chunk_ms = 1;
+        config.pvt_output_rate_ms = 100;
         config.acquisition.acq_window_ms = 10;
         config.acquisition.noncoherent_integrations = 10;
         config.acquisition.cold_acq_interval_ms = 1;
@@ -588,8 +591,17 @@ impl StreamingPvtConfig {
         self.acquisition.acq_window_ms * self.samples_per_ms()
     }
 
+    pub fn doppler_epoch_window_samples(&self) -> u64 {
+        self.pvt_output_rate_ms.max(1) * self.samples_per_ms().max(1) as u64
+    }
+
     pub fn with_output_rate_ms(mut self, output_rate_ms: u64) -> Self {
         self.pvt_output_rate_ms = output_rate_ms.max(1);
+        self
+    }
+
+    pub fn with_doppler_epoch_averaging(mut self, enabled: bool) -> Self {
+        self.average_doppler_over_pvt_epoch = enabled;
         self
     }
 
@@ -604,6 +616,7 @@ pub struct StreamingPvtStateSnapshot {
     pub sample_index: u64,
     pub next_pvt_output_ms: u64,
     pub pvt_output_rate_ms: u64,
+    pub average_doppler_over_pvt_epoch: bool,
     pub channels: Vec<ReceiverChannelSnapshot>,
 }
 
@@ -850,6 +863,7 @@ struct ActiveTrackingChannel {
     collector: EphemerisCollector,
     bit_boundary: Option<usize>,
     nav_symbol_accumulator: Vec<f64>,
+    doppler_history: VecDeque<DopplerHistorySample>,
     previous_tracking_output: Option<TrackingOutput>,
     latest_tracking_output: Option<TrackingOutput>,
 }
@@ -863,6 +877,7 @@ impl ActiveTrackingChannel {
             collector: EphemerisCollector::new(),
             bit_boundary: None,
             nav_symbol_accumulator: Vec::with_capacity(20),
+            doppler_history: VecDeque::new(),
             previous_tracking_output: None,
             latest_tracking_output: None,
         }
@@ -881,6 +896,29 @@ struct StreamingTrackingStepResult {
     output: TrackingOutput,
     pre_update_events: Vec<StreamingPvtEvent>,
     nav_events: Vec<StreamingPvtEvent>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DopplerHistorySample {
+    rx_sample: f64,
+    doppler_hz: f64,
+}
+
+fn average_epoch_doppler(
+    history: &VecDeque<DopplerHistorySample>,
+    common_rx_sample: f64,
+    window_samples: f64,
+) -> Option<f64> {
+    let epoch_start = common_rx_sample - window_samples.max(1.0);
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for sample in history {
+        if sample.rx_sample > epoch_start && sample.rx_sample <= common_rx_sample {
+            sum += sample.doppler_hz;
+            count += 1;
+        }
+    }
+    (count > 0).then_some(sum / count as f64)
 }
 
 fn interpolate_tracking_doppler(
@@ -958,6 +996,7 @@ impl StreamingPvtRunner {
             sample_index: self.acquisition_ring.next_sample_index(),
             next_pvt_output_ms: self.next_pvt_output_ms,
             pvt_output_rate_ms: self.config.pvt_output_rate_ms,
+            average_doppler_over_pvt_epoch: self.config.average_doppler_over_pvt_epoch,
             channels: self.channels.snapshots(&self.active_tracking_prns()),
         }
     }
@@ -1001,11 +1040,24 @@ impl StreamingPvtRunner {
                 let active = self.active_tracking.get(&prn)?;
                 let output = active.latest_tracking_output.as_ref()?;
                 let nav = self.nav_state.channel(prn)?;
-                let doppler_hz = active
-                    .previous_tracking_output
-                    .as_ref()
-                    .and_then(|previous| {
-                        interpolate_tracking_doppler(previous, output, common_rx_sample)
+                let doppler_hz = self
+                    .config
+                    .average_doppler_over_pvt_epoch
+                    .then(|| {
+                        average_epoch_doppler(
+                            &active.doppler_history,
+                            common_rx_sample,
+                            self.config.doppler_epoch_window_samples() as f64,
+                        )
+                    })
+                    .flatten()
+                    .or_else(|| {
+                        active
+                            .previous_tracking_output
+                            .as_ref()
+                            .and_then(|previous| {
+                                interpolate_tracking_doppler(previous, output, common_rx_sample)
+                            })
                     })
                     .unwrap_or(output.carrier_doppler_hz);
                 Some(TrackingChannelSnapshot {
@@ -1274,6 +1326,7 @@ impl StreamingPvtRunner {
         samples: &[Complex<f64>],
         now_ms: u64,
     ) -> StreamingTrackingStepResult {
+        let doppler_window_samples = self.config.doppler_epoch_window_samples() as f64;
         let active = self
             .active_tracking
             .get_mut(&prn)
@@ -1302,6 +1355,20 @@ impl StreamingPvtRunner {
             self.config.nav_tow_tag_latency_ms,
             self.config.samples_per_ms(),
         );
+        let output_rx_sample =
+            output.tracking_sample_counter as f64 + output.rem_code_phase_samples;
+        active.doppler_history.push_back(DopplerHistorySample {
+            rx_sample: output_rx_sample,
+            doppler_hz: output.carrier_doppler_hz,
+        });
+        let oldest_epoch_sample = output_rx_sample - doppler_window_samples;
+        while active
+            .doppler_history
+            .front()
+            .is_some_and(|sample| sample.rx_sample <= oldest_epoch_sample)
+        {
+            active.doppler_history.pop_front();
+        }
         active.previous_tracking_output = active.latest_tracking_output.replace(output.clone());
 
         StreamingTrackingStepResult {
@@ -1823,6 +1890,11 @@ mod tests {
         assert_eq!(config.samples_per_ms(), 4_000);
         assert_eq!(config.chunk_samples(), 4_000);
         assert_eq!(config.pvt_output_rate_ms, 100);
+        assert!(config.average_doppler_over_pvt_epoch);
+        assert_eq!(config.doppler_epoch_window_samples(), 400_000);
+
+        let config = config.with_doppler_epoch_averaging(false);
+        assert!(!config.average_doppler_over_pvt_epoch);
 
         let config = config.with_chunk_ms(20);
         assert_eq!(config.chunk_samples(), 80_000);
@@ -1844,6 +1916,8 @@ mod tests {
         assert_eq!(config.acquisition.max_acq_prns_per_scan, 5);
         assert_eq!(config.acquisition_ring_ms, 10);
         assert_eq!(config.chunk_ms, 1);
+        assert_eq!(config.pvt_output_rate_ms, 100);
+        assert!(config.average_doppler_over_pvt_epoch);
     }
 
     #[test]
@@ -2410,6 +2484,29 @@ mod tests {
 
         let doppler = interpolate_tracking_doppler(&previous, &current, 6_000.25)
             .expect("common epoch is bracketed");
+
+        assert!((doppler - 1_100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn streaming_runner_averages_doppler_once_per_pvt_epoch() {
+        let history = VecDeque::from([
+            DopplerHistorySample {
+                rx_sample: 1_000.0,
+                doppler_hz: 900.0,
+            },
+            DopplerHistorySample {
+                rx_sample: 2_000.0,
+                doppler_hz: 1_000.0,
+            },
+            DopplerHistorySample {
+                rx_sample: 3_000.0,
+                doppler_hz: 1_200.0,
+            },
+        ]);
+
+        let doppler =
+            average_epoch_doppler(&history, 3_000.0, 2_000.0).expect("epoch contains two samples");
 
         assert!((doppler - 1_100.0).abs() < 1e-12);
     }

@@ -38,7 +38,8 @@ const NAV_TOW_TAG_LATENCY_MS: usize = 8 * 20;
 const PROCESS_MS: usize = 60_000;
 const STREAM_CHUNK_MS: usize = 1;
 const ACQ_NONCOHERENT_MS: usize = 10;
-const INSTANTANEOUS_SPEED_SANITY_LIMIT_MPS: f64 = 5.0;
+const CTTC_PVT_EPOCH_MS: usize = 100;
+const EPOCH_AVERAGED_SPEED_TOLERANCE_MPS: f64 = 0.5;
 
 /// One channel's state during the per-ms tracking loop.
 struct Channel {
@@ -409,7 +410,12 @@ fn test_pvt_e2e() {
             rem_code_phase_samples,
             tow_history,
             cn0_db_hz: ch.cn0_db_hz,
-            doppler_hz: interpolate_tracking_doppler(ch, rx_sample as f64).unwrap_or(ch.doppler_hz),
+            doppler_hz: average_epoch_doppler(
+                ch,
+                rx_sample as f64,
+                (CTTC_PVT_EPOCH_MS * spm) as f64,
+            )
+            .unwrap_or(ch.doppler_hz),
             tracking_jitter_chips: ch.dll_error_history_chips[cp_idx],
         });
         println!(
@@ -631,8 +637,8 @@ fn test_pvt_e2e() {
         "Doppler velocity solution did not converge"
     );
     assert!(
-        speed_mps <= INSTANTANEOUS_SPEED_SANITY_LIMIT_MPS,
-        "instantaneous Doppler speed {:.3} m/s exceeds the CTTC sanity limit",
+        speed_mps <= EPOCH_AVERAGED_SPEED_TOLERANCE_MPS,
+        "epoch-averaged Doppler speed {:.3} m/s exceeds the CTTC static tolerance",
         speed_mps,
     );
     assert!(
@@ -951,7 +957,11 @@ fn build_continuous_epochs(
                         tracking_sample_counter: *ch.tracking_sample_counter.get(cp_idx)?,
                         rem_code_phase_samples: *ch.rem_code_phase_samples.get(cp_idx)?,
                         cn0_db_hz: *ch.cn0_history_db_hz.get(cp_idx)?,
-                        doppler_hz: interpolate_tracking_doppler(ch, rx_sample as f64)?,
+                        doppler_hz: average_epoch_doppler(
+                            ch,
+                            rx_sample as f64,
+                            (1_000 * spm) as f64,
+                        )?,
                         tracking_jitter_chips: *ch.dll_error_history_chips.get(cp_idx)?,
                     })
                 })
@@ -1003,21 +1013,25 @@ fn nmea_rmc_speeds_knots(path: &Path) -> Vec<f64> {
         .collect()
 }
 
-fn interpolate_tracking_doppler(channel: &Channel, common_rx_sample: f64) -> Option<f64> {
-    channel
+fn average_epoch_doppler(
+    channel: &Channel,
+    common_rx_sample: f64,
+    window_samples: f64,
+) -> Option<f64> {
+    let epoch_start = common_rx_sample - window_samples.max(1.0);
+    let (sum, count) = channel
         .tracking_sample_counter
-        .windows(2)
-        .zip(channel.rem_code_phase_samples.windows(2))
-        .zip(channel.doppler_history_hz.windows(2))
-        .find_map(|((sample_counter, rem_code_phase), doppler)| {
-            let t1 = sample_counter[0] as f64 + rem_code_phase[0];
-            let t2 = sample_counter[1] as f64 + rem_code_phase[1];
-            if !(t1..=t2).contains(&common_rx_sample) || t2 <= t1 {
-                return None;
-            }
-            let factor = (common_rx_sample - t1) / (t2 - t1);
-            Some(doppler[0] + (doppler[1] - doppler[0]) * factor)
+        .iter()
+        .zip(&channel.rem_code_phase_samples)
+        .zip(&channel.doppler_history_hz)
+        .filter_map(|((&sample_counter, &rem_code_phase), &doppler_hz)| {
+            let rx_sample = sample_counter as f64 + rem_code_phase;
+            (rx_sample > epoch_start && rx_sample <= common_rx_sample).then_some(doppler_hz)
         })
+        .fold((0.0, 0usize), |(sum, count), doppler_hz| {
+            (sum + doppler_hz, count + 1)
+        });
+    (count > 0).then_some(sum / count as f64)
 }
 
 fn velocity_speed_mps(solution: &gnss_core::pvt::VelocitySolution) -> f64 {
