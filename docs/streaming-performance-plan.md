@@ -113,7 +113,7 @@ Expected static CTTC behavior:
   - `StreamingChannelState`
 - Keep the first runner small:
   - open IQ - initial configured file streaming implemented.
-  - stream samples - implemented for chunked IQ input into runner.
+  - stream samples - implemented for chunked IQ input into runner; reader now advances acquisition, 1 ms tracking, and PVT cadence internally.
   - acquire configured PRNs - PCPS scan execution implemented.
   - track - active tracking initialization and deterministic per-ms stepping implemented.
   - decode nav - bit sync, 20 ms symbol emission, NavDecoder, and EphemerisCollector entry points implemented.

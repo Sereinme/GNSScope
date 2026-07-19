@@ -1154,7 +1154,7 @@ impl StreamingPvtRunner {
 
             let now_sample_index = start_sample_index + samples_read as u64;
             let now_ms = samples_to_ceil_ms(now_sample_index, self.config.samples_per_ms());
-            let events = self.ingest_samples(&buffer[..samples_read], now_ms);
+            let events = self.process_stream_samples(&buffer[..samples_read], start_sample_index);
             summary.samples_read += samples_read;
             summary.steps += 1;
             summary.events_emitted += events.len();
@@ -1171,6 +1171,50 @@ impl StreamingPvtRunner {
         }
 
         Ok(summary)
+    }
+
+    pub fn process_stream_samples(
+        &mut self,
+        samples: &[Complex<f64>],
+        start_sample_index: u64,
+    ) -> Vec<StreamingPvtEvent> {
+        let samples_per_ms = self.config.samples_per_ms().max(1);
+        let mut events = Vec::new();
+
+        for (offset, chunk) in samples.chunks(samples_per_ms).enumerate() {
+            let chunk_start_sample = start_sample_index + (offset * samples_per_ms) as u64;
+            let chunk_end_sample = chunk_start_sample + chunk.len() as u64;
+            let now_ms = samples_to_ceil_ms(chunk_end_sample, samples_per_ms);
+
+            events.extend(self.ingest_samples(chunk, now_ms));
+            if chunk.len() == samples_per_ms {
+                let nav_available = self.nav_available_prns();
+                let ephemeris_available = self.ephemeris_available_prns();
+                events.extend(self.process_tracking_ms(
+                    chunk,
+                    now_ms,
+                    |prn| nav_available.binary_search(&prn).is_ok(),
+                    |prn| ephemeris_available.binary_search(&prn).is_ok(),
+                ));
+            }
+            if let Some(event) = self.solve_and_maybe_emit_pvt(now_ms) {
+                events.push(event);
+            }
+        }
+
+        events
+    }
+
+    fn nav_available_prns(&self) -> Vec<u8> {
+        self.nav_state
+            .channels
+            .iter()
+            .filter_map(|(&prn, channel)| (!channel.tow_history.is_empty()).then_some(prn))
+            .collect()
+    }
+
+    fn ephemeris_available_prns(&self) -> Vec<u8> {
+        self.nav_state.ephemerides.keys().copied().collect()
     }
 }
 
@@ -1386,6 +1430,23 @@ mod tests {
             bytes.extend_from_slice(&q_sample.to_le_bytes());
         }
         fs::write(&path, bytes).expect("write temp iq file");
+        path
+    }
+
+    fn write_complex_i16_iq_file(samples: &[Complex<f64>]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "gnsscope_stream_signal_test_{}_{}.dat",
+            std::process::id(),
+            samples.len()
+        ));
+        let mut bytes = Vec::with_capacity(samples.len() * 4);
+        for sample in samples {
+            let i_sample = sample.re.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+            let q_sample = sample.im.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+            bytes.extend_from_slice(&i_sample.to_le_bytes());
+            bytes.extend_from_slice(&q_sample.to_le_bytes());
+        }
+        fs::write(&path, bytes).expect("write temp iq signal file");
         path
     }
 
@@ -1647,6 +1708,64 @@ mod tests {
         assert_eq!(completions.len(), 1);
         assert_eq!(completions[0].results.len(), 2);
         assert_eq!(runner.state_snapshot().sample_index, 20);
+    }
+
+    #[test]
+    fn streaming_runner_reader_advances_tracking_after_acquisition() {
+        let fs = 4_000_000.0;
+        let prn_idx = 5;
+        let prn = (prn_idx + 1) as u8;
+        let doppler = 1_500.0;
+        let code_phase = 512.0;
+        let samples: Vec<Complex<f64>> = (0..3)
+            .flat_map(|_| {
+                synthetic_signal_ms(prn_idx, doppler, code_phase, fs, 10.0, fs as usize / 1000)
+            })
+            .collect();
+        let path = write_complex_i16_iq_file(&samples);
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![prn]);
+        config.iq_path = Some(path.clone());
+        config.sample_rate_hz = fs;
+        config.acquisition.acq_window_ms = 1;
+        config.acquisition.noncoherent_integrations = 1;
+        config.acquisition.cold_acq_interval_ms = 1;
+        config.acquisition.doppler_max_hz = 2_000.0;
+        config.acquisition.doppler_step_hz = 500.0;
+        config.acquisition.threshold = 4.0;
+        config.acquisition_ring_ms = 1;
+        config.channel_admission.probation_good_epochs = 1;
+        config.channel_admission.min_cn0_db_hz = 0.0;
+        let mut runner = StreamingPvtRunner::new(config);
+        let mut steps = Vec::new();
+
+        let summary = runner
+            .stream_iq_file_until_ms(3, |step| steps.push(step))
+            .expect("stream synthetic signal file");
+        fs::remove_file(path).ok();
+
+        assert_eq!(summary.steps, 3);
+        assert_eq!(summary.samples_read, 12_000);
+        let mut saw_acquisition = false;
+        let mut tracking_updates = 0usize;
+        for event in steps.iter().flat_map(|step| step.events.iter()) {
+            match event {
+                StreamingPvtEvent::AcquisitionScanCompleted(result) => {
+                    saw_acquisition |= result.results.iter().any(|result| result.detected);
+                }
+                StreamingPvtEvent::TrackingUpdated(update) => {
+                    assert_eq!(update.prn, prn);
+                    tracking_updates += 1;
+                }
+                StreamingPvtEvent::AcquisitionScanPlanned(_)
+                | StreamingPvtEvent::BitSyncUpdated(_)
+                | StreamingPvtEvent::NavSymbolReady(_)
+                | StreamingPvtEvent::NavSubframeDecoded(_)
+                | StreamingPvtEvent::PvtOutput(_) => {}
+            }
+        }
+        assert!(saw_acquisition);
+        assert!(tracking_updates >= 1);
+        assert_eq!(runner.active_tracking_prns(), vec![prn]);
     }
 
     #[test]
