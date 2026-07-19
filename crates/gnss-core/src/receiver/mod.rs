@@ -5,9 +5,13 @@
 //! GUI workers and async runtimes.
 
 use crate::acquisition::AcquisitionResult;
-use crate::tracking::TrackingOutput;
+use crate::io::IqFormat;
+use crate::nav::RinexNavConfig;
+use crate::pvt::{ContinuousPvtConfig, PvtEpochOutput};
+use crate::tracking::{TrackingConfig, TrackingOutput};
 use num_complex::Complex;
 use std::collections::{BTreeMap, VecDeque};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiverChannelState {
@@ -99,6 +103,15 @@ pub struct ReceiverChannel {
     pub last_update_ms: Option<u64>,
     good_epochs: usize,
     bad_epochs: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReceiverChannelSnapshot {
+    pub prn: u8,
+    pub state: ReceiverChannelState,
+    pub last_doppler_hz: Option<f64>,
+    pub last_update_ms: Option<u64>,
+    pub pvt_eligible: bool,
 }
 
 impl ReceiverChannel {
@@ -227,6 +240,19 @@ impl ChannelManager {
         self.channels
             .iter()
             .filter_map(|(&prn, channel)| channel.state.pvt_eligible().then_some(prn))
+            .collect()
+    }
+
+    pub fn snapshots(&self) -> Vec<ReceiverChannelSnapshot> {
+        self.channels
+            .values()
+            .map(|channel| ReceiverChannelSnapshot {
+                prn: channel.prn,
+                state: channel.state,
+                last_doppler_hz: channel.last_doppler_hz,
+                last_update_ms: channel.last_update_ms,
+                pvt_eligible: channel.state.pvt_eligible(),
+            })
             .collect()
     }
 
@@ -410,6 +436,223 @@ fn limited(mut prns: Vec<u8>, max_len: usize) -> Vec<u8> {
 }
 
 #[derive(Debug, Clone)]
+pub struct StreamingPvtConfig {
+    pub iq_path: Option<PathBuf>,
+    pub iq_format: IqFormat,
+    pub sample_rate_hz: f64,
+    pub intermediate_frequency_hz: f64,
+    pub chunk_ms: usize,
+    pub pvt_output_rate_ms: u64,
+    pub fixed_prns: Option<Vec<u8>>,
+    pub rinex_nav: RinexNavConfig,
+    pub acquisition: AcquisitionSchedulerConfig,
+    pub channel_admission: ChannelAdmissionConfig,
+    pub tracking: TrackingConfig,
+    pub continuous_pvt: ContinuousPvtConfig,
+    pub acquisition_ring_ms: usize,
+}
+
+impl Default for StreamingPvtConfig {
+    fn default() -> Self {
+        let acquisition = AcquisitionSchedulerConfig::default();
+        Self {
+            iq_path: None,
+            iq_format: IqFormat::Int16,
+            sample_rate_hz: 4_000_000.0,
+            intermediate_frequency_hz: 0.0,
+            chunk_ms: 1,
+            pvt_output_rate_ms: 1_000,
+            fixed_prns: None,
+            rinex_nav: RinexNavConfig::default(),
+            acquisition_ring_ms: acquisition.acq_window_ms.max(20),
+            acquisition,
+            channel_admission: ChannelAdmissionConfig::default(),
+            tracking: TrackingConfig::default(),
+            continuous_pvt: ContinuousPvtConfig::default(),
+        }
+    }
+}
+
+impl StreamingPvtConfig {
+    pub fn cttc_fixed_prns(prns: Vec<u8>) -> Self {
+        let acquisition = AcquisitionSchedulerConfig {
+            fixed_prns: Some(prns.clone()),
+            ..Default::default()
+        };
+        Self {
+            fixed_prns: Some(prns),
+            acquisition,
+            ..Default::default()
+        }
+    }
+
+    pub fn samples_per_ms(&self) -> usize {
+        (self.sample_rate_hz / 1000.0).round() as usize
+    }
+
+    pub fn chunk_samples(&self) -> usize {
+        self.chunk_ms.max(1) * self.samples_per_ms()
+    }
+
+    pub fn acquisition_ring_samples(&self) -> usize {
+        self.acquisition_ring_ms.max(self.acquisition.acq_window_ms) * self.samples_per_ms()
+    }
+
+    pub fn acquisition_window_samples(&self) -> usize {
+        self.acquisition.acq_window_ms * self.samples_per_ms()
+    }
+
+    pub fn with_output_rate_ms(mut self, output_rate_ms: u64) -> Self {
+        self.pvt_output_rate_ms = output_rate_ms.max(1);
+        self
+    }
+
+    pub fn with_chunk_ms(mut self, chunk_ms: usize) -> Self {
+        self.chunk_ms = chunk_ms.max(1);
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamingPvtStateSnapshot {
+    pub sample_index: u64,
+    pub next_pvt_output_ms: u64,
+    pub pvt_output_rate_ms: u64,
+    pub channels: Vec<ReceiverChannelSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamingAcquisitionScan {
+    pub plan: AcquisitionScanPlan,
+    pub sample_index: u64,
+    pub sample_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum StreamingPvtEvent {
+    AcquisitionScanPlanned(StreamingAcquisitionScan),
+    PvtOutput(Box<PvtEpochOutput>),
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamingPvtRunner {
+    config: StreamingPvtConfig,
+    channels: ChannelManager,
+    acquisition_scheduler: AcquisitionScheduler,
+    acquisition_ring: AcquisitionRingBuffer,
+    next_pvt_output_ms: u64,
+}
+
+impl StreamingPvtRunner {
+    pub fn new(config: StreamingPvtConfig) -> Self {
+        let prns = config
+            .fixed_prns
+            .clone()
+            .unwrap_or_else(|| (1..=32).collect());
+        let channels = ChannelManager::new(prns, config.channel_admission.clone());
+        let acquisition_scheduler = AcquisitionScheduler::new(config.acquisition.clone());
+        let acquisition_ring = AcquisitionRingBuffer::new(config.acquisition_ring_samples(), 0);
+        let next_pvt_output_ms = config.pvt_output_rate_ms.max(1);
+        Self {
+            config,
+            channels,
+            acquisition_scheduler,
+            acquisition_ring,
+            next_pvt_output_ms,
+        }
+    }
+
+    pub fn config(&self) -> &StreamingPvtConfig {
+        &self.config
+    }
+
+    pub fn channels(&self) -> &ChannelManager {
+        &self.channels
+    }
+
+    pub fn channels_mut(&mut self) -> &mut ChannelManager {
+        &mut self.channels
+    }
+
+    pub fn state_snapshot(&self) -> StreamingPvtStateSnapshot {
+        StreamingPvtStateSnapshot {
+            sample_index: self.acquisition_ring.next_sample_index(),
+            next_pvt_output_ms: self.next_pvt_output_ms,
+            pvt_output_rate_ms: self.config.pvt_output_rate_ms,
+            channels: self.channels.snapshots(),
+        }
+    }
+
+    pub fn ingest_samples(
+        &mut self,
+        samples: &[Complex<f64>],
+        now_ms: u64,
+    ) -> Vec<StreamingPvtEvent> {
+        self.acquisition_ring.push_samples(samples);
+        let mut events = Vec::new();
+        if let Some(scan) = self.plan_acquisition_scan(now_ms) {
+            events.push(StreamingPvtEvent::AcquisitionScanPlanned(scan));
+        }
+        events
+    }
+
+    pub fn plan_acquisition_scan(&mut self, now_ms: u64) -> Option<StreamingAcquisitionScan> {
+        let plan = self
+            .acquisition_scheduler
+            .plan_scan(now_ms, &self.channels)?;
+        let sample_count = plan.window_ms * self.config.samples_per_ms();
+        let (sample_index, _) = self.acquisition_ring.latest_window(sample_count)?;
+        for prn in &plan.prns {
+            self.channels.set_acquiring(*prn, now_ms);
+        }
+        Some(StreamingAcquisitionScan {
+            plan,
+            sample_index,
+            sample_count,
+        })
+    }
+
+    pub fn acquisition_window_for_scan(
+        &self,
+        scan: &StreamingAcquisitionScan,
+    ) -> Option<(u64, Vec<Complex<f64>>)> {
+        let (sample_index, window) = self.acquisition_ring.latest_window(scan.sample_count)?;
+        (sample_index == scan.sample_index).then_some((sample_index, window))
+    }
+
+    pub fn accept_acquisition(&mut self, result: AcquisitionResult, now_ms: u64) {
+        self.channels.accept_acquisition(result, now_ms);
+    }
+
+    pub fn reject_acquisition(&mut self, prn: u8, now_ms: u64) {
+        self.channels.reject_acquisition(prn, now_ms);
+    }
+
+    pub fn observe_tracking(
+        &mut self,
+        prn: u8,
+        observation: ChannelHealthObservation,
+        now_ms: u64,
+    ) -> ReceiverChannelState {
+        self.channels.observe_tracking(prn, observation, now_ms)
+    }
+
+    pub fn maybe_emit_pvt(
+        &mut self,
+        now_ms: u64,
+        output: Option<PvtEpochOutput>,
+    ) -> Option<StreamingPvtEvent> {
+        if now_ms < self.next_pvt_output_ms {
+            return None;
+        }
+        while now_ms >= self.next_pvt_output_ms {
+            self.next_pvt_output_ms += self.config.pvt_output_rate_ms.max(1);
+        }
+        output.map(|output| StreamingPvtEvent::PvtOutput(Box::new(output)))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AcquisitionRingBuffer {
     capacity_samples: usize,
     start_sample_index: u64,
@@ -490,6 +733,12 @@ mod tests {
             nav_time_available: true,
             ephemeris_available: true,
         }
+    }
+
+    fn samples(count: usize) -> Vec<Complex<f64>> {
+        (0..count)
+            .map(|i| Complex::new(i as f64, -(i as f64)))
+            .collect()
     }
 
     #[test]
@@ -601,6 +850,82 @@ mod tests {
         let plan = scheduler.plan_scan(2, &manager).expect("cold plan");
         assert_eq!(plan.kind, AcquisitionScanKind::Cold);
         assert_eq!(plan.prns, vec![1, 17]);
+    }
+
+    #[test]
+    fn streaming_config_defaults_to_one_ms_chunks_and_configurable_output_rate() {
+        let config = StreamingPvtConfig::default().with_output_rate_ms(100);
+
+        assert_eq!(config.chunk_ms, 1);
+        assert_eq!(config.samples_per_ms(), 4_000);
+        assert_eq!(config.chunk_samples(), 4_000);
+        assert_eq!(config.pvt_output_rate_ms, 100);
+
+        let config = config.with_chunk_ms(20);
+        assert_eq!(config.chunk_samples(), 80_000);
+    }
+
+    #[test]
+    fn streaming_runner_plans_fixed_prn_cold_acquisition_from_ring() {
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![1, 11, 17]);
+        config.acquisition.cold_acq_interval_ms = 1;
+        config.acquisition.max_acq_prns_per_scan = 2;
+        config.acquisition.acq_window_ms = 10;
+        config.acquisition_ring_ms = 10;
+        let mut runner = StreamingPvtRunner::new(config);
+
+        let events = runner.ingest_samples(&samples(40_000), 1);
+
+        assert_eq!(events.len(), 1);
+        let StreamingPvtEvent::AcquisitionScanPlanned(scan) = &events[0] else {
+            panic!("expected acquisition scan");
+        };
+        assert_eq!(scan.plan.kind, AcquisitionScanKind::Cold);
+        assert_eq!(scan.plan.prns, vec![1, 11]);
+        assert_eq!(scan.sample_index, 0);
+        assert_eq!(scan.sample_count, 40_000);
+        assert_eq!(runner.channels().state(1), ReceiverChannelState::Acquiring);
+        assert_eq!(runner.channels().state(17), ReceiverChannelState::Absent);
+    }
+
+    #[test]
+    fn streaming_runner_prioritizes_lost_channel_reacquisition() {
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![1, 11, 17]);
+        config.acquisition.cold_acq_interval_ms = 1;
+        config.acquisition.reacq_interval_ms = 1;
+        config.channel_admission.probation_good_epochs = 1;
+        config.channel_admission.lost_bad_epochs = 1;
+        let mut runner = StreamingPvtRunner::new(config);
+        runner.ingest_samples(&samples(40_000), 1);
+
+        runner.accept_acquisition(acq(11, 5_500.0), 2);
+        runner.observe_tracking(11, good_obs(5_500.0), 3);
+        let mut bad = good_obs(5_500.0);
+        bad.pll_lock_metric = 0.0;
+        runner.observe_tracking(11, bad, 4);
+
+        let scan = runner
+            .plan_acquisition_scan(5)
+            .expect("lost channel should be scanned first");
+
+        assert_eq!(scan.plan.kind, AcquisitionScanKind::Reacquisition);
+        assert_eq!(scan.plan.prns, vec![11]);
+        assert_eq!(
+            runner.channels().state(11),
+            ReceiverChannelState::Reacquiring
+        );
+    }
+
+    #[test]
+    fn streaming_runner_pvt_output_rate_is_deterministic() {
+        let config = StreamingPvtConfig::default().with_output_rate_ms(100);
+        let mut runner = StreamingPvtRunner::new(config);
+
+        assert!(runner.maybe_emit_pvt(99, None).is_none());
+        assert!(runner.maybe_emit_pvt(100, None).is_none());
+        assert_eq!(runner.state_snapshot().next_pvt_output_ms, 200);
+        assert!(runner.maybe_emit_pvt(350, None).is_none());
+        assert_eq!(runner.state_snapshot().next_pvt_output_ms, 400);
     }
 
     #[test]
