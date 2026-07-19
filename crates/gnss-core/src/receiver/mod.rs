@@ -9,7 +9,7 @@ use crate::io::{IqFormat, IqReader};
 use crate::nav::{
     parse_iono, Ephemeris, EphemerisCollector, IonoParams, NavDecoder, RinexNavConfig,
 };
-use crate::pvt::{ContinuousPvtConfig, PvtEpochOutput};
+use crate::pvt::{ContinuousPvtConfig, PvtEpochOutput, TowSample};
 use crate::tracking::{BitSynchronizer, DllPllTracking, TrackingConfig, TrackingOutput};
 use num_complex::Complex;
 use std::collections::{BTreeMap, VecDeque};
@@ -458,6 +458,7 @@ pub struct StreamingPvtConfig {
     pub continuous_pvt: ContinuousPvtConfig,
     pub acquisition_ring_ms: usize,
     pub bit_sync_start_ms: u64,
+    pub nav_tow_tag_latency_ms: usize,
 }
 
 impl Default for StreamingPvtConfig {
@@ -478,6 +479,7 @@ impl Default for StreamingPvtConfig {
             tracking: TrackingConfig::default(),
             continuous_pvt: ContinuousPvtConfig::default(),
             bit_sync_start_ms: 2_000,
+            nav_tow_tag_latency_ms: 8 * 20,
         }
     }
 }
@@ -531,6 +533,78 @@ pub struct StreamingPvtStateSnapshot {
 }
 
 #[derive(Debug, Clone)]
+pub struct StreamingChannelNavState {
+    pub prn: u8,
+    pub tow_history: Vec<TowSample>,
+    pub subframes_decoded: u32,
+    pub last_subframe_ms: Option<u64>,
+    pub last_subframe_sample: Option<u64>,
+}
+
+impl StreamingChannelNavState {
+    fn new(prn: u8) -> Self {
+        Self {
+            prn,
+            tow_history: Vec::new(),
+            subframes_decoded: 0,
+            last_subframe_ms: None,
+            last_subframe_sample: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StreamingNavState {
+    pub ephemerides: BTreeMap<u8, Ephemeris>,
+    pub ionosphere: IonoParams,
+    pub ionosphere_source: Option<String>,
+    pub channels: BTreeMap<u8, StreamingChannelNavState>,
+}
+
+impl StreamingNavState {
+    pub fn channel(&self, prn: u8) -> Option<&StreamingChannelNavState> {
+        self.channels.get(&prn)
+    }
+
+    pub fn tow_history(&self, prn: u8) -> Option<&[TowSample]> {
+        self.channels
+            .get(&prn)
+            .map(|channel| channel.tow_history.as_slice())
+    }
+
+    fn channel_mut(&mut self, prn: u8) -> &mut StreamingChannelNavState {
+        self.channels
+            .entry(prn)
+            .or_insert_with(|| StreamingChannelNavState::new(prn))
+    }
+
+    fn record_tow_sample(&mut self, prn: u8, sample: TowSample) {
+        self.channel_mut(prn).tow_history.push(sample);
+    }
+
+    fn record_subframe(
+        &mut self,
+        prn: u8,
+        now_ms: u64,
+        rx_sample: u64,
+        ephemeris: Option<Ephemeris>,
+        ionosphere: Option<IonoParams>,
+    ) {
+        let channel = self.channel_mut(prn);
+        channel.subframes_decoded += 1;
+        channel.last_subframe_ms = Some(now_ms);
+        channel.last_subframe_sample = Some(rx_sample);
+        if let Some(ephemeris) = ephemeris {
+            self.ephemerides.insert(prn, ephemeris);
+        }
+        if let Some(ionosphere) = ionosphere.filter(|params| params.valid) {
+            self.ionosphere = ionosphere;
+            self.ionosphere_source = Some("broadcast-page18".to_string());
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct StreamingAcquisitionScan {
     pub plan: AcquisitionScanPlan,
     pub sample_index: u64,
@@ -564,12 +638,14 @@ pub struct StreamingNavSymbol {
     pub now_ms: u64,
     pub symbol: f64,
     pub decoded_tow_sow: Option<f64>,
+    pub rx_sample: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StreamingNavDecode {
     pub prn: u8,
     pub now_ms: u64,
+    pub rx_sample: u64,
     pub subframe_id: u8,
     pub tow_count: u32,
     pub ephemeris: Option<Box<Ephemeris>>,
@@ -655,6 +731,7 @@ pub struct StreamingPvtRunner {
     acquisition_scheduler: AcquisitionScheduler,
     acquisition_ring: AcquisitionRingBuffer,
     active_tracking: BTreeMap<u8, ActiveTrackingChannel>,
+    nav_state: StreamingNavState,
     next_pvt_output_ms: u64,
 }
 
@@ -674,6 +751,7 @@ impl StreamingPvtRunner {
             acquisition_scheduler,
             acquisition_ring,
             active_tracking: BTreeMap::new(),
+            nav_state: StreamingNavState::default(),
             next_pvt_output_ms,
         }
     }
@@ -701,6 +779,10 @@ impl StreamingPvtRunner {
 
     pub fn active_tracking_prns(&self) -> Vec<u8> {
         self.active_tracking.keys().copied().collect()
+    }
+
+    pub fn nav_state(&self) -> &StreamingNavState {
+        &self.nav_state
     }
 
     pub fn set_tracking_bit_boundary(&mut self, prn: u8, boundary: usize) -> bool {
@@ -846,12 +928,37 @@ impl StreamingPvtRunner {
         let mut lost_prns = Vec::new();
 
         for prn in prns {
-            let active = self
-                .active_tracking
-                .get_mut(&prn)
-                .expect("active PRN should have a tracker");
-            let output = active.tracker.process(samples);
-            let prompt_i = output.prompt.re;
+            let (output, nav_events) = {
+                let active = self
+                    .active_tracking
+                    .get_mut(&prn)
+                    .expect("active PRN should have a tracker");
+                let output = active.tracker.process(samples);
+                let prompt_i = output.prompt.re;
+
+                if active.bit_boundary.is_none() && now_ms >= self.config.bit_sync_start_ms {
+                    if let Some(boundary) = active.bit_sync.update(prompt_i) {
+                        active.set_bit_boundary(boundary, self.config.bit_sync_start_ms);
+                        events.push(StreamingPvtEvent::BitSyncUpdated(StreamingBitSyncUpdate {
+                            prn,
+                            now_ms,
+                            boundary_ms: boundary,
+                        }));
+                    }
+                }
+
+                let nav_events = process_nav_symbol(
+                    prn,
+                    now_ms,
+                    active,
+                    prompt_i,
+                    &output,
+                    self.config.nav_tow_tag_latency_ms,
+                    self.config.samples_per_ms(),
+                );
+                (output, nav_events)
+            };
+
             let observation = ChannelHealthObservation::from_tracking_output(
                 &output,
                 nav_time_available(prn),
@@ -865,23 +972,14 @@ impl StreamingPvtRunner {
                 StreamingTrackingUpdate {
                     prn,
                     now_ms,
-                    output,
+                    output: output.clone(),
                     state,
                 },
             ));
-
-            if active.bit_boundary.is_none() && now_ms >= self.config.bit_sync_start_ms {
-                if let Some(boundary) = active.bit_sync.update(prompt_i) {
-                    active.set_bit_boundary(boundary, self.config.bit_sync_start_ms);
-                    events.push(StreamingPvtEvent::BitSyncUpdated(StreamingBitSyncUpdate {
-                        prn,
-                        now_ms,
-                        boundary_ms: boundary,
-                    }));
-                }
+            for event in &nav_events {
+                self.record_nav_event(event);
             }
-
-            events.extend(process_nav_symbol(prn, now_ms, active, prompt_i));
+            events.extend(nav_events);
         }
 
         for prn in lost_prns {
@@ -903,6 +1001,28 @@ impl StreamingPvtRunner {
             self.next_pvt_output_ms += self.config.pvt_output_rate_ms.max(1);
         }
         output.map(|output| StreamingPvtEvent::PvtOutput(Box::new(output)))
+    }
+
+    fn record_nav_event(&mut self, event: &StreamingPvtEvent) {
+        match event {
+            StreamingPvtEvent::NavSymbolReady(symbol) => {
+                if let (Some(rx_sample), Some(tow_sow)) = (symbol.rx_sample, symbol.decoded_tow_sow)
+                {
+                    self.nav_state
+                        .record_tow_sample(symbol.prn, TowSample { rx_sample, tow_sow });
+                }
+            }
+            StreamingPvtEvent::NavSubframeDecoded(decoded) => {
+                self.nav_state.record_subframe(
+                    decoded.prn,
+                    decoded.now_ms,
+                    decoded.rx_sample,
+                    decoded.ephemeris.as_ref().map(|eph| (**eph).clone()),
+                    decoded.ionosphere.clone(),
+                );
+            }
+            _ => {}
+        }
     }
 
     pub fn stream_iq_file_until_ms<F>(
@@ -979,6 +1099,9 @@ fn process_nav_symbol(
     now_ms: u64,
     active: &mut ActiveTrackingChannel,
     prompt_i: f64,
+    output: &TrackingOutput,
+    nav_tow_tag_latency_ms: usize,
+    samples_per_ms: usize,
 ) -> Vec<StreamingPvtEvent> {
     if active.bit_boundary.is_none() {
         return Vec::new();
@@ -996,20 +1119,28 @@ fn process_nav_symbol(
         .nav
         .tow_set()
         .then(|| active.nav.tow_at_current_symbol_ms() as f64 * 1e-3);
+    let rx_sample = decoded_tow_sow.map(|_| {
+        output
+            .sample_counter
+            .saturating_sub((nav_tow_tag_latency_ms * samples_per_ms) as u64) as f64
+    });
     let mut events = vec![StreamingPvtEvent::NavSymbolReady(StreamingNavSymbol {
         prn,
         now_ms,
         symbol,
         decoded_tow_sow,
+        rx_sample,
     })];
 
     if decoded {
+        let subframe_rx_sample = output.sample_counter;
         let ephemeris = active.collector.feed(prn, &active.nav.words).map(Box::new);
         let ionosphere = parse_iono(&active.nav.words);
         events.push(StreamingPvtEvent::NavSubframeDecoded(Box::new(
             StreamingNavDecode {
                 prn,
                 now_ms,
+                rx_sample: subframe_rx_sample,
                 subframe_id: active.nav.subframe_id,
                 tow_count: active.nav.tow,
                 ephemeris,
@@ -1543,6 +1674,23 @@ mod tests {
         assert_eq!(nav_symbols[0].prn, prn);
         assert_eq!(nav_symbols[0].now_ms, 21);
         assert!(nav_symbols[0].symbol.abs() > 0.0);
+    }
+
+    #[test]
+    fn streaming_runner_records_tow_history_from_nav_symbol_events() {
+        let mut runner = StreamingPvtRunner::new(StreamingPvtConfig::cttc_fixed_prns(vec![11]));
+        runner.record_nav_event(&StreamingPvtEvent::NavSymbolReady(StreamingNavSymbol {
+            prn: 11,
+            now_ms: 6_000,
+            symbol: 123.0,
+            decoded_tow_sow: Some(345_600.02),
+            rx_sample: Some(24_000_000.0),
+        }));
+
+        let history = runner.nav_state().tow_history(11).expect("tow history");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].rx_sample, 24_000_000.0);
+        assert_eq!(history[0].tow_sow, 345_600.02);
     }
 
     #[test]
