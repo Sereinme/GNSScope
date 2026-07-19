@@ -446,6 +446,57 @@ fn limited(mut prns: Vec<u8>, max_len: usize) -> Vec<u8> {
     prns
 }
 
+fn acquire_prns_sequential(
+    config: PcpsConfig,
+    prns: &[u8],
+    window: &[Complex<f64>],
+    sample_index: u64,
+    noncoherent_integrations: usize,
+) -> Vec<AcquisitionResult> {
+    let mut acquisition = PcpsAcquisition::new(config);
+    prns.iter()
+        .map(|&prn| {
+            acquisition.acquire_noncoherent_at_sample(
+                (prn - 1) as usize,
+                window,
+                sample_index,
+                noncoherent_integrations,
+            )
+        })
+        .collect()
+}
+
+fn acquire_prns_parallel(
+    config: PcpsConfig,
+    prns: &[u8],
+    window: &[Complex<f64>],
+    sample_index: u64,
+    noncoherent_integrations: usize,
+) -> Vec<AcquisitionResult> {
+    let mut results = std::thread::scope(|scope| {
+        prns.iter()
+            .map(|&prn| {
+                scope.spawn(move || {
+                    let mut acquisition = PcpsAcquisition::new(config);
+                    acquisition.acquire_noncoherent_at_sample(
+                        (prn - 1) as usize,
+                        window,
+                        sample_index,
+                        noncoherent_integrations,
+                    )
+                })
+            })
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("PCPS acquisition worker should not panic")
+            })
+            .collect::<Vec<_>>()
+    });
+    results.sort_by_key(|result| result.prn);
+    results
+}
+
 #[derive(Debug, Clone)]
 pub struct StreamingPvtConfig {
     pub iq_path: Option<PathBuf>,
@@ -457,6 +508,7 @@ pub struct StreamingPvtConfig {
     pub fixed_prns: Option<Vec<u8>>,
     pub rinex_nav: RinexNavConfig,
     pub acquisition: AcquisitionSchedulerConfig,
+    pub parallel_acquisition: bool,
     pub channel_admission: ChannelAdmissionConfig,
     pub tracking: TrackingConfig,
     pub continuous_pvt: ContinuousPvtConfig,
@@ -479,6 +531,7 @@ impl Default for StreamingPvtConfig {
             rinex_nav: RinexNavConfig::default(),
             acquisition_ring_ms: acquisition.acq_window_ms.max(20),
             acquisition,
+            parallel_acquisition: true,
             channel_admission: ChannelAdmissionConfig::default(),
             tracking: TrackingConfig::default(),
             continuous_pvt: ContinuousPvtConfig::default(),
@@ -1044,22 +1097,30 @@ impl StreamingPvtRunner {
         now_ms: u64,
     ) -> Option<StreamingAcquisitionScanResult> {
         let (sample_index, window) = self.acquisition_window_for_scan(scan)?;
-        let mut acquisition = PcpsAcquisition::new(self.pcps_config());
-        let mut results = Vec::with_capacity(scan.plan.prns.len());
-
-        for &prn in &scan.plan.prns {
-            let result = acquisition.acquire_noncoherent_at_sample(
-                (prn - 1) as usize,
+        let results = if self.config.parallel_acquisition && scan.plan.prns.len() > 1 {
+            acquire_prns_parallel(
+                self.pcps_config(),
+                &scan.plan.prns,
                 &window,
                 sample_index,
                 scan.plan.noncoherent_integrations,
-            );
+            )
+        } else {
+            acquire_prns_sequential(
+                self.pcps_config(),
+                &scan.plan.prns,
+                &window,
+                sample_index,
+                scan.plan.noncoherent_integrations,
+            )
+        };
+
+        for result in &results {
             if result.detected {
                 self.accept_acquisition(result.clone(), now_ms);
             } else {
-                self.reject_acquisition(prn, now_ms);
+                self.reject_acquisition(result.prn, now_ms);
             }
-            results.push(result);
         }
 
         Some(StreamingAcquisitionScanResult {
@@ -2034,6 +2095,46 @@ mod tests {
             .find(|channel| channel.prn == prn)
             .expect("PRN snapshot");
         assert!(channel.tracking_active);
+    }
+
+    #[test]
+    fn parallel_acquisition_matches_sequential_results_in_prn_order() {
+        let fs = 4_000_000.0;
+        let prn_idx = 5;
+        let doppler = 1_500.0;
+        let code_phase = 512.0;
+        let window =
+            synthetic_signal_ms(prn_idx, doppler, code_phase, fs, 10.0, fs as usize / 1000);
+        let config = PcpsConfig {
+            fs,
+            doppler_max: 2_000.0,
+            doppler_step: 500.0,
+            noncoherent_integrations: 1,
+            threshold: 4.0,
+            ..Default::default()
+        };
+        let prns = [1, 6, 11];
+
+        let sequential = acquire_prns_sequential(config, &prns, &window, 0, 1);
+        let parallel = acquire_prns_parallel(config, &prns, &window, 0, 1);
+
+        assert_eq!(
+            sequential
+                .iter()
+                .map(|result| result.prn)
+                .collect::<Vec<_>>(),
+            vec![1, 6, 11]
+        );
+        assert_eq!(
+            parallel.iter().map(|result| result.prn).collect::<Vec<_>>(),
+            vec![1, 6, 11]
+        );
+        for (sequential, parallel) in sequential.iter().zip(parallel.iter()) {
+            assert_eq!(sequential.detected, parallel.detected);
+            assert_eq!(sequential.prn, parallel.prn);
+            assert!((sequential.doppler_hz - parallel.doppler_hz).abs() < f64::EPSILON);
+            assert!((sequential.code_phase_chips - parallel.code_phase_chips).abs() < f64::EPSILON);
+        }
     }
 
     #[test]

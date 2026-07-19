@@ -29,6 +29,7 @@ pub struct AcquisitionResult {
 }
 
 /// PCPS acquisition configuration.
+#[derive(Debug, Clone, Copy)]
 pub struct PcpsConfig {
     /// Sampling frequency in Hz
     pub fs: f64,

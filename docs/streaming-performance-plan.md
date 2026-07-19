@@ -115,7 +115,7 @@ Expected static CTTC behavior:
   - open IQ - initial configured file streaming implemented.
   - load optional nav - RINEX nav explicit/env/colocated discovery is wired into runner startup; missing nav keeps IQ-only mode.
   - stream samples - implemented for chunked IQ input into runner; reader now handles short reads, advances acquisition, 1 ms tracking, and PVT cadence internally.
-  - acquire configured PRNs - PCPS scan execution implemented.
+  - acquire configured PRNs - PCPS scan execution implemented with deterministic PRN-ordered parallel acquisition.
   - track - active tracking initialization and deterministic per-ms stepping implemented.
   - decode nav - bit sync, 20 ms symbol emission, NavDecoder, and EphemerisCollector entry points implemented.
   - build observables - implemented for healthy channel snapshots with TOW history and tracking timestamp inputs.
