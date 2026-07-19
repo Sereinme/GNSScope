@@ -7,7 +7,7 @@ pub const CODE_LENGTH: usize = 1023;
 pub const PRN_COUNT: usize = 32;
 
 /// All 32 GPS L1 C/A PRN codes, each 1023 chips, values +1/-1.
-pub const PRN_CODES: [[i8; CODE_LENGTH]; PRN_COUNT] = include!("prn_codes.inl");
+pub static PRN_CODES: [[i8; CODE_LENGTH]; PRN_COUNT] = include!("prn_codes.inl");
 
 #[cfg(test)]
 mod tests {
@@ -30,15 +30,23 @@ mod tests {
 
     #[test]
     fn test_cross_correlation() {
-        for i in 0..PRN_COUNT {
-            for j in 0..PRN_COUNT {
-                if i == j { continue; }
-                let corr: i32 = PRN_CODES[i].iter().zip(PRN_CODES[j].iter())
+        for (i, code_i) in PRN_CODES.iter().enumerate() {
+            for (j, code_j) in PRN_CODES.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                let corr: i32 = code_i
+                    .iter()
+                    .zip(code_j.iter())
                     .map(|(a, b)| (*a as i32) * (*b as i32))
                     .sum();
-                assert!(corr.abs() <= 65,
+                assert!(
+                    corr.abs() <= 65,
                     "PRN {} vs {} cross-corr too high: {}",
-                    i + 1, j + 1, corr.abs());
+                    i + 1,
+                    j + 1,
+                    corr.abs()
+                );
             }
         }
     }

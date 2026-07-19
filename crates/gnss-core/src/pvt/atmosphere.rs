@@ -28,33 +28,43 @@ pub fn klobuchar_iono(iono: &IonoParams, lat: f64, lon: f64, az: f64, el: f64, g
     let phiu = phiu.clamp(-0.416, 0.416);
 
     // Sub-ionospheric longitude [sc]
-    let lambdau = lambdai + psi * a.sin() / phiu.cos();
+    let lambdau = lambdai + psi * a.sin() / (phiu * std::f64::consts::PI).cos();
 
     // Geomagnetic latitude [sc]
     let phim = phiu + 0.064 * ((lambdau - 1.617) * std::f64::consts::PI).cos();
 
     // Local time [s]
     let mut t = 43_200.0 * lambdau + gpst;
-    while t < 0.0 { t += 86_400.0; }
-    while t >= 86_400.0 { t -= 86_400.0; }
+    while t < 0.0 {
+        t += 86_400.0;
+    }
+    while t >= 86_400.0 {
+        t -= 86_400.0;
+    }
 
     // Slant factor
     let f = 1.0 + 16.0 * (0.53 - e).powi(3);
 
     // Amplitude [s]
-    let mut amp = iono.alpha[0] + phim * (iono.alpha[1] + phim * (iono.alpha[2] + phim * iono.alpha[3]));
-    if amp < 0.0 { amp = 0.0; }
+    let mut amp =
+        iono.alpha[0] + phim * (iono.alpha[1] + phim * (iono.alpha[2] + phim * iono.alpha[3]));
+    if amp < 0.0 {
+        amp = 0.0;
+    }
 
     // Period [s]
-    let mut per = iono.beta[0] + phim * (iono.beta[1] + phim * (iono.beta[2] + phim * iono.beta[3]));
-    if per < 72_000.0 { per = 72_000.0; }
+    let mut per =
+        iono.beta[0] + phim * (iono.beta[1] + phim * (iono.beta[2] + phim * iono.beta[3]));
+    if per < 72_000.0 {
+        per = 72_000.0;
+    }
 
     // Phase [radians]
     let x = 2.0 * std::f64::consts::PI * (t - 50_400.0) / per;
 
     // Delay [s]: half-cosine if |x| < π/2, else constant 5 ns term
     let t_iono = if x.abs() < std::f64::consts::FRAC_PI_2 {
-        5e-9 + f * (5e-9 + amp * x.cos())
+        f * (5e-9 + amp * (1.0 + x * x * (-0.5 + x * x / 24.0)))
     } else {
         f * 5e-9
     };
@@ -70,8 +80,8 @@ pub fn klobuchar_iono(iono: &IonoParams, lat: f64, lon: f64, az: f64, el: f64, g
 pub fn saastamoinen_trop(lat: f64, h: f64, el: f64) -> f64 {
     // Standard meteorological parameters at sea level
     let p0 = 1013.25; // sea-level pressure [hPa]
-    let t0 = 293.15;  // sea-level temperature [K] (~20°C)
-    let rh = 0.5;     // relative humidity
+    let t0 = 293.15; // sea-level temperature [K] (~20°C)
+    let rh = 0.5; // relative humidity
 
     let hgt = h; // height above ellipsoid [m]
     let _ = lat;
@@ -91,7 +101,9 @@ pub fn saastamoinen_trop(lat: f64, h: f64, el: f64) -> f64 {
 
     // Mapping function (simple 1/sin(el))
     let sin_el = el.sin();
-    if sin_el < 0.1 { return (zhd + zwd) * 10.0; } // cap at low elevation
+    if sin_el < 0.1 {
+        return (zhd + zwd) * 10.0;
+    } // cap at low elevation
     (zhd + zwd) / sin_el
 }
 

@@ -23,9 +23,14 @@ impl LoopFilter {
 
     pub fn new_order(bw: f64, t: f64, order: u32) -> Self {
         let mut lf = Self {
-            order, t, bw,
-            inputs: [0.0; 4], outputs: [0.0; 4], idx: 3,
-            in_coef: Vec::new(), out_coef: Vec::new(),
+            order,
+            t,
+            bw,
+            inputs: [0.0; 4],
+            outputs: [0.0; 4],
+            idx: 3,
+            in_coef: Vec::new(),
+            out_coef: Vec::new(),
         };
         lf.update_coefficients();
         lf
@@ -54,7 +59,9 @@ impl LoopFilter {
         self.idx = 3;
     }
 
-    pub fn state(&self) -> f64 { self.outputs[self.idx] }
+    pub fn state(&self) -> f64 {
+        self.outputs[self.idx]
+    }
 
     pub fn initialize(&mut self, initial_output: f64) {
         self.inputs = [0.0; 4];

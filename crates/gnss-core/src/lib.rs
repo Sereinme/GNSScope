@@ -3,7 +3,7 @@
 //! Implements acquisition, tracking, navigation message decoding, and PVT solving.
 
 pub mod acquisition;
-pub mod tracking;
-pub mod nav;
 pub mod io;
+pub mod nav;
 pub mod pvt;
+pub mod tracking;

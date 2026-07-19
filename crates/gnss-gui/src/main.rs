@@ -1,3 +1,6 @@
+use gnss_gui::{render_workspace_snapshot, GuiReceiverWorkspaceState};
+
 pub fn main() {
-    println!("GNSScope GUI (placeholder for M2)");
+    let state = GuiReceiverWorkspaceState::preview();
+    print!("{}", render_workspace_snapshot(&state));
 }

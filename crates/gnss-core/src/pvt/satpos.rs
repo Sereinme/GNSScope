@@ -7,7 +7,7 @@ use crate::nav::ephemeris::Ephemeris;
 use crate::pvt::coords::Ecef;
 
 // Physical constants (GPS)
-const MU_GPS: f64 = 3.986_005e14;   // Earth gravitational constant [m^3/s^2]
+const MU_GPS: f64 = 3.986_005e14; // Earth gravitational constant [m^3/s^2]
 const OMEGA_E: f64 = 7.292_115_146_7e-5; // Earth rotation rate [rad/s]
 const C_LIGHT: f64 = 299_792_458.0; // speed of light [m/s]
 
@@ -33,14 +33,17 @@ pub fn satellite_position(eph: &Ephemeris, t: f64) -> SatPos {
     for _ in 0..30 {
         let delta = (e - eph.eccentricity * e.sin() - mk) / (1.0 - eph.eccentricity * e.cos());
         e -= delta;
-        if delta.abs() < 1e-13 { break; }
+        if delta.abs() < 1e-13 {
+            break;
+        }
     }
     let ek = e;
 
     // True anomaly
     let sin_e = ek.sin();
     let cos_e = ek.cos();
-    let nu = ((1.0 - eph.eccentricity * eph.eccentricity).sqrt() * sin_e).atan2(cos_e - eph.eccentricity);
+    let nu = ((1.0 - eph.eccentricity * eph.eccentricity).sqrt() * sin_e)
+        .atan2(cos_e - eph.eccentricity);
     let phi = nu + eph.omega; // argument of latitude
 
     // Second harmonic perturbations
@@ -91,12 +94,15 @@ pub fn satellite_velocity(eph: &Ephemeris, t: f64) -> Ecef {
     for _ in 0..30 {
         let delta = (e - eph.eccentricity * e.sin() - mk) / (1.0 - eph.eccentricity * e.cos());
         e -= delta;
-        if delta.abs() < 1e-13 { break; }
+        if delta.abs() < 1e-13 {
+            break;
+        }
     }
     let ek = e;
     let sin_e = ek.sin();
     let cos_e = ek.cos();
-    let nu = ((1.0 - eph.eccentricity * eph.eccentricity).sqrt() * sin_e).atan2(cos_e - eph.eccentricity);
+    let nu = ((1.0 - eph.eccentricity * eph.eccentricity).sqrt() * sin_e)
+        .atan2(cos_e - eph.eccentricity);
     let phi = nu + eph.omega;
     let two_phi = 2.0 * phi;
     let sin_2phi = two_phi.sin();
@@ -108,7 +114,8 @@ pub fn satellite_velocity(eph: &Ephemeris, t: f64) -> Ecef {
 
     // Derivatives
     let edot = n / (1.0 - eph.eccentricity * cos_e);
-    let phidot = edot * (1.0 + eph.eccentricity * cos_e) / (1.0 - eph.eccentricity * eph.eccentricity).sqrt();
+    let phidot = edot * (1.0 + eph.eccentricity * cos_e)
+        / (1.0 - eph.eccentricity * eph.eccentricity).sqrt();
     // (omitting harmonic derivative terms for brevity — small contribution)
     let rdot = a * eph.eccentricity * sin_e * edot;
     let udot = phidot;
@@ -125,9 +132,13 @@ pub fn satellite_velocity(eph: &Ephemeris, t: f64) -> Ecef {
     let cos_i = i.cos();
     let sin_i = i.sin();
     let vx = vx_op * cos_om - y_op * cos_i * sin_om * omegadot + x_op * (-sin_om) * omegadot
-        - vy_op * cos_i * sin_om + y_op * sin_i * sin_om * idot;
-    let vy = vx_op * sin_om + y_op * cos_i * cos_om * omegadot + x_op * cos_om * omegadot
-        + vy_op * cos_i * cos_om - y_op * sin_i * cos_om * idot;
+        - vy_op * cos_i * sin_om
+        + y_op * sin_i * sin_om * idot;
+    let vy = vx_op * sin_om
+        + y_op * cos_i * cos_om * omegadot
+        + x_op * cos_om * omegadot
+        + vy_op * cos_i * cos_om
+        - y_op * sin_i * cos_om * idot;
     let vz = vy_op * sin_i + y_op * cos_i * idot;
     [vx, vy, vz]
 }
@@ -135,8 +146,11 @@ pub fn satellite_velocity(eph: &Ephemeris, t: f64) -> Ecef {
 /// Difference t - ref, accounting for week crossover (±302400 s).
 fn gps_time_diff(t: f64, ref_t: f64) -> f64 {
     let mut dt = t - ref_t;
-    if dt > 302_400.0 { dt -= 604_800.0; }
-    else if dt < -302_400.0 { dt += 604_800.0; }
+    if dt > 302_400.0 {
+        dt -= 604_800.0;
+    } else if dt < -302_400.0 {
+        dt += 604_800.0;
+    }
     dt
 }
 
@@ -157,10 +171,18 @@ mod tests {
             i0: 0.55,
             i_dot: 0.0,
             delta_n: 0.0,
-            cus: 0.0, cuc: 0.0, crs: 0.0, crc: 0.0, cis: 0.0, cic: 0.0,
+            cus: 0.0,
+            cuc: 0.0,
+            crs: 0.0,
+            crc: 0.0,
+            cis: 0.0,
+            cic: 0.0,
             toe: 0.0,
             toc: 0.0,
-            af0: 0.0, af1: 0.0, af2: 0.0, tgd: 0.0,
+            af0: 0.0,
+            af1: 0.0,
+            af2: 0.0,
+            tgd: 0.0,
             ..Default::default()
         };
         let pos = satellite_position(&eph, 100.0);

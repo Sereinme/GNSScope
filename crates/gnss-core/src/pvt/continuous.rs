@@ -1,0 +1,1337 @@
+//! Continuous PVT epoch runner.
+
+use crate::nav::ephemeris::{
+    ephemeris_map_from_catalog_at_time, EphemerisCatalog, EphemerisMap, EphemerisSelectionConfig,
+    IonoParams,
+};
+use crate::pvt::coords::{lla_to_ecef, Ecef};
+use crate::pvt::kalman::{KalmanConfig, KalmanSolution, PositionVelocityKalman};
+use crate::pvt::pseudorange::{resolve_integer_ms_ambiguities, Pseudorange};
+use crate::pvt::satpos::satellite_position;
+use crate::pvt::smoothing::{HatchConfig, HatchSmoother};
+use crate::pvt::solver::{solve_wls_with_config, PvtSolution, WlsConfig};
+use crate::pvt::velocity::{solve_doppler_velocity, VelocitySolution};
+
+const C_LIGHT: f64 = 299_792_458.0;
+const OMEGA_E: f64 = 7.292_115_146_7e-5;
+
+#[derive(Debug, Clone)]
+pub struct PseudorangeEpoch {
+    pub pseudoranges: Vec<Pseudorange>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IntegerMsAmbiguityConfig {
+    pub max_shift_ms: i32,
+}
+
+impl Default for IntegerMsAmbiguityConfig {
+    fn default() -> Self {
+        Self { max_shift_ms: 2 }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VelocityQualityConfig {
+    /// Reject Doppler velocity solutions with post-fit residual RMS above this value [m/s].
+    pub max_residual_rms_mps: f64,
+    /// Reject Doppler velocity solutions with receiver clock drift above this value [m/s].
+    pub max_clock_drift_mps: f64,
+    /// Optional receiver speed cap [m/s]. Use for known static or low-dynamics datasets.
+    pub max_speed_mps: f64,
+    /// Optional zero-velocity fallback sigma for Kalman when a Doppler solution is rejected [m/s].
+    pub rejected_velocity_fallback_sigma_mps: Option<f64>,
+}
+
+impl Default for VelocityQualityConfig {
+    fn default() -> Self {
+        Self {
+            max_residual_rms_mps: 2.0,
+            max_clock_drift_mps: 5_000.0,
+            max_speed_mps: f64::INFINITY,
+            rejected_velocity_fallback_sigma_mps: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ContinuousPvtConfig {
+    pub hatch: Option<HatchConfig>,
+    pub integer_ms_ambiguity: Option<IntegerMsAmbiguityConfig>,
+    pub ephemeris_selection: EphemerisSelectionConfig,
+    pub kalman: Option<KalmanConfig>,
+    pub velocity_quality: VelocityQualityConfig,
+    pub wls: WlsConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContinuousPvtEpochResult {
+    pub epoch_index: usize,
+    pub raw_pseudoranges: Vec<Pseudorange>,
+    pub smoothed_pseudoranges: Option<Vec<Pseudorange>>,
+    pub raw_solution: PvtSolution,
+    pub raw_velocity_solution: Option<VelocitySolution>,
+    pub smoothed_solution: Option<PvtSolution>,
+    pub smoothed_velocity_solution: Option<VelocitySolution>,
+    pub kalman_solution: Option<KalmanSolution>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PvtEpochSolutionKind {
+    Raw,
+    Smoothed,
+    Kalman,
+    Unconverged,
+}
+
+#[derive(Debug, Clone)]
+pub struct PvtTimeOutput {
+    pub gps_week: Option<u16>,
+    pub receiver_time_sow: Option<f64>,
+    pub corrected_gps_time_sow: Option<f64>,
+    pub transmit_time_sow_min: Option<f64>,
+    pub transmit_time_sow_max: Option<f64>,
+    pub receiver_clock_bias_s: f64,
+    pub receiver_clock_drift_sps: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PvtVelocityOutput {
+    pub ecef_velocity_mps: Ecef,
+    pub enu_velocity_mps: Ecef,
+    pub speed_mps: f64,
+    pub horizontal_speed_mps: f64,
+    pub vertical_speed_mps: f64,
+    pub heading_rad: Option<f64>,
+    pub clock_drift_mps: f64,
+    pub clock_drift_sps: f64,
+    pub residual_rms_mps: f64,
+    pub used_prns: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PvtQualityOutput {
+    pub converged: bool,
+    pub n_sats: usize,
+    pub used_prns: Vec<u8>,
+    pub excluded_prns: Vec<u8>,
+    pub residual_rms_m: f64,
+    pub standardized_residual_rms: f64,
+    pub max_standardized_residual: f64,
+    pub epoch_quality_scale: f64,
+    pub hdop: f64,
+    pub vdop: f64,
+    pub pdop: f64,
+    pub gdop: f64,
+    pub horizontal_sigma_m: f64,
+    pub vertical_sigma_m: f64,
+    pub position_sigma_m: f64,
+    pub velocity_sigma_mps: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PvtEpochOutput {
+    pub epoch_index: usize,
+    pub solution_kind: PvtEpochSolutionKind,
+    pub time: PvtTimeOutput,
+    pub ecef: Ecef,
+    pub lla_rad: [f64; 3],
+    pub velocity: Option<PvtVelocityOutput>,
+    pub quality: PvtQualityOutput,
+}
+
+impl ContinuousPvtEpochResult {
+    pub fn to_output(&self) -> PvtEpochOutput {
+        let selection = self.selected_solution();
+        let receiver_clock_bias_s = selection.clock_bias_s.unwrap_or(0.0);
+        let receiver_clock_drift_sps = selection
+            .velocity
+            .as_ref()
+            .map(|velocity| velocity.clock_drift_sps);
+        PvtEpochOutput {
+            epoch_index: self.epoch_index,
+            solution_kind: selection.kind,
+            time: self.time_output(receiver_clock_bias_s, receiver_clock_drift_sps),
+            ecef: selection.ecef.unwrap_or([0.0; 3]),
+            lla_rad: selection.lla.unwrap_or([0.0; 3]),
+            velocity: selection.velocity,
+            quality: selection.quality,
+        }
+    }
+
+    fn selected_solution(&self) -> SelectedEpochSolution {
+        if let Some(kalman) = self
+            .kalman_solution
+            .as_ref()
+            .filter(|solution| solution.converged)
+        {
+            let position = self
+                .smoothed_solution
+                .as_ref()
+                .filter(|solution| solution.converged)
+                .unwrap_or(&self.raw_solution);
+            return SelectedEpochSolution {
+                kind: PvtEpochSolutionKind::Kalman,
+                ecef: Some(kalman.ecef),
+                lla: Some(kalman.lla),
+                clock_bias_s: Some(kalman.clock_bias_s),
+                velocity: Some(PvtVelocityOutput::from_kalman(kalman)),
+                quality: quality_from_position_and_kalman(position, kalman),
+            };
+        }
+        if let Some(smoothed) = self
+            .smoothed_solution
+            .as_ref()
+            .filter(|solution| solution.converged)
+        {
+            return SelectedEpochSolution {
+                kind: PvtEpochSolutionKind::Smoothed,
+                ecef: Some(smoothed.ecef),
+                lla: Some(smoothed.lla),
+                clock_bias_s: Some(smoothed.clock_bias_s),
+                velocity: self
+                    .smoothed_velocity_solution
+                    .as_ref()
+                    .map(PvtVelocityOutput::from_velocity),
+                quality: quality_from_position(smoothed, None),
+            };
+        }
+        if self.raw_solution.converged {
+            return SelectedEpochSolution {
+                kind: PvtEpochSolutionKind::Raw,
+                ecef: Some(self.raw_solution.ecef),
+                lla: Some(self.raw_solution.lla),
+                clock_bias_s: Some(self.raw_solution.clock_bias_s),
+                velocity: self
+                    .raw_velocity_solution
+                    .as_ref()
+                    .map(PvtVelocityOutput::from_velocity),
+                quality: quality_from_position(&self.raw_solution, None),
+            };
+        }
+        SelectedEpochSolution {
+            kind: PvtEpochSolutionKind::Unconverged,
+            ecef: None,
+            lla: None,
+            clock_bias_s: None,
+            velocity: None,
+            quality: quality_from_position(&self.raw_solution, None),
+        }
+    }
+
+    fn time_output(
+        &self,
+        receiver_clock_bias_s: f64,
+        receiver_clock_drift_sps: Option<f64>,
+    ) -> PvtTimeOutput {
+        let receiver_time_sow = mean_receive_time_sow(&self.raw_pseudoranges);
+        let corrected_gps_time_sow =
+            receiver_time_sow.map(|sow| wrap_gps_sow(sow - receiver_clock_bias_s));
+        let transmit_time_sow_min = self
+            .raw_pseudoranges
+            .iter()
+            .map(|pr| pr.transmit_time_sow)
+            .reduce(f64::min);
+        let transmit_time_sow_max = self
+            .raw_pseudoranges
+            .iter()
+            .map(|pr| pr.transmit_time_sow)
+            .reduce(f64::max);
+        PvtTimeOutput {
+            gps_week: None,
+            receiver_time_sow,
+            corrected_gps_time_sow,
+            transmit_time_sow_min,
+            transmit_time_sow_max,
+            receiver_clock_bias_s,
+            receiver_clock_drift_sps,
+        }
+    }
+}
+
+impl PvtEpochOutput {
+    pub fn from_results(results: &[ContinuousPvtEpochResult]) -> Vec<Self> {
+        results
+            .iter()
+            .map(ContinuousPvtEpochResult::to_output)
+            .collect()
+    }
+}
+
+impl PvtVelocityOutput {
+    fn from_velocity(solution: &VelocitySolution) -> Self {
+        let speed_mps = velocity_speed_mps(solution);
+        let horizontal_speed_mps =
+            (solution.enu_velocity_mps[0].powi(2) + solution.enu_velocity_mps[1].powi(2)).sqrt();
+        let heading_rad = (horizontal_speed_mps > 1e-6)
+            .then(|| solution.enu_velocity_mps[0].atan2(solution.enu_velocity_mps[1]));
+        Self {
+            ecef_velocity_mps: solution.ecef_velocity_mps,
+            enu_velocity_mps: solution.enu_velocity_mps,
+            speed_mps,
+            horizontal_speed_mps,
+            vertical_speed_mps: solution.enu_velocity_mps[2],
+            heading_rad,
+            clock_drift_mps: solution.clock_drift_mps,
+            clock_drift_sps: solution.clock_drift_sps,
+            residual_rms_mps: residual_rms(&solution.residuals_mps).unwrap_or(0.0),
+            used_prns: solution.used_prns.clone(),
+        }
+    }
+
+    fn from_kalman(solution: &KalmanSolution) -> Self {
+        let speed_mps = norm3(solution.ecef_velocity_mps);
+        let horizontal_speed_mps =
+            (solution.enu_velocity_mps[0].powi(2) + solution.enu_velocity_mps[1].powi(2)).sqrt();
+        let heading_rad = (horizontal_speed_mps > 1e-6)
+            .then(|| solution.enu_velocity_mps[0].atan2(solution.enu_velocity_mps[1]));
+        Self {
+            ecef_velocity_mps: solution.ecef_velocity_mps,
+            enu_velocity_mps: solution.enu_velocity_mps,
+            speed_mps,
+            horizontal_speed_mps,
+            vertical_speed_mps: solution.enu_velocity_mps[2],
+            heading_rad,
+            clock_drift_mps: solution.clock_drift_sps * C_LIGHT,
+            clock_drift_sps: solution.clock_drift_sps,
+            residual_rms_mps: 0.0,
+            used_prns: Vec::new(),
+        }
+    }
+}
+
+struct SelectedEpochSolution {
+    kind: PvtEpochSolutionKind,
+    ecef: Option<Ecef>,
+    lla: Option<[f64; 3]>,
+    clock_bias_s: Option<f64>,
+    velocity: Option<PvtVelocityOutput>,
+    quality: PvtQualityOutput,
+}
+
+fn quality_from_position(
+    position: &PvtSolution,
+    velocity_sigma_mps: Option<f64>,
+) -> PvtQualityOutput {
+    PvtQualityOutput {
+        converged: position.converged,
+        n_sats: position.n_sats,
+        used_prns: position.used_prns.clone(),
+        excluded_prns: position.excluded_prns.clone(),
+        residual_rms_m: position.residual_rms_m,
+        standardized_residual_rms: position.standardized_residual_rms,
+        max_standardized_residual: position.max_standardized_residual,
+        epoch_quality_scale: position.epoch_quality_scale,
+        hdop: position.hdop,
+        vdop: position.vdop,
+        pdop: position.pdop,
+        gdop: position.gdop,
+        horizontal_sigma_m: position.horizontal_sigma_m,
+        vertical_sigma_m: position.vertical_sigma_m,
+        position_sigma_m: position.position_sigma_m,
+        velocity_sigma_mps,
+    }
+}
+
+fn quality_from_position_and_kalman(
+    position: &PvtSolution,
+    kalman: &KalmanSolution,
+) -> PvtQualityOutput {
+    let mut quality = quality_from_position(position, Some(kalman.velocity_std_mps));
+    quality.position_sigma_m = kalman.position_std_m;
+    quality.velocity_sigma_mps = Some(kalman.velocity_std_mps);
+    quality
+}
+
+#[derive(Debug, Clone)]
+pub struct ContinuousPvtRunner {
+    config: ContinuousPvtConfig,
+    hatch: Option<HatchSmoother>,
+    kalman: Option<PositionVelocityKalman>,
+}
+
+impl ContinuousPvtRunner {
+    pub fn new(config: ContinuousPvtConfig) -> Self {
+        let hatch = config.hatch.clone().map(HatchSmoother::new);
+        let kalman = config.kalman.clone().map(PositionVelocityKalman::new);
+        Self {
+            config,
+            hatch,
+            kalman,
+        }
+    }
+
+    pub fn solve_epochs(
+        &mut self,
+        epochs: &[PseudorangeEpoch],
+        ephemerides: &EphemerisMap,
+        iono: &IonoParams,
+        rx_lat_rad: f64,
+        rx_lon_rad: f64,
+        rx_alt_m: f64,
+    ) -> Vec<ContinuousPvtEpochResult> {
+        let wls = self.config.wls.clone();
+        let apriori_ecef = has_apriori(rx_lat_rad, rx_lon_rad, rx_alt_m)
+            .then(|| lla_to_ecef([rx_lat_rad, rx_lon_rad, rx_alt_m]));
+        let ambiguity = self.config.integer_ms_ambiguity.clone();
+        self.solve_epochs_with_preprocess(
+            epochs,
+            |pseudoranges| {
+                solve_wls_with_config(
+                    pseudoranges,
+                    ephemerides,
+                    iono,
+                    rx_lat_rad,
+                    rx_lon_rad,
+                    rx_alt_m,
+                    &wls,
+                )
+            },
+            |pseudoranges| match (ambiguity.as_ref(), apriori_ecef) {
+                (Some(config), Some(ecef)) => {
+                    let predicted =
+                        predicted_pseudoranges_for_ambiguity(pseudoranges, ephemerides, ecef);
+                    resolve_integer_ms_ambiguities(pseudoranges, &predicted, config.max_shift_ms)
+                }
+                _ => pseudoranges.to_vec(),
+            },
+            |pseudoranges, solution| {
+                Some(solve_doppler_velocity(
+                    pseudoranges,
+                    ephemerides,
+                    solution.ecef,
+                ))
+            },
+        )
+    }
+
+    pub fn solve_epochs_with_catalog(
+        &mut self,
+        epochs: &[PseudorangeEpoch],
+        ephemeris_catalog: &EphemerisCatalog,
+        iono: &IonoParams,
+        rx_lat_rad: f64,
+        rx_lon_rad: f64,
+        rx_alt_m: f64,
+    ) -> Vec<ContinuousPvtEpochResult> {
+        let wls = self.config.wls.clone();
+        let selection_config = self.config.ephemeris_selection.clone();
+        let apriori_ecef = has_apriori(rx_lat_rad, rx_lon_rad, rx_alt_m)
+            .then(|| lla_to_ecef([rx_lat_rad, rx_lon_rad, rx_alt_m]));
+        let ambiguity = self.config.integer_ms_ambiguity.clone();
+        self.solve_epochs_with_preprocess_and_solve(
+            epochs,
+            |pseudoranges| {
+                ephemeris_map_for_pseudoranges(pseudoranges, ephemeris_catalog, &selection_config)
+            },
+            |pseudoranges, ephemerides| {
+                solve_wls_with_config(
+                    pseudoranges,
+                    ephemerides,
+                    iono,
+                    rx_lat_rad,
+                    rx_lon_rad,
+                    rx_alt_m,
+                    &wls,
+                )
+            },
+            |pseudoranges, ephemerides| match (ambiguity.as_ref(), apriori_ecef) {
+                (Some(config), Some(ecef)) => {
+                    let predicted =
+                        predicted_pseudoranges_for_ambiguity(pseudoranges, ephemerides, ecef);
+                    resolve_integer_ms_ambiguities(pseudoranges, &predicted, config.max_shift_ms)
+                }
+                _ => pseudoranges.to_vec(),
+            },
+            |pseudoranges, solution, ephemerides| {
+                Some(solve_doppler_velocity(
+                    pseudoranges,
+                    ephemerides,
+                    solution.ecef,
+                ))
+            },
+        )
+    }
+
+    pub fn solve_epochs_with<F>(
+        &mut self,
+        epochs: &[PseudorangeEpoch],
+        solve: F,
+    ) -> Vec<ContinuousPvtEpochResult>
+    where
+        F: FnMut(&[Pseudorange]) -> PvtSolution,
+    {
+        self.solve_epochs_with_preprocess(
+            epochs,
+            solve,
+            |pseudoranges| pseudoranges.to_vec(),
+            |_, _| None,
+        )
+    }
+
+    pub fn solve_epochs_with_velocity<F, V>(
+        &mut self,
+        epochs: &[PseudorangeEpoch],
+        solve: F,
+        velocity: V,
+    ) -> Vec<ContinuousPvtEpochResult>
+    where
+        F: FnMut(&[Pseudorange]) -> PvtSolution,
+        V: FnMut(&[Pseudorange], &PvtSolution) -> Option<VelocitySolution>,
+    {
+        self.solve_epochs_with_preprocess(
+            epochs,
+            solve,
+            |pseudoranges| pseudoranges.to_vec(),
+            velocity,
+        )
+    }
+
+    fn solve_epochs_with_preprocess<F, P, V>(
+        &mut self,
+        epochs: &[PseudorangeEpoch],
+        mut solve: F,
+        mut preprocess: P,
+        mut velocity: V,
+    ) -> Vec<ContinuousPvtEpochResult>
+    where
+        F: FnMut(&[Pseudorange]) -> PvtSolution,
+        P: FnMut(&[Pseudorange]) -> Vec<Pseudorange>,
+        V: FnMut(&[Pseudorange], &PvtSolution) -> Option<VelocitySolution>,
+    {
+        self.solve_epochs_with_preprocess_and_solve(
+            epochs,
+            |_| EphemerisMap::new(),
+            |pseudoranges, _| solve(pseudoranges),
+            |pseudoranges, _| preprocess(pseudoranges),
+            |pseudoranges, solution, _| velocity(pseudoranges, solution),
+        )
+    }
+
+    fn solve_epochs_with_preprocess_and_solve<S, F, P, V>(
+        &mut self,
+        epochs: &[PseudorangeEpoch],
+        mut select_ephemerides: S,
+        mut solve: F,
+        mut preprocess: P,
+        mut velocity: V,
+    ) -> Vec<ContinuousPvtEpochResult>
+    where
+        S: FnMut(&[Pseudorange]) -> EphemerisMap,
+        F: FnMut(&[Pseudorange], &EphemerisMap) -> PvtSolution,
+        P: FnMut(&[Pseudorange], &EphemerisMap) -> Vec<Pseudorange>,
+        V: FnMut(&[Pseudorange], &PvtSolution, &EphemerisMap) -> Option<VelocitySolution>,
+    {
+        epochs
+            .iter()
+            .enumerate()
+            .map(|(epoch_index, epoch)| {
+                let ephemerides = select_ephemerides(&epoch.pseudoranges);
+                let raw_pseudoranges = preprocess(&epoch.pseudoranges, &ephemerides);
+                let mut solve_raw =
+                    |pseudoranges: &[Pseudorange]| solve(pseudoranges, &ephemerides);
+                let raw_solution = solve_if_enough_satellites(&raw_pseudoranges, &mut solve_raw);
+                let raw_velocity = velocity_if_position_converged(
+                    &raw_pseudoranges,
+                    &raw_solution,
+                    &mut |pseudoranges, solution| velocity(pseudoranges, solution, &ephemerides),
+                    &self.config.velocity_quality,
+                );
+                let raw_velocity_solution = raw_velocity.accepted;
+                let raw_velocity_for_kalman = raw_velocity.kalman;
+
+                let (
+                    smoothed_pseudoranges,
+                    smoothed_solution,
+                    smoothed_velocity_solution,
+                    smoothed_velocity_for_kalman,
+                ) = match self.hatch.as_mut() {
+                    Some(hatch) if raw_solution.converged => {
+                        let smoothed = hatch.smooth_epoch(&raw_pseudoranges);
+                        let smoothed_ephemerides = select_ephemerides(&smoothed);
+                        let mut solve_smoothed = |pseudoranges: &[Pseudorange]| {
+                            solve(pseudoranges, &smoothed_ephemerides)
+                        };
+                        let solution = solve_if_enough_satellites(&smoothed, &mut solve_smoothed);
+                        if smoothed_solution_is_acceptable(&raw_solution, &solution, hatch.config())
+                        {
+                            let velocity_result = velocity_if_position_converged(
+                                &smoothed,
+                                &solution,
+                                &mut |pseudoranges, solution| {
+                                    velocity(pseudoranges, solution, &smoothed_ephemerides)
+                                },
+                                &self.config.velocity_quality,
+                            );
+                            (
+                                Some(smoothed),
+                                Some(solution),
+                                velocity_result.accepted,
+                                velocity_result.kalman,
+                            )
+                        } else {
+                            if hatch.config().reset_on_rejected_solution {
+                                hatch.reset();
+                            }
+                            (Some(smoothed), None, None, None)
+                        }
+                    }
+                    Some(hatch) => {
+                        hatch.reset();
+                        (None, None, None, None)
+                    }
+                    None => (None, None, None, None),
+                };
+                let kalman_solution = update_kalman(
+                    self.kalman.as_mut(),
+                    &raw_pseudoranges,
+                    &raw_solution,
+                    raw_velocity_for_kalman.as_ref(),
+                    smoothed_solution.as_ref(),
+                    smoothed_velocity_for_kalman.as_ref(),
+                );
+
+                ContinuousPvtEpochResult {
+                    epoch_index,
+                    raw_pseudoranges,
+                    smoothed_pseudoranges,
+                    raw_solution,
+                    raw_velocity_solution,
+                    smoothed_solution,
+                    smoothed_velocity_solution,
+                    kalman_solution,
+                }
+            })
+            .collect()
+    }
+}
+
+fn ephemeris_map_for_pseudoranges(
+    pseudoranges: &[Pseudorange],
+    catalog: &EphemerisCatalog,
+    config: &EphemerisSelectionConfig,
+) -> EphemerisMap {
+    let transmit_times: Vec<(u8, f64)> = pseudoranges
+        .iter()
+        .map(|pr| (pr.prn, pr.transmit_time_sow))
+        .collect();
+    ephemeris_map_from_catalog_at_time(catalog, &transmit_times, config)
+}
+
+fn update_kalman(
+    kalman: Option<&mut PositionVelocityKalman>,
+    raw_pseudoranges: &[Pseudorange],
+    raw_solution: &PvtSolution,
+    raw_velocity: Option<&VelocitySolution>,
+    smoothed_solution: Option<&PvtSolution>,
+    smoothed_velocity: Option<&VelocitySolution>,
+) -> Option<KalmanSolution> {
+    let kalman = kalman?;
+    let epoch_time_sow = raw_pseudoranges.first()?.receive_time_sow;
+    let (position, velocity) = match smoothed_solution {
+        Some(solution) if solution.converged => (solution, smoothed_velocity.or(raw_velocity)),
+        _ => (raw_solution, raw_velocity),
+    };
+    kalman.update(epoch_time_sow, position, velocity)
+}
+
+fn has_apriori(rx_lat_rad: f64, rx_lon_rad: f64, rx_alt_m: f64) -> bool {
+    rx_lat_rad.abs() > 1e-12 || rx_lon_rad.abs() > 1e-12 || rx_alt_m.abs() > 1e-12
+}
+
+fn predicted_pseudoranges_for_ambiguity(
+    pseudoranges: &[Pseudorange],
+    ephemerides: &EphemerisMap,
+    apriori_ecef: Ecef,
+) -> Vec<(u8, f64)> {
+    pseudoranges
+        .iter()
+        .filter_map(|pr| {
+            let eph = ephemerides.get(&pr.prn)?;
+            let sat = satellite_position(eph, pr.transmit_time_sow);
+            let tau = pr.pseudorange_m / C_LIGHT;
+            let theta = OMEGA_E * tau;
+            let xs_r = theta.cos() * sat.ecef[0] + theta.sin() * sat.ecef[1];
+            let ys_r = -theta.sin() * sat.ecef[0] + theta.cos() * sat.ecef[1];
+            let zs_r = sat.ecef[2];
+            let dx = xs_r - apriori_ecef[0];
+            let dy = ys_r - apriori_ecef[1];
+            let dz = zs_r - apriori_ecef[2];
+            let range = (dx * dx + dy * dy + dz * dz).sqrt();
+            Some((pr.prn, range - C_LIGHT * sat.clock_correction_s))
+        })
+        .collect()
+}
+
+fn solve_if_enough_satellites<F>(pseudoranges: &[Pseudorange], solve: &mut F) -> PvtSolution
+where
+    F: FnMut(&[Pseudorange]) -> PvtSolution,
+{
+    if pseudoranges.len() < 4 {
+        return PvtSolution {
+            n_sats: pseudoranges.len(),
+            ..Default::default()
+        };
+    }
+    solve(pseudoranges)
+}
+
+fn velocity_if_position_converged<V>(
+    pseudoranges: &[Pseudorange],
+    solution: &PvtSolution,
+    velocity: &mut V,
+    config: &VelocityQualityConfig,
+) -> VelocityQualityResult
+where
+    V: FnMut(&[Pseudorange], &PvtSolution) -> Option<VelocitySolution>,
+{
+    if !solution.converged {
+        return VelocityQualityResult::default();
+    }
+    let Some(velocity_solution) =
+        velocity(pseudoranges, solution).filter(|velocity_solution| velocity_solution.converged)
+    else {
+        return VelocityQualityResult::default();
+    };
+    if velocity_solution_is_acceptable(&velocity_solution, config) {
+        return VelocityQualityResult {
+            accepted: Some(velocity_solution.clone()),
+            kalman: Some(velocity_solution),
+        };
+    }
+    VelocityQualityResult {
+        accepted: None,
+        kalman: config
+            .rejected_velocity_fallback_sigma_mps
+            .map(zero_velocity_fallback),
+    }
+}
+
+fn smoothed_solution_is_acceptable(
+    raw_solution: &PvtSolution,
+    smoothed_solution: &PvtSolution,
+    config: &HatchConfig,
+) -> bool {
+    if !smoothed_solution.converged {
+        return false;
+    }
+    let Some(raw_rms_m) = residual_rms(&raw_solution.residuals_m) else {
+        return true;
+    };
+    let Some(smoothed_rms_m) = residual_rms(&smoothed_solution.residuals_m) else {
+        return true;
+    };
+    smoothed_rms_m
+        <= raw_rms_m * config.max_smoothed_residual_rms_ratio
+            + config.max_smoothed_residual_rms_margin_m
+}
+
+fn residual_rms(residuals_m: &[f64]) -> Option<f64> {
+    if residuals_m.is_empty() {
+        return None;
+    }
+    Some(
+        (residuals_m
+            .iter()
+            .map(|residual| residual * residual)
+            .sum::<f64>()
+            / residuals_m.len() as f64)
+            .sqrt(),
+    )
+}
+
+fn velocity_solution_is_acceptable(
+    solution: &VelocitySolution,
+    config: &VelocityQualityConfig,
+) -> bool {
+    if solution
+        .residuals_mps
+        .iter()
+        .any(|residual| !residual.is_finite())
+    {
+        return false;
+    }
+    if let Some(rms_mps) = residual_rms(&solution.residuals_mps) {
+        if rms_mps > config.max_residual_rms_mps {
+            return false;
+        }
+    }
+    if solution.clock_drift_mps.abs() > config.max_clock_drift_mps {
+        return false;
+    }
+    velocity_speed_mps(solution) <= config.max_speed_mps
+}
+
+fn velocity_speed_mps(solution: &VelocitySolution) -> f64 {
+    norm3(solution.ecef_velocity_mps)
+}
+
+fn norm3(vector: Ecef) -> f64 {
+    (vector[0].powi(2) + vector[1].powi(2) + vector[2].powi(2)).sqrt()
+}
+
+fn mean_receive_time_sow(pseudoranges: &[Pseudorange]) -> Option<f64> {
+    if pseudoranges.is_empty() {
+        return None;
+    }
+    Some(
+        pseudoranges
+            .iter()
+            .map(|pr| pr.receive_time_sow)
+            .sum::<f64>()
+            / pseudoranges.len() as f64,
+    )
+}
+
+fn wrap_gps_sow(sow: f64) -> f64 {
+    sow.rem_euclid(604_800.0)
+}
+
+#[derive(Debug, Clone, Default)]
+struct VelocityQualityResult {
+    accepted: Option<VelocitySolution>,
+    kalman: Option<VelocitySolution>,
+}
+
+fn zero_velocity_fallback(sigma_mps: f64) -> VelocitySolution {
+    let sigma_mps = sigma_mps.max(0.0);
+    VelocitySolution {
+        ecef_velocity_mps: [0.0; 3],
+        enu_velocity_mps: [0.0; 3],
+        residuals_mps: vec![sigma_mps],
+        converged: true,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_continuous_runner_solves_raw_and_smoothed_epochs() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig {
+            hatch: Some(HatchConfig {
+                window_epochs: 10,
+                max_gap_s: 2.0,
+                divergence_reset_threshold_m: 1_000.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let epochs = vec![
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_000.0, 100.0),
+            },
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_100.0, 101.0),
+            },
+        ];
+
+        let mut calls = 0usize;
+        let results = runner.solve_epochs_with(&epochs, |pseudoranges| {
+            calls += 1;
+            solved(pseudoranges.len())
+        });
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(calls, 4);
+        assert!(results.iter().all(|result| result.raw_solution.converged));
+        assert!(results.iter().all(|result| result
+            .smoothed_solution
+            .as_ref()
+            .is_some_and(|solution| solution.converged)));
+        let smoothed_second = results[1].smoothed_pseudoranges.as_ref().unwrap();
+        assert_eq!(smoothed_second.len(), 4);
+        assert!(smoothed_second[0].pseudorange_m < epochs[1].pseudoranges[0].pseudorange_m);
+    }
+
+    #[test]
+    fn test_continuous_runner_retains_unsolved_short_epochs() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig::default());
+        let epochs = vec![PseudorangeEpoch {
+            pseudoranges: vec![
+                pseudorange(1, 20_000_000.0, 100.0),
+                pseudorange(2, 20_100_000.0, 100.0),
+                pseudorange(3, 20_200_000.0, 100.0),
+            ],
+        }];
+
+        let mut calls = 0usize;
+        let results = runner.solve_epochs_with(&epochs, |pseudoranges| {
+            calls += 1;
+            solved(pseudoranges.len())
+        });
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(calls, 0);
+        assert_eq!(results[0].epoch_index, 0);
+        assert_eq!(results[0].raw_solution.n_sats, 3);
+        assert!(!results[0].raw_solution.converged);
+        assert!(results[0].raw_velocity_solution.is_none());
+        assert!(results[0].smoothed_solution.is_none());
+        assert!(results[0].smoothed_velocity_solution.is_none());
+    }
+
+    #[test]
+    fn test_continuous_runner_attaches_raw_and_smoothed_velocity() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig {
+            hatch: Some(HatchConfig {
+                window_epochs: 10,
+                max_gap_s: 2.0,
+                divergence_reset_threshold_m: 1_000.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let epochs = vec![PseudorangeEpoch {
+            pseudoranges: four_prns(20_000_000.0, 100.0),
+        }];
+
+        let mut velocity_calls = 0usize;
+        let results = runner.solve_epochs_with_velocity(
+            &epochs,
+            |pseudoranges| solved(pseudoranges.len()),
+            |pseudoranges, solution| {
+                velocity_calls += 1;
+                Some(velocity_solution(
+                    pseudoranges.len(),
+                    solution.ecef[0] + velocity_calls as f64,
+                ))
+            },
+        );
+
+        assert_eq!(velocity_calls, 2);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0]
+                .raw_velocity_solution
+                .as_ref()
+                .unwrap()
+                .used_prns
+                .len(),
+            4
+        );
+        assert_eq!(
+            results[0]
+                .smoothed_velocity_solution
+                .as_ref()
+                .unwrap()
+                .used_prns
+                .len(),
+            4
+        );
+        assert_eq!(
+            results[0]
+                .raw_velocity_solution
+                .as_ref()
+                .unwrap()
+                .ecef_velocity_mps[0],
+            1.0
+        );
+        assert_eq!(
+            results[0]
+                .smoothed_velocity_solution
+                .as_ref()
+                .unwrap()
+                .ecef_velocity_mps[0],
+            2.0
+        );
+    }
+
+    #[test]
+    fn test_ephemeris_map_for_pseudoranges_selects_catalog_records_by_transmit_time() {
+        let mut catalog = EphemerisCatalog::new();
+        catalog.insert(
+            1,
+            vec![
+                ephemeris_for_catalog_test(1, 1_000.0, 1),
+                ephemeris_for_catalog_test(1, 2_000.0, 2),
+            ],
+        );
+        catalog.insert(2, vec![ephemeris_for_catalog_test(2, 5_000.0, 7)]);
+        let pseudoranges = vec![
+            pseudorange(1, 20_000_000.0, 2_100.075),
+            pseudorange(2, 20_000_000.0, 5_100.075),
+        ];
+
+        let selected = ephemeris_map_for_pseudoranges(&pseudoranges, &catalog, &Default::default());
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[&1].iode, 2);
+        assert_eq!(selected[&2].iode, 7);
+    }
+
+    #[test]
+    fn test_continuous_runner_rejects_velocity_above_configured_speed_cap() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig {
+            velocity_quality: VelocityQualityConfig {
+                max_speed_mps: 2.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let epochs = vec![PseudorangeEpoch {
+            pseudoranges: four_prns(20_000_000.0, 100.0),
+        }];
+
+        let results = runner.solve_epochs_with_velocity(
+            &epochs,
+            |pseudoranges| solved(pseudoranges.len()),
+            |_, _| Some(velocity_solution(4, 5.0)),
+        );
+
+        assert!(results[0].raw_solution.converged);
+        assert!(results[0].raw_velocity_solution.is_none());
+    }
+
+    #[test]
+    fn test_continuous_runner_can_feed_zero_velocity_fallback_to_kalman() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig {
+            kalman: Some(KalmanConfig::default()),
+            velocity_quality: VelocityQualityConfig {
+                max_speed_mps: 2.0,
+                rejected_velocity_fallback_sigma_mps: Some(0.25),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let epochs = vec![
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_000.0, 100.0),
+            },
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_000.0, 101.0),
+            },
+        ];
+
+        let results = runner.solve_epochs_with_velocity(
+            &epochs,
+            |pseudoranges| solved(pseudoranges.len()),
+            |_, _| Some(velocity_solution(4, 5.0)),
+        );
+
+        assert!(results
+            .iter()
+            .all(|result| result.raw_velocity_solution.is_none()));
+        let kalman = results[1].kalman_solution.as_ref().unwrap();
+        assert!(kalman.converged);
+        assert!(kalman_speed_mps(kalman) < 0.5);
+        assert!((kalman.velocity_measurement_sigma_mps - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_continuous_runner_rejects_velocity_with_large_residual_rms() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig {
+            velocity_quality: VelocityQualityConfig {
+                max_residual_rms_mps: 0.5,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let epochs = vec![PseudorangeEpoch {
+            pseudoranges: four_prns(20_000_000.0, 100.0),
+        }];
+
+        let results = runner.solve_epochs_with_velocity(
+            &epochs,
+            |pseudoranges| solved(pseudoranges.len()),
+            |_, _| {
+                let mut velocity = velocity_solution(4, 1.0);
+                velocity.residuals_mps = vec![0.0, 0.0, 1.0, -1.0];
+                Some(velocity)
+            },
+        );
+
+        assert!(results[0].raw_solution.converged);
+        assert!(results[0].raw_velocity_solution.is_none());
+    }
+
+    #[test]
+    fn test_continuous_runner_resets_smoothing_after_failed_raw_solution() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig {
+            hatch: Some(HatchConfig {
+                window_epochs: 10,
+                max_gap_s: 2.0,
+                divergence_reset_threshold_m: 10_000.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let epochs = vec![
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_000.0, 100.0),
+            },
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_100.0, 101.0),
+            },
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_200.0, 102.0),
+            },
+        ];
+
+        let mut calls = 0usize;
+        let results = runner.solve_epochs_with(&epochs, |pseudoranges| {
+            calls += 1;
+            if calls == 3 {
+                PvtSolution {
+                    n_sats: pseudoranges.len(),
+                    converged: false,
+                    ..Default::default()
+                }
+            } else {
+                solved(pseudoranges.len())
+            }
+        });
+
+        assert_eq!(results.len(), 3);
+        assert!(results[0].raw_solution.converged);
+        assert!(results[0].smoothed_solution.is_some());
+        assert!(!results[1].raw_solution.converged);
+        assert!(results[1].smoothed_pseudoranges.is_none());
+        assert!(results[1].smoothed_solution.is_none());
+        assert!(results[2].raw_solution.converged);
+        let reset_smoothed = results[2].smoothed_pseudoranges.as_ref().unwrap();
+        assert_eq!(
+            reset_smoothed[0].pseudorange_m,
+            epochs[2].pseudoranges[0].pseudorange_m
+        );
+    }
+
+    #[test]
+    fn test_continuous_runner_rejects_smoothed_solution_with_worse_residuals() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig {
+            hatch: Some(HatchConfig {
+                window_epochs: 10,
+                max_gap_s: 2.0,
+                divergence_reset_threshold_m: 10_000.0,
+                max_smoothed_residual_rms_ratio: 1.0,
+                max_smoothed_residual_rms_margin_m: 0.0,
+                reset_on_rejected_solution: false,
+            }),
+            ..Default::default()
+        });
+        let epochs = vec![PseudorangeEpoch {
+            pseudoranges: four_prns(20_000_000.0, 100.0),
+        }];
+
+        let mut calls = 0usize;
+        let results = runner.solve_epochs_with_velocity(
+            &epochs,
+            |_| {
+                calls += 1;
+                let residual = if calls == 1 { 1.0 } else { 10.0 };
+                solved_with_residuals(4, vec![residual; 4])
+            },
+            |_, _| Some(velocity_solution(4, 1.0)),
+        );
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].raw_solution.converged);
+        assert!(results[0].smoothed_pseudoranges.is_some());
+        assert!(results[0].smoothed_solution.is_none());
+        assert!(results[0].smoothed_velocity_solution.is_none());
+    }
+
+    #[test]
+    fn test_continuous_runner_keeps_hatch_state_after_rejected_candidate_by_default() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig {
+            hatch: Some(HatchConfig {
+                window_epochs: 10,
+                max_gap_s: 2.0,
+                divergence_reset_threshold_m: 10_000.0,
+                max_smoothed_residual_rms_ratio: 1.0,
+                max_smoothed_residual_rms_margin_m: 0.0,
+                reset_on_rejected_solution: false,
+            }),
+            ..Default::default()
+        });
+        let epochs = vec![
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_000.0, 100.0),
+            },
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_100.0, 101.0),
+            },
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_200.0, 102.0),
+            },
+        ];
+
+        let mut calls = 0usize;
+        let results = runner.solve_epochs_with_velocity(
+            &epochs,
+            |_| {
+                calls += 1;
+                let residual = if calls == 4 { 10.0 } else { 1.0 };
+                solved_with_residuals(4, vec![residual; 4])
+            },
+            |_, _| Some(velocity_solution(4, 1.0)),
+        );
+
+        assert!(results[1].smoothed_solution.is_none());
+        let third_smoothed = results[2].smoothed_pseudoranges.as_ref().unwrap();
+        assert!(
+            third_smoothed[0].pseudorange_m < epochs[2].pseudoranges[0].pseudorange_m,
+            "Hatch state should survive a rejected smoothed candidate"
+        );
+    }
+
+    #[test]
+    fn test_continuous_runner_updates_kalman_from_velocity_epochs() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig {
+            kalman: Some(KalmanConfig::default()),
+            ..Default::default()
+        });
+        let epochs = vec![
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_000.0, 100.0),
+            },
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_100.0, 101.0),
+            },
+        ];
+
+        let mut solve_calls = 0usize;
+        let results = runner.solve_epochs_with_velocity(
+            &epochs,
+            |pseudoranges| {
+                solve_calls += 1;
+                let mut solution = solved(pseudoranges.len());
+                solution.ecef = [solve_calls as f64, 0.0, 0.0];
+                solution
+            },
+            |_, _| Some(velocity_solution(4, 1.0)),
+        );
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0]
+            .kalman_solution
+            .as_ref()
+            .is_some_and(|s| s.converged));
+        assert!(results[1]
+            .kalman_solution
+            .as_ref()
+            .is_some_and(|s| s.converged));
+        assert!(
+            results[1].kalman_solution.as_ref().unwrap().ecef[0]
+                > results[0].kalman_solution.as_ref().unwrap().ecef[0]
+        );
+    }
+
+    #[test]
+    fn test_epoch_output_prefers_kalman_and_exposes_velocity_time_quality() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig {
+            kalman: Some(KalmanConfig::default()),
+            ..Default::default()
+        });
+        let epochs = vec![PseudorangeEpoch {
+            pseudoranges: four_prns(20_000_000.0, 100.0),
+        }];
+
+        let results = runner.solve_epochs_with_velocity(
+            &epochs,
+            |pseudoranges| {
+                let mut solution = solved(pseudoranges.len());
+                solution.clock_bias_s = 2e-6;
+                solution.n_sats = pseudoranges.len();
+                solution.used_prns = pseudoranges.iter().map(|pr| pr.prn).collect();
+                solution.residual_rms_m = 1.25;
+                solution
+            },
+            |_, _| {
+                Some(VelocitySolution {
+                    ecef_velocity_mps: [3.0, 4.0, 0.0],
+                    enu_velocity_mps: [3.0, 4.0, 0.0],
+                    clock_drift_mps: 6.0,
+                    clock_drift_sps: 6.0 / C_LIGHT,
+                    residuals_mps: vec![0.1, -0.2, 0.2, -0.1],
+                    used_prns: vec![1, 2, 3, 4],
+                    converged: true,
+                })
+            },
+        );
+
+        let output = results[0].to_output();
+
+        assert_eq!(output.solution_kind, PvtEpochSolutionKind::Kalman);
+        assert_eq!(output.time.receiver_time_sow, Some(100.0));
+        assert!((output.time.corrected_gps_time_sow.unwrap() - 99.999_998).abs() < 1e-12);
+        assert_eq!(output.quality.n_sats, 4);
+        assert_eq!(output.quality.residual_rms_m, 1.25);
+        let velocity = output.velocity.as_ref().unwrap();
+        assert!((velocity.speed_mps - 5.0).abs() < 1e-12);
+        assert!((velocity.horizontal_speed_mps - 5.0).abs() < 1e-12);
+        assert!((velocity.clock_drift_sps - 6.0 / C_LIGHT).abs() < 1e-15);
+    }
+
+    fn four_prns(base_pseudorange_m: f64, receive_time_sow: f64) -> Vec<Pseudorange> {
+        (1..=4)
+            .map(|prn| {
+                pseudorange(
+                    prn,
+                    base_pseudorange_m + prn as f64 * 1_000.0,
+                    receive_time_sow,
+                )
+            })
+            .collect()
+    }
+
+    fn pseudorange(prn: u8, pseudorange_m: f64, receive_time_sow: f64) -> Pseudorange {
+        Pseudorange {
+            prn,
+            pseudorange_m,
+            transmit_time_sow: receive_time_sow - 0.075,
+            receive_time_sow,
+            cn0_db_hz: 45.0,
+            doppler_hz: -500.0,
+            tracking_jitter_chips: 0.0,
+        }
+    }
+
+    fn solved(n_sats: usize) -> PvtSolution {
+        PvtSolution {
+            n_sats,
+            converged: true,
+            ..Default::default()
+        }
+    }
+
+    fn solved_with_residuals(n_sats: usize, residuals_m: Vec<f64>) -> PvtSolution {
+        PvtSolution {
+            n_sats,
+            residuals_m,
+            converged: true,
+            ..Default::default()
+        }
+    }
+
+    fn velocity_solution(n_sats: usize, vx_mps: f64) -> VelocitySolution {
+        VelocitySolution {
+            ecef_velocity_mps: [vx_mps, 0.0, 0.0],
+            enu_velocity_mps: [0.0; 3],
+            used_prns: (1..=n_sats as u8).collect(),
+            converged: true,
+            ..Default::default()
+        }
+    }
+
+    fn ephemeris_for_catalog_test(prn: u8, toe: f64, iode: u8) -> crate::nav::Ephemeris {
+        crate::nav::Ephemeris {
+            prn,
+            toe,
+            toc: toe,
+            iode,
+            sqrt_a: 26_559_710.0_f64.sqrt(),
+            eccentricity: 0.01,
+            ..Default::default()
+        }
+    }
+
+    fn kalman_speed_mps(solution: &KalmanSolution) -> f64 {
+        (solution.ecef_velocity_mps[0].powi(2)
+            + solution.ecef_velocity_mps[1].powi(2)
+            + solution.ecef_velocity_mps[2].powi(2))
+        .sqrt()
+    }
+}

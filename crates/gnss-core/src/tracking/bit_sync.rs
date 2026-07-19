@@ -7,21 +7,27 @@
 //! Port of GNSS-SDR's `HistogramBitSynchronizer` (simplified: sign-detector
 //! branch only, no tracking-quality gating).
 
-const BITS_PER_SYMBOL: usize = 20;  // 20 ms per nav bit at 1 ms prompt rate
+const BITS_PER_SYMBOL: usize = 20; // 20 ms per nav bit at 1 ms prompt rate
 
 /// Histogram-based bit synchronizer. Feed 1 ms prompt samples; once locked,
 /// `bit_boundary()` reports the phase (0..20) at which nav bits start.
 pub struct BitSynchronizer {
     hist: [u32; BITS_PER_SYMBOL],
-    epoch: usize,           // total 1 ms samples seen
-    total_events: u32,      // sign transitions counted
-    last_sign: i8,          // sign of previous prompt (±1)
+    epoch: usize,      // total 1 ms samples seen
+    total_events: u32, // sign transitions counted
+    last_sign: i8,     // sign of previous prompt (±1)
     has_last: bool,
     locked: bool,
     edge_phase: usize,
     // Stability: the best bin must stay the same for several evaluations
     last_best_bin: usize,
     stable_best_count: u32,
+}
+
+impl Default for BitSynchronizer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BitSynchronizer {
@@ -61,7 +67,7 @@ impl BitSynchronizer {
         // Evaluate lock once we have enough transitions.
         // Rule of thumb: ~1 transition per 2 bits → in 100 bits ~50 transitions.
         const MIN_EVENTS: u32 = 30;
-        const DOMINANCE_RATIO: f64 = 0.4;   // best bin must hold ≥40% of transitions
+        const DOMINANCE_RATIO: f64 = 0.4; // best bin must hold ≥40% of transitions
         const STABLE_BEST_REQUIRED: u32 = 3; // best bin must be stable 3 evaluations
 
         if !self.locked && self.total_events >= MIN_EVENTS {
@@ -82,11 +88,17 @@ impl BitSynchronizer {
         None
     }
 
-    pub fn locked(&self) -> bool { self.locked }
-    pub fn bit_boundary(&self) -> usize { self.edge_phase }
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+    pub fn bit_boundary(&self) -> usize {
+        self.edge_phase
+    }
 
     /// Phase of the current 1 ms sample within the 20 ms bit (0..20).
-    pub fn current_phase(&self) -> usize { self.epoch % BITS_PER_SYMBOL }
+    pub fn current_phase(&self) -> usize {
+        self.epoch % BITS_PER_SYMBOL
+    }
 
     /// True if the current 1 ms sample is the first of a new bit.
     pub fn is_bit_edge(&self) -> bool {
@@ -123,7 +135,9 @@ mod tests {
         let mut prompts: Vec<f64> = Vec::new();
         for bit in 0..50 {
             let amp = if bit % 2 == 0 { 100.0 } else { -100.0 };
-            for _ in 0..20 { prompts.push(amp); }
+            for _ in 0..20 {
+                prompts.push(amp);
+            }
         }
         let mut locked_at = None;
         for (i, &p) in prompts.iter().enumerate() {
@@ -156,7 +170,10 @@ mod tests {
         }
         let mut boundary = None;
         for p in prompts {
-            if let Some(b) = bs.update(p) { boundary = Some(b); break; }
+            if let Some(b) = bs.update(p) {
+                boundary = Some(b);
+                break;
+            }
         }
         assert_eq!(boundary.unwrap(), 7);
     }

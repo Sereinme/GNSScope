@@ -16,6 +16,8 @@ use std::f64::consts::TAU;
 pub struct AcquisitionResult {
     /// PRN number (1-32)
     pub prn: u8,
+    /// Absolute sample index of the first sample in the acquisition window.
+    pub sample_index: u64,
     /// Detected Doppler frequency in Hz
     pub doppler_hz: f64,
     /// Detected code phase in chips (fractional, 0..1023)
@@ -74,9 +76,24 @@ impl PcpsAcquisition {
     /// `samples` must contain exactly `samples_per_code` complex samples
     /// (1 ms of data at the configured sample rate).
     pub fn acquire(&mut self, prn: usize, samples: &[Complex<f64>]) -> AcquisitionResult {
-        let samples_per_code = (self.config.fs * self.config.coherent_integration_ms / 1000.0) as usize;
-        debug_assert_eq!(samples.len(), samples_per_code,
-            "Expected {} samples, got {}", samples_per_code, samples.len());
+        self.acquire_at_sample(prn, samples, 0)
+    }
+
+    pub fn acquire_at_sample(
+        &mut self,
+        prn: usize,
+        samples: &[Complex<f64>],
+        sample_index: u64,
+    ) -> AcquisitionResult {
+        let samples_per_code =
+            (self.config.fs * self.config.coherent_integration_ms / 1000.0) as usize;
+        debug_assert_eq!(
+            samples.len(),
+            samples_per_code,
+            "Expected {} samples, got {}",
+            samples_per_code,
+            samples.len()
+        );
 
         let fft_size = samples_per_code;
         let doppler_bins = self.doppler_bins();
@@ -100,7 +117,8 @@ impl PcpsAcquisition {
                 .collect();
 
             // Multiply input by carrier
-            let wiped: Vec<Complex<f64>> = samples.iter()
+            let wiped: Vec<Complex<f64>> = samples
+                .iter()
                 .zip(carrier.iter())
                 .map(|(s, c)| s * c)
                 .collect();
@@ -111,7 +129,8 @@ impl PcpsAcquisition {
             fft.process(&mut fft_input);
 
             // Multiply by conjugated local code FFT
-            let product: Vec<Complex<f64>> = fft_input.iter()
+            let product: Vec<Complex<f64>> = fft_input
+                .iter()
                 .zip(local_code_fft_conj.iter())
                 .map(|(a, b)| a * b)
                 .collect();
@@ -123,14 +142,12 @@ impl PcpsAcquisition {
 
             // Normalize IFFT and compute magnitude squared
             let n = fft_size as f64;
-            let mag_sq: Vec<f64> = ifft_input.iter()
-                .map(|v| v.norm_sqr() / (n * n))
-                .collect();
+            let mag_sq: Vec<f64> = ifft_input.iter().map(|v| v.norm_sqr() / (n * n)).collect();
             magnitude_grid[bin_idx] = mag_sq;
         }
 
         // Step 4: Compute statistics (cf. GNSS-SDR compute_statistics)
-        self.compute_result(prn, &doppler_bins, &magnitude_grid, fft_size)
+        self.compute_result(prn, sample_index, &doppler_bins, &magnitude_grid, fft_size)
     }
 
     /// Generate the FFT of the local PRN code, conjugated.
@@ -165,6 +182,7 @@ impl PcpsAcquisition {
     fn compute_result(
         &self,
         prn: usize,
+        sample_index: u64,
         doppler_bins: &[i32],
         magnitude_grid: &[Vec<f64>],
         fft_size: usize,
@@ -185,7 +203,11 @@ impl PcpsAcquisition {
         }
 
         // Compute mean (excluding a small region around the peak for robustness)
-        let exclude_start = if max_code_idx >= 2 { max_code_idx - 2 } else { fft_size + max_code_idx - 2 };
+        let exclude_start = if max_code_idx >= 2 {
+            max_code_idx - 2
+        } else {
+            fft_size + max_code_idx - 2
+        };
         let exclude_end = (max_code_idx + 3) % fft_size;
         let mut sum = 0.0f64;
         let mut count = 0usize;
@@ -211,6 +233,7 @@ impl PcpsAcquisition {
 
         AcquisitionResult {
             prn: (prn + 1) as u8,
+            sample_index,
             doppler_hz: doppler_bins[max_bin] as f64,
             code_phase_chips,
             peak_to_mean,
@@ -228,10 +251,20 @@ mod tests {
         let config = PcpsConfig::default();
         let mut acq = PcpsAcquisition::new(config);
         // Pure noise
-        let noise: Vec<Complex<f64>> = (0..4000)
-            .map(|_| Complex::new(0.0, 0.0))
-            .collect();
+        let noise: Vec<Complex<f64>> = (0..4000).map(|_| Complex::new(0.0, 0.0)).collect();
         let result = acq.acquire(0, &noise);
         assert!(!result.detected, "Pure noise should not trigger detection");
+        assert_eq!(result.sample_index, 0);
+    }
+
+    #[test]
+    fn test_acquisition_result_preserves_window_sample_stamp() {
+        let config = PcpsConfig::default();
+        let mut acq = PcpsAcquisition::new(config);
+        let noise: Vec<Complex<f64>> = (0..4000).map(|_| Complex::new(0.0, 0.0)).collect();
+
+        let result = acq.acquire_at_sample(0, &noise, 123_456);
+
+        assert_eq!(result.sample_index, 123_456);
     }
 }

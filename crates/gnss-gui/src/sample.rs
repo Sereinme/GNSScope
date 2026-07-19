@@ -1,0 +1,80 @@
+use crate::GuiPvtViewModel;
+use gnss_core::pvt::{
+    PvtEpochOutput, PvtEpochSolutionKind, PvtQualityOutput, PvtTimeOutput, PvtVelocityOutput,
+};
+
+pub fn sample_pvt_view_model() -> GuiPvtViewModel {
+    GuiPvtViewModel::from_epoch_output(&sample_pvt_epoch_output())
+}
+
+fn sample_pvt_epoch_output() -> PvtEpochOutput {
+    PvtEpochOutput {
+        epoch_index: 34,
+        solution_kind: PvtEpochSolutionKind::Kalman,
+        time: PvtTimeOutput {
+            gps_week: None,
+            receiver_time_sow: Some(368_658.000),
+            corrected_gps_time_sow: Some(368_657.992_245),
+            transmit_time_sow_min: Some(368_657.918),
+            transmit_time_sow_max: Some(368_657.925),
+            receiver_clock_bias_s: 7_755.461e-6,
+            receiver_clock_drift_sps: Some(-5.28e-6),
+        },
+        ecef: [4_797_669.8, 166_502.1, 4_185_455.8],
+        lla_rad: [
+            41.274_864_f64.to_radians(),
+            1.987_639_f64.to_radians(),
+            64.9,
+        ],
+        velocity: Some(PvtVelocityOutput {
+            ecef_velocity_mps: [-2.631, 1.091, -0.289],
+            enu_velocity_mps: [1.181, 1.493, -2.138],
+            speed_mps: 2.863,
+            horizontal_speed_mps: 1.904,
+            vertical_speed_mps: -2.138,
+            heading_rad: Some(1.181_f64.atan2(1.493)),
+            clock_drift_mps: -1_582.812,
+            clock_drift_sps: -5.28e-6,
+            residual_rms_mps: 0.074,
+            used_prns: vec![20, 1, 32, 11, 17],
+        }),
+        quality: PvtQualityOutput {
+            converged: true,
+            n_sats: 5,
+            used_prns: vec![20, 1, 32, 11, 17],
+            excluded_prns: Vec::new(),
+            residual_rms_m: 0.08,
+            standardized_residual_rms: 0.03,
+            max_standardized_residual: 0.04,
+            epoch_quality_scale: 1.0,
+            hdop: 3.9,
+            vdop: 4.5,
+            pdop: 5.4,
+            gdop: 5.94,
+            horizontal_sigma_m: 18.0,
+            vertical_sigma_m: 28.0,
+            position_sigma_m: 22.0,
+            velocity_sigma_mps: Some(0.10),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gnss_core::pvt::PvtEpochSolutionKind;
+
+    #[test]
+    fn test_sample_pvt_view_model_is_gui_ready() {
+        let sample = sample_pvt_view_model();
+
+        assert_eq!(sample.solution_kind, PvtEpochSolutionKind::Kalman);
+        assert!(sample.quality.converged);
+        assert_eq!(sample.quality.n_sats, 5);
+        assert!(sample
+            .velocity
+            .as_ref()
+            .is_some_and(|velocity| velocity.speed_mps > 0.0));
+        assert!(sample.time.corrected_gps_time_sow.is_some());
+    }
+}

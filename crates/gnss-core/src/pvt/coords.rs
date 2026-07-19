@@ -3,7 +3,7 @@
 //! `ecef_to_lla` uses Bowring's iterative method; `lla_to_ecef` is closed-form.
 
 /// WGS84 ellipsoid parameters.
-pub const WGS84_A: f64 = 6_378_137.0;           // semi-major axis [m]
+pub const WGS84_A: f64 = 6_378_137.0; // semi-major axis [m]
 pub const WGS84_F: f64 = 1.0 / 298.257_223_563; // flattening
 pub const WGS84_B: f64 = WGS84_A * (1.0 - WGS84_F); // semi-minor axis
 pub const WGS84_E2: f64 = WGS84_F * (2.0 - WGS84_F); // first eccentricity squared
@@ -32,7 +32,11 @@ pub fn ecef_to_lla(ecef: Ecef) -> Lla {
     let p = (x * x + y * y).sqrt();
     if p < 1e-12 {
         // pole
-        let lat = if z >= 0.0 { std::f64::consts::FRAC_PI_2 } else { -std::f64::consts::FRAC_PI_2 };
+        let lat = if z >= 0.0 {
+            std::f64::consts::FRAC_PI_2
+        } else {
+            -std::f64::consts::FRAC_PI_2
+        };
         let h = z.abs() - WGS84_B;
         return [lat, lon, h];
     }
@@ -67,9 +71,21 @@ mod tests {
         let h = 52.4_f64;
         let ecef = lla_to_ecef([lat, lon, h]);
         let lla = ecef_to_lla(ecef);
-        assert!((lla[0] - lat).abs() < 1e-9, "lat diff: {:.2e}", (lla[0] - lat).abs());
-        assert!((lla[1] - lon).abs() < 1e-9, "lon diff: {:.2e}", (lla[1] - lon).abs());
-        assert!((lla[2] - h).abs() < 1e-4, "alt diff: {:.2e}", (lla[2] - h).abs());
+        assert!(
+            (lla[0] - lat).abs() < 1e-9,
+            "lat diff: {:.2e}",
+            (lla[0] - lat).abs()
+        );
+        assert!(
+            (lla[1] - lon).abs() < 1e-9,
+            "lon diff: {:.2e}",
+            (lla[1] - lon).abs()
+        );
+        assert!(
+            (lla[2] - h).abs() < 1e-4,
+            "alt diff: {:.2e}",
+            (lla[2] - h).abs()
+        );
     }
 
     #[test]

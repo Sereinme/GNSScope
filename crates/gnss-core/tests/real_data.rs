@@ -8,7 +8,8 @@ use gnss_core::io::{IqFormat, IqReader};
 use gnss_data::gps_l1ca::PRN_COUNT;
 use num_complex::Complex;
 use std::path::Path;
-const DATA_FILE: &str = "../../data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat";
+const DATA_FILE: &str =
+    "../../data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat";
 const FS: f64 = 4_000_000.0;
 
 #[test]
@@ -24,8 +25,12 @@ fn test_real_data_acquisition() {
 
     let mut reader = IqReader::open(data_path, IqFormat::Int16).unwrap();
     let total_samples = reader.total_samples();
-    println!("File: {} samples total ({:.1} seconds at {} Msps)",
-        total_samples, total_samples as f64 / FS, FS / 1_000_000.0);
+    println!(
+        "File: {} samples total ({:.1} seconds at {} Msps)",
+        total_samples,
+        total_samples as f64 / FS,
+        FS / 1_000_000.0
+    );
 
     // Read first 2ms for acquisition (8000 samples)
     let samples_per_ms = FS as usize / 1000; // 4000
@@ -56,13 +61,17 @@ fn test_real_data_acquisition() {
 
     println!("Detected {} satellites in first 1ms:", detections.len());
     for d in &detections {
-        println!("  PRN {:2}: doppler={:+.0} Hz, code_phase={:.1} chips, peak/mean={:.1}",
-            d.prn, d.doppler_hz, d.code_phase_chips, d.peak_to_mean);
+        println!(
+            "  PRN {:2}: doppler={:+.0} Hz, code_phase={:.1} chips, peak/mean={:.1}",
+            d.prn, d.doppler_hz, d.code_phase_chips, d.peak_to_mean
+        );
     }
 
-    assert!(detections.len() >= 4,
+    assert!(
+        detections.len() >= 4,
         "Expected >=4 satellites, got {}. Try adjusting threshold or checking data.",
-        detections.len());
+        detections.len()
+    );
 }
 
 #[test]
@@ -82,8 +91,11 @@ fn test_real_data_acquisition_with_noncoherent_integration() {
 
     // Simple non-coherent: run acquisition on each 1ms, accumulate magnitudes
     let config = PcpsConfig {
-        fs: FS, doppler_max: 10_000.0, doppler_step: 250.0,
-        coherent_integration_ms: 1.0, threshold: 2.2,
+        fs: FS,
+        doppler_max: 10_000.0,
+        doppler_step: 250.0,
+        coherent_integration_ms: 1.0,
+        threshold: 2.2,
         ..Default::default()
     };
     let mut acq = PcpsAcquisition::new(config);

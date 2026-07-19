@@ -9,7 +9,13 @@ use gnss_data::gps_l1ca::{CODE_LENGTH, PRN_CODES};
 use num_complex::Complex;
 use std::f64::consts::TAU;
 
-fn gen_signal(prn: usize, doppler: f64, code_phase_chips: f64, fs: f64, amp: f64) -> Vec<Complex<f64>> {
+fn gen_signal(
+    prn: usize,
+    doppler: f64,
+    code_phase_chips: f64,
+    fs: f64,
+    amp: f64,
+) -> Vec<Complex<f64>> {
     let n = fs as usize / 1000;
     let spc = fs / 1.023e6;
     let code = &PRN_CODES[prn];
@@ -48,10 +54,22 @@ fn test_m0_single_strong_signal() {
     let mut acq = PcpsAcquisition::new(config);
     let r = acq.acquire(5, &signal);
 
-    assert!(r.detected, "PRN 6 should be detected, peak/mean={:.2}", r.peak_to_mean);
+    assert!(
+        r.detected,
+        "PRN 6 should be detected, peak/mean={:.2}",
+        r.peak_to_mean
+    );
     assert_eq!(r.prn, 6);
-    assert!((r.doppler_hz - doppler).abs() <= 500.0, "Doppler error: {} Hz", (r.doppler_hz - doppler).abs());
-    assert!((r.code_phase_chips - code_phase).abs() < 2.0, "Code phase error: {} chips", (r.code_phase_chips - code_phase).abs());
+    assert!(
+        (r.doppler_hz - doppler).abs() <= 500.0,
+        "Doppler error: {} Hz",
+        (r.doppler_hz - doppler).abs()
+    );
+    assert!(
+        (r.code_phase_chips - code_phase).abs() < 2.0,
+        "Code phase error: {} chips",
+        (r.code_phase_chips - code_phase).abs()
+    );
 }
 
 #[test]
@@ -92,11 +110,17 @@ fn test_m0_detect_multiple_satellites() {
     for i in 0..injected_prns.len() {
         let prn_idx = injected_prns[i];
         let r = acq.acquire(prn_idx, &signal);
-        assert!(r.detected,
+        assert!(
+            r.detected,
             "PRN {} should be detected, peak/mean={:.2}",
-            r.prn, r.peak_to_mean);
-        assert!((r.doppler_hz - dopplers[i]).abs() <= 500.0,
+            r.prn, r.peak_to_mean
+        );
+        assert!(
+            (r.doppler_hz - dopplers[i]).abs() <= 500.0,
             "PRN {} Doppler error: expected {} got {}",
-            r.prn, dopplers[i], r.doppler_hz);
+            r.prn,
+            dopplers[i],
+            r.doppler_hz
+        );
     }
 }

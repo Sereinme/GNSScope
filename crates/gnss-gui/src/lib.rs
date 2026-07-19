@@ -1,0 +1,24 @@
+//! GUI-facing state and view models for GNSScope.
+
+pub mod events;
+pub mod layout;
+pub mod nav_status;
+pub mod renderer;
+pub mod sample;
+pub mod screen;
+pub mod settings;
+pub mod state;
+pub mod view_model;
+
+pub use events::GuiReceiverEvent;
+pub use layout::{GuiPanel, GuiPanelKind, ReceiverWorkspaceLayout};
+pub use nav_status::{GuiNavSourceKind, GuiNavSourceStatus};
+pub use renderer::render_workspace_snapshot;
+pub use sample::sample_pvt_view_model;
+pub use screen::{
+    build_receiver_workspace_screen, GuiMetric, GuiScreenSection, GuiSettingControl,
+    GuiSettingControlKind, GuiTable,
+};
+pub use settings::{GuiIqFormat, GuiProcessingSettings};
+pub use state::{GuiChannelStatus, GuiReceiverStatus, GuiReceiverWorkspaceState, GuiSettingsIssue};
+pub use view_model::{GuiPvtQuality, GuiPvtTime, GuiPvtVelocity, GuiPvtViewModel};
