@@ -22,6 +22,7 @@ pub enum IqFormat {
 pub struct IqReader {
     reader: BufReader<File>,
     format: IqFormat,
+    raw_buffer: Vec<u8>,
     /// Total file size in bytes
     file_size: u64,
     /// Bytes consumed so far
@@ -36,6 +37,7 @@ impl IqReader {
         Ok(Self {
             reader: BufReader::with_capacity(256 * 1024, file),
             format,
+            raw_buffer: Vec::new(),
             file_size,
             bytes_read: 0,
         })
@@ -74,12 +76,11 @@ impl IqReader {
     }
 
     fn read_int8(&mut self, buffer: &mut [Complex<f64>], n: usize) -> std::io::Result<usize> {
-        let mut raw = vec![0u8; n * 2];
-        let bytes = self.reader.read(&mut raw)?;
+        let bytes = self.read_raw(n * 2)?;
         let samples_read = bytes / 2;
         for i in 0..samples_read {
-            let i_val = raw[i * 2] as i8;
-            let q_val = raw[i * 2 + 1] as i8;
+            let i_val = self.raw_buffer[i * 2] as i8;
+            let q_val = self.raw_buffer[i * 2 + 1] as i8;
             buffer[i] = Complex::new(i_val as f64, q_val as f64);
         }
         self.bytes_read += bytes as u64;
@@ -87,15 +88,30 @@ impl IqReader {
     }
 
     fn read_int16(&mut self, buffer: &mut [Complex<f64>], n: usize) -> std::io::Result<usize> {
-        let mut raw = vec![0u8; n * 4];
-        let bytes = self.reader.read(&mut raw)?;
+        let bytes = self.read_raw(n * 4)?;
         let samples_read = bytes / 4;
         for i in 0..samples_read {
-            let i_val = i16::from_le_bytes([raw[i * 4], raw[i * 4 + 1]]);
-            let q_val = i16::from_le_bytes([raw[i * 4 + 2], raw[i * 4 + 3]]);
+            let i_val = i16::from_le_bytes([self.raw_buffer[i * 4], self.raw_buffer[i * 4 + 1]]);
+            let q_val =
+                i16::from_le_bytes([self.raw_buffer[i * 4 + 2], self.raw_buffer[i * 4 + 3]]);
             buffer[i] = Complex::new(i_val as f64, q_val as f64);
         }
         self.bytes_read += bytes as u64;
         Ok(samples_read)
+    }
+
+    fn read_raw(&mut self, byte_count: usize) -> std::io::Result<usize> {
+        self.raw_buffer.resize(byte_count, 0);
+        let mut bytes_read = 0;
+        while bytes_read < byte_count {
+            let read = self
+                .reader
+                .read(&mut self.raw_buffer[bytes_read..byte_count])?;
+            if read == 0 {
+                break;
+            }
+            bytes_read += read;
+        }
+        Ok(bytes_read)
     }
 }

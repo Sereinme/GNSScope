@@ -9,6 +9,7 @@ gnss-data = { path = "../gnss-data" }
 rustfft = "6"
 num-complex = "0.4"
 nalgebra = "0.33"
+rayon = "1"
 
 [dev-dependencies]
 fastrand = "2"

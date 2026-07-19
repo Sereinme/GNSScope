@@ -15,6 +15,8 @@ pub const SUBFRAME_BITS: usize = 300;
 pub struct Ephemeris {
     pub prn: u8,
     pub week_number: u16,
+    /// True when `week_number` came from the 10-bit GPS navigation field.
+    pub week_number_is_truncated: bool,
     /// Time of ephemeris (GPS seconds of week).
     pub toe: f64,
     /// Time of clock (GPS seconds of week).
@@ -154,6 +156,7 @@ fn parse_rinex_ephemeris_record(
     Some(Ephemeris {
         prn: first.prn,
         week_number: row5[2].round().clamp(0.0, u16::MAX as f64) as u16,
+        week_number_is_truncated: false,
         toe: row3[0],
         toc: first.toc_sow,
         sqrt_a: row2[3],
@@ -393,6 +396,7 @@ pub fn parse_subframe1(words: &[NavWord], prn: u8) -> Option<Ephemeris> {
     Some(Ephemeris {
         prn,
         week_number: r.read_u(61, 10) as u16,
+        week_number_is_truncated: true,
         sv_accuracy: r.read_u(73, 4) as u8,
         sv_health: r.read_u(77, 6) as u8,
         tgd: r.read_i(197, 8) as f64 * P2_31,

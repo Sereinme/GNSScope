@@ -11,6 +11,7 @@ pub mod pseudorange;
 pub mod satpos;
 pub mod smoothing;
 pub mod solver;
+pub mod time;
 pub mod velocity;
 
 pub use continuous::{
@@ -33,6 +34,7 @@ pub use smoothing::{HatchConfig, HatchSmoother};
 pub use solver::{
     solve_wls, solve_wls_with_config, PvtSatelliteDiagnostic, PvtSolution, WlsConfig,
 };
+pub use time::{gps_time_to_utc, normalize_gps_time, GpsTime, UtcDateTime};
 pub use velocity::{
     doppler_velocity_observations, solve_doppler_velocity,
     solve_doppler_velocity_from_observations, DopplerVelocityObservation, VelocitySolution,

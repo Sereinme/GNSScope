@@ -666,6 +666,7 @@ fn test_pvt_e2e() {
             initialization_epochs: 2,
             ..Default::default()
         }),
+        gps_week_rollover_reference: Some(1734),
         ..Default::default()
     });
     let continuous_results = continuous_runner.solve_epochs(
@@ -683,6 +684,26 @@ fn test_pvt_e2e() {
             && output.velocity.is_some()
             && output.time.corrected_gps_time_sow.is_some()
     }));
+    assert!(pvt_outputs
+        .iter()
+        .all(|output| output.time.gps_week == Some(1734)));
+    assert!(pvt_outputs.iter().all(|output| {
+        output
+            .time
+            .utc
+            .is_some_and(|utc| (utc.year, utc.month, utc.day) == (2013, 4, 4))
+    }));
+    let first_time = &pvt_outputs.first().expect("first PVT output").time;
+    let last_time = &pvt_outputs.last().expect("last PVT output").time;
+    println!(
+        "GNSScope time: first GPS={:?}/{:?} UTC={:?}; last GPS={:?}/{:?} UTC={:?}",
+        first_time.gps_week,
+        first_time.corrected_gps_time_sow,
+        first_time.utc,
+        last_time.gps_week,
+        last_time.corrected_gps_time_sow,
+        last_time.utc,
+    );
     let raw_velocity_speeds_mps: Vec<f64> = continuous_results
         .iter()
         .filter_map(|result| result.raw_velocity_solution.as_ref())

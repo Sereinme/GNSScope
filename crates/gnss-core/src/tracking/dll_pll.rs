@@ -46,7 +46,7 @@ impl Default for TrackingConfig {
         }
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TrackingOutput {
     pub prompt: Complex<f64>,
     pub early_mag: f64,

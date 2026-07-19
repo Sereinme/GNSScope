@@ -1,6 +1,7 @@
 use crate::GuiPvtViewModel;
 use gnss_core::pvt::{
     PvtEpochOutput, PvtEpochSolutionKind, PvtQualityOutput, PvtTimeOutput, PvtVelocityOutput,
+    UtcDateTime,
 };
 
 pub fn sample_pvt_view_model() -> GuiPvtViewModel {
@@ -12,9 +13,18 @@ fn sample_pvt_epoch_output() -> PvtEpochOutput {
         epoch_index: 34,
         solution_kind: PvtEpochSolutionKind::Kalman,
         time: PvtTimeOutput {
-            gps_week: None,
+            gps_week: Some(1734),
             receiver_time_sow: Some(368_658.000),
             corrected_gps_time_sow: Some(368_657.992_245),
+            utc_unix_seconds: Some(1_365_056_641.992_245),
+            utc: Some(UtcDateTime {
+                year: 2013,
+                month: 4,
+                day: 4,
+                hour: 6,
+                minute: 24,
+                second: 1.992_245,
+            }),
             transmit_time_sow_min: Some(368_657.918),
             transmit_time_sow_max: Some(368_657.925),
             receiver_clock_bias_s: 7_755.461e-6,

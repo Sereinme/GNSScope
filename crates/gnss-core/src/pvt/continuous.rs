@@ -14,7 +14,9 @@ use crate::pvt::pseudorange::{
 use crate::pvt::satpos::satellite_position;
 use crate::pvt::smoothing::{HatchConfig, HatchSmoother};
 use crate::pvt::solver::{solve_wls_with_config, PvtSolution, WlsConfig};
+use crate::pvt::time::{gps_time_to_utc, normalize_gps_time, UtcDateTime};
 use crate::pvt::velocity::{solve_doppler_velocity, VelocitySolution};
+use std::collections::BTreeMap;
 
 const C_LIGHT: f64 = 299_792_458.0;
 const OMEGA_E: f64 = 7.292_115_146_7e-5;
@@ -113,11 +115,14 @@ pub struct ContinuousPvtConfig {
     pub kalman: Option<KalmanConfig>,
     pub velocity_quality: VelocityQualityConfig,
     pub wls: WlsConfig,
+    /// Approximate full GPS week used to expand a broadcast 10-bit week number.
+    pub gps_week_rollover_reference: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ContinuousPvtEpochResult {
     pub epoch_index: usize,
+    pub gps_week: Option<u16>,
     pub raw_pseudoranges: Vec<Pseudorange>,
     pub smoothed_pseudoranges: Option<Vec<Pseudorange>>,
     pub raw_solution: PvtSolution,
@@ -140,6 +145,8 @@ pub struct PvtTimeOutput {
     pub gps_week: Option<u16>,
     pub receiver_time_sow: Option<f64>,
     pub corrected_gps_time_sow: Option<f64>,
+    pub utc_unix_seconds: Option<f64>,
+    pub utc: Option<UtcDateTime>,
     pub transmit_time_sow_min: Option<f64>,
     pub transmit_time_sow_max: Option<f64>,
     pub receiver_clock_bias_s: f64,
@@ -276,8 +283,18 @@ impl ContinuousPvtEpochResult {
         receiver_clock_drift_sps: Option<f64>,
     ) -> PvtTimeOutput {
         let receiver_time_sow = mean_receive_time_sow(&self.raw_pseudoranges);
-        let corrected_gps_time_sow =
-            receiver_time_sow.map(|sow| wrap_gps_sow(sow - receiver_clock_bias_s));
+        let corrected_gps_time = self
+            .gps_week
+            .zip(receiver_time_sow)
+            .and_then(|(week, sow)| normalize_gps_time(week, sow - receiver_clock_bias_s));
+        let corrected_gps_time_sow = corrected_gps_time
+            .map(|time| time.sow)
+            .or_else(|| receiver_time_sow.map(|sow| wrap_gps_sow(sow - receiver_clock_bias_s)));
+        let gps_week = corrected_gps_time.map(|time| time.week).or(self.gps_week);
+        let (utc_unix_seconds, utc) = corrected_gps_time
+            .and_then(|time| gps_time_to_utc(time.week, time.sow))
+            .map(|(unix_seconds, utc)| (Some(unix_seconds), Some(utc)))
+            .unwrap_or((None, None));
         let transmit_time_sow_min = self
             .raw_pseudoranges
             .iter()
@@ -289,9 +306,11 @@ impl ContinuousPvtEpochResult {
             .map(|pr| pr.transmit_time_sow)
             .reduce(f64::max);
         PvtTimeOutput {
-            gps_week: None,
+            gps_week,
             receiver_time_sow,
             corrected_gps_time_sow,
+            utc_unix_seconds,
+            utc,
             transmit_time_sow_min,
             transmit_time_sow_max,
             receiver_clock_bias_s,
@@ -427,6 +446,7 @@ impl ContinuousPvtRunner {
         let ambiguity = self.config.integer_ms_ambiguity.clone();
         self.solve_epochs_with_preprocess(
             epochs,
+            consistent_gps_week(ephemerides, self.config.gps_week_rollover_reference),
             |pseudoranges| {
                 solve_wls_with_config(
                     pseudoranges,
@@ -472,6 +492,7 @@ impl ContinuousPvtRunner {
         let ambiguity = self.config.integer_ms_ambiguity.clone();
         self.solve_epochs_with_preprocess_and_solve(
             epochs,
+            None,
             |pseudoranges| {
                 ephemeris_map_for_pseudoranges(pseudoranges, ephemeris_catalog, &selection_config)
             },
@@ -514,6 +535,7 @@ impl ContinuousPvtRunner {
     {
         self.solve_epochs_with_preprocess(
             epochs,
+            None,
             solve,
             |pseudoranges| pseudoranges.to_vec(),
             |_, _| None,
@@ -532,6 +554,7 @@ impl ContinuousPvtRunner {
     {
         self.solve_epochs_with_preprocess(
             epochs,
+            None,
             solve,
             |pseudoranges| pseudoranges.to_vec(),
             velocity,
@@ -541,6 +564,7 @@ impl ContinuousPvtRunner {
     fn solve_epochs_with_preprocess<F, P, V>(
         &mut self,
         epochs: &[PseudorangeEpoch],
+        fixed_gps_week: Option<u16>,
         mut solve: F,
         mut preprocess: P,
         mut velocity: V,
@@ -552,6 +576,7 @@ impl ContinuousPvtRunner {
     {
         self.solve_epochs_with_preprocess_and_solve(
             epochs,
+            fixed_gps_week,
             |_| EphemerisMap::new(),
             |pseudoranges, _| solve(pseudoranges),
             |pseudoranges, _| preprocess(pseudoranges),
@@ -562,6 +587,7 @@ impl ContinuousPvtRunner {
     fn solve_epochs_with_preprocess_and_solve<S, F, P, V>(
         &mut self,
         epochs: &[PseudorangeEpoch],
+        fixed_gps_week: Option<u16>,
         mut select_ephemerides: S,
         mut solve: F,
         mut preprocess: P,
@@ -578,6 +604,9 @@ impl ContinuousPvtRunner {
             .enumerate()
             .map(|(epoch_index, epoch)| {
                 let ephemerides = select_ephemerides(&epoch.pseudoranges);
+                let gps_week =
+                    consistent_gps_week(&ephemerides, self.config.gps_week_rollover_reference)
+                        .or(fixed_gps_week);
                 let raw_pseudoranges = preprocess(&epoch.pseudoranges, &ephemerides);
                 let mut solve_raw =
                     |pseudoranges: &[Pseudorange]| solve(pseudoranges, &ephemerides);
@@ -644,6 +673,7 @@ impl ContinuousPvtRunner {
 
                 ContinuousPvtEpochResult {
                     epoch_index,
+                    gps_week,
                     raw_pseudoranges,
                     smoothed_pseudoranges,
                     raw_solution,
@@ -655,6 +685,35 @@ impl ContinuousPvtRunner {
             })
             .collect()
     }
+}
+
+fn consistent_gps_week(ephemerides: &EphemerisMap, rollover_reference: Option<u16>) -> Option<u16> {
+    let mut counts = BTreeMap::<u16, usize>::new();
+    for week in ephemerides.values().filter_map(|ephemeris| {
+        if ephemeris.week_number_is_truncated {
+            rollover_reference
+                .and_then(|reference| expand_truncated_gps_week(ephemeris.week_number, reference))
+        } else {
+            Some(ephemeris.week_number)
+        }
+    }) {
+        *counts.entry(week).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(week, count)| (*count, *week))
+        .map(|(week, _)| week)
+}
+
+fn expand_truncated_gps_week(truncated_week: u16, reference_week: u16) -> Option<u16> {
+    if truncated_week >= 1024 {
+        return None;
+    }
+    let reference = i64::from(reference_week);
+    let truncated = i64::from(truncated_week);
+    let rollover = ((reference - truncated) as f64 / 1024.0).round() as i64;
+    let expanded = truncated + rollover * 1024;
+    u16::try_from(expanded).ok()
 }
 
 fn ephemeris_map_for_pseudoranges(
@@ -922,6 +981,73 @@ mod tests {
         assert!(results[0].raw_velocity_solution.is_none());
         assert!(results[0].smoothed_solution.is_none());
         assert!(results[0].smoothed_velocity_solution.is_none());
+    }
+
+    #[test]
+    fn test_continuous_runner_outputs_ephemeris_week_and_cttc_utc_time() {
+        let mut ephemerides = EphemerisMap::new();
+        for prn in 1..=3 {
+            ephemerides.insert(
+                prn,
+                crate::nav::Ephemeris {
+                    prn,
+                    week_number: 1734,
+                    ..Default::default()
+                },
+            );
+        }
+        let epoch = PseudorangeEpoch {
+            pseudoranges: (1..=3)
+                .map(|prn| pseudorange(prn, 20_000_000.0, 368_663.0))
+                .collect(),
+        };
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig::default());
+
+        let result = runner
+            .solve_epochs(
+                &[epoch],
+                &ephemerides,
+                &IonoParams::default(),
+                0.0,
+                0.0,
+                0.0,
+            )
+            .pop()
+            .expect("retained short epoch");
+        let output = result.to_output();
+
+        assert_eq!(result.gps_week, Some(1734));
+        assert_eq!(output.time.gps_week, Some(1734));
+        assert_eq!(output.time.utc_unix_seconds, Some(1_365_056_647.0));
+        assert_eq!(
+            output.time.utc,
+            Some(UtcDateTime {
+                year: 2013,
+                month: 4,
+                day: 4,
+                hour: 6,
+                minute: 24,
+                second: 7.0,
+            })
+        );
+    }
+
+    #[test]
+    fn test_truncated_gps_week_requires_and_uses_rollover_reference() {
+        assert_eq!(expand_truncated_gps_week(710, 1734), Some(1734));
+        assert_eq!(expand_truncated_gps_week(710, 710), Some(710));
+
+        let ephemerides = EphemerisMap::from([(
+            1,
+            crate::nav::Ephemeris {
+                prn: 1,
+                week_number: 710,
+                week_number_is_truncated: true,
+                ..Default::default()
+            },
+        )]);
+        assert_eq!(consistent_gps_week(&ephemerides, None), None);
+        assert_eq!(consistent_gps_week(&ephemerides, Some(1734)), Some(1734));
     }
 
     #[test]

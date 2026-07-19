@@ -20,7 +20,7 @@ This plan captures the agreed optimization design before changing the receiver p
 
 - Do not introduce async runtime or async I/O before GUI implementation.
 - Do not change numeric type from `Complex<f64>` in the first streaming phase.
-- Do not fix Doppler velocity/time alignment in the same step as streaming and parallelization.
+- Keep Doppler velocity/time fixes independently regression-tested from streaming and parallelization.
 - Do not turn `pvt_e2e.rs` into the permanent receiver implementation.
 
 ## Current Problems
@@ -35,22 +35,23 @@ This plan captures the agreed optimization design before changing the receiver p
 - GNSS-SDR's current RTKLIB path solves velocity and receiver clock drift together with an unweighted four-state least-squares equation. GNSScope matches that equation, including satellite clock drift and Earth-rotation range-rate correction. Streaming PVT now averages each channel's Doppler samples over `(previous PVT boundary, current PVT boundary]` by default, then performs one velocity solution per PVT epoch. `pvt_output_rate_ms` therefore controls both the Doppler averaging window and the position/velocity refresh period; high-dynamics operation should shorten it. `average_doppler_over_pvt_epoch` can disable averaging and fall back to common-epoch interpolation.
 - On the CTTC five-satellite epoch, the raw instantaneous solution is `2.184 m/s`; the configured `100 ms` epoch average produces `0.042 m/s` with receiver clock drift `-1581.014 m/s` (`-5.274 ppm`). The continuous `1 s` epoch replay stays at or below `0.05 m/s`. No velocity clamping or static constraint is applied.
 - Position uses code pseudorange at the common epoch rather than an arithmetic mean over the PVT interval. Averaging code ranges across time would mix changing satellite/receiver geometry and add latency. Optional Hatch carrier smoothing is the appropriate low-dynamics noise-reduction path. The position model applies broadcast satellite clock polynomial, TGD and relativistic clock correction, transmit-to-receive-frame Earth rotation (Sagnac), Klobuchar ionosphere and Saastamoinen troposphere corrections. Velocity differentiates the same complete satellite clock correction, so its satellite clock-drift term includes the relativistic contribution.
+- PVT time now retains the selected ephemeris week, applies receiver clock bias with the RTKLIB sign (`corrected GPST = receiver time - clock bias`), normalizes week rollover, and converts GPST to structured UTC with the local GNSS-SDR/RTKLIB leap-second table. RINEX records carry full GPS week numbers. The 10-bit week decoded from navigation subframe 1 is marked as truncated and is expanded only when `gps_week_rollover_reference` supplies an approximate full week; without that anchor, GNSScope does not emit a falsely precise UTC date.
+- The CTTC production stream at input time 60 s outputs GPS week `1734`, SOW `368663.029`, or `2013-04-04 06:24:07.029 UTC` after the 2013 GPS-UTC offset of 16 s. The legacy GNSS-SDR NMEA fixture begins at `06:23:48` and is approximately 16 s ahead at aligned input times, consistent with GPST being labeled as UTC in that old fixture. It remains useful for position and averaged zero-speed comparison, but not as the absolute UTC oracle.
 
-## Current Implementation Status (2026-07-19)
+## Current Implementation Status (2026-07-20)
 
-- `StreamingPvtRunner` consumes chunked IQ input through its reader entry point. The default chunk is 1 ms, and `chunk_ms` is configurable; the reader reuses a bounded chunk buffer instead of loading the complete IQ file.
+- `StreamingPvtRunner` consumes chunked IQ input through its reader entry point. The generic default chunk is 1 ms, the CTTC preset batch-reads 20 ms, and tracking still receives exact 1 ms slices. Both the complex sample buffer and the raw byte conversion buffer are reused instead of loading the complete IQ file or allocating per read.
 - Each complete 1 ms epoch is ingested by the acquisition ring and then passed to active channels for tracking. Channel-state updates and emitted events remain ordered deterministically on the runner thread.
-- The per-channel tracking operation is now isolated in `process_tracking_channel_step`. It returns tracking output and pending navigation events before the runner applies channel health, loss, and navigation state. This is an architectural prerequisite for worker-based parallel tracking.
-- No worker pool, Rayon parallel loop, or async I/O is enabled yet. Parallel tracking must preserve per-channel tracker ownership and the current main-thread ordering for health and navigation events.
-- The real-data memory and throughput acceptance measurements are still pending. The legacy `pvt_e2e` full-file path remains the 3.84 GB baseline until the streaming runner is benchmarked on the CTTC dataset.
+- Active channel tracking runs on Rayon's persistent worker pool by default. Each worker mutates only its channel state; returned steps are sorted by PRN before the runner applies health, loss, navigation state, and output events. A serial fallback remains available through `parallel_tracking=false`, and a deterministic regression verifies identical tracking outputs and PRN order.
+- On the same release build and 60 s CTTC input, production streaming took `37.98 s` with serial tracking and `14.39 s` with parallel tracking, a 62% elapsed-time reduction. The parallel run acquired all five PRNs and produced 299,955 tracking updates, 32 decoded subframes, and 410 PVT outputs. Processing throughput was about 4.17 times real time.
+- The production path keeps memory bounded by the acquisition ring, 20 ms read buffers, per-channel state, and emitted events for the current callback step. It no longer uses the legacy 3.84 GB full-file `Vec<Complex<f64>>` design.
 
 ## Phases
 
 ### Phase A: Streaming E2E, Single Thread
 
 - Replace whole-file IQ loading with streaming reads.
-- Default chunk size is 1 ms.
-- Support `chunk_ms` configuration values of 1, 10, and 20 ms later, but chunks above 1 ms are only batch-read buffers. Tracking still receives 1 ms slices.
+- Generic default chunk size is 1 ms; the CTTC preset uses a 20 ms batch-read buffer. Tracking still receives 1 ms slices.
 - Preserve current fixed CTTC PRNs and legacy fine Doppler behavior for exact regression before Phase C.
 - Keep `Complex<f64>`.
 - Keep current tracking history behavior for result equivalence.
@@ -143,7 +144,7 @@ Expected static CTTC behavior:
 
 Real-data smoke coverage:
 
-- `streaming_runner_real` verifies the runner-owned path loads colocated CTTC RINEX nav, acquires the fixed CTTC PRNs, and advances tracking directly from the IQ reader.
+- `streaming_runner_real` verifies the runner-owned path loads colocated CTTC RINEX nav, acquires the fixed CTTC PRNs, and advances tracking directly from the IQ reader. With `GNSSCOPE_STREAMING_TEST_MS=60000`, it additionally requires decoded subframes, PVT output, GPS week 1734, and the expected CTTC UTC date/time.
 - `StreamingPvtConfig::cttc_spain_real_data` captures the CTTC dataset defaults used by the smoke path, so future e2e migration and GUI presets share one configuration source.
 
 ### Phase F: Dynamic Acquisition and Reacquisition

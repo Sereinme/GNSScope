@@ -16,6 +16,7 @@ use crate::pvt::{
 };
 use crate::tracking::{BitSynchronizer, DllPllTracking, TrackingConfig, TrackingOutput};
 use num_complex::Complex;
+use rayon::prelude::*;
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -510,6 +511,7 @@ pub struct StreamingPvtConfig {
     pub rinex_nav: RinexNavConfig,
     pub acquisition: AcquisitionSchedulerConfig,
     pub parallel_acquisition: bool,
+    pub parallel_tracking: bool,
     pub channel_admission: ChannelAdmissionConfig,
     pub tracking: TrackingConfig,
     pub continuous_pvt: ContinuousPvtConfig,
@@ -534,6 +536,7 @@ impl Default for StreamingPvtConfig {
             acquisition_ring_ms: acquisition.acq_window_ms.max(20),
             acquisition,
             parallel_acquisition: true,
+            parallel_tracking: true,
             channel_admission: ChannelAdmissionConfig::default(),
             tracking: TrackingConfig::default(),
             continuous_pvt: ContinuousPvtConfig::default(),
@@ -564,7 +567,7 @@ impl StreamingPvtConfig {
         config.iq_format = IqFormat::Int16;
         config.sample_rate_hz = 4_000_000.0;
         config.intermediate_frequency_hz = 0.0;
-        config.chunk_ms = 1;
+        config.chunk_ms = 20;
         config.pvt_output_rate_ms = 100;
         config.acquisition.acq_window_ms = 10;
         config.acquisition.noncoherent_integrations = 10;
@@ -1280,12 +1283,48 @@ impl StreamingPvtRunner {
         nav_time_available: impl Fn(u8) -> bool,
         ephemeris_available: impl Fn(u8) -> bool,
     ) -> Vec<StreamingPvtEvent> {
-        let prns = self.active_tracking_prns();
-        let mut events = Vec::with_capacity(prns.len());
+        let bit_sync_start_ms = self.config.bit_sync_start_ms;
+        let nav_tow_tag_latency_ms = self.config.nav_tow_tag_latency_ms;
+        let samples_per_ms = self.config.samples_per_ms();
+        let doppler_window_samples = self.config.doppler_epoch_window_samples() as f64;
+        let mut steps = if self.config.parallel_tracking && self.active_tracking.len() > 1 {
+            self.active_tracking
+                .par_iter_mut()
+                .map(|(&prn, active)| {
+                    process_tracking_channel_step(
+                        prn,
+                        active,
+                        samples,
+                        now_ms,
+                        bit_sync_start_ms,
+                        nav_tow_tag_latency_ms,
+                        samples_per_ms,
+                        doppler_window_samples,
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            self.active_tracking
+                .iter_mut()
+                .map(|(&prn, active)| {
+                    process_tracking_channel_step(
+                        prn,
+                        active,
+                        samples,
+                        now_ms,
+                        bit_sync_start_ms,
+                        nav_tow_tag_latency_ms,
+                        samples_per_ms,
+                        doppler_window_samples,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        steps.sort_by_key(|step| step.prn);
+        let mut events = Vec::with_capacity(steps.len());
         let mut lost_prns = Vec::new();
 
-        for prn in prns {
-            let step = self.process_tracking_channel_step(prn, samples, now_ms);
+        for step in steps {
             events.extend(step.pre_update_events);
 
             let observation = ChannelHealthObservation::from_tracking_output(
@@ -1318,65 +1357,6 @@ impl StreamingPvtRunner {
         }
 
         events
-    }
-
-    fn process_tracking_channel_step(
-        &mut self,
-        prn: u8,
-        samples: &[Complex<f64>],
-        now_ms: u64,
-    ) -> StreamingTrackingStepResult {
-        let doppler_window_samples = self.config.doppler_epoch_window_samples() as f64;
-        let active = self
-            .active_tracking
-            .get_mut(&prn)
-            .expect("active PRN should have a tracker");
-        let output = active.tracker.process(samples);
-        let prompt_i = output.prompt.re;
-        let mut pre_update_events = Vec::new();
-
-        if active.bit_boundary.is_none() && now_ms >= self.config.bit_sync_start_ms {
-            if let Some(boundary) = active.bit_sync.update(prompt_i) {
-                active.set_bit_boundary(boundary, self.config.bit_sync_start_ms);
-                pre_update_events.push(StreamingPvtEvent::BitSyncUpdated(StreamingBitSyncUpdate {
-                    prn,
-                    now_ms,
-                    boundary_ms: boundary,
-                }));
-            }
-        }
-
-        let nav_events = process_nav_symbol(
-            prn,
-            now_ms,
-            active,
-            prompt_i,
-            &output,
-            self.config.nav_tow_tag_latency_ms,
-            self.config.samples_per_ms(),
-        );
-        let output_rx_sample =
-            output.tracking_sample_counter as f64 + output.rem_code_phase_samples;
-        active.doppler_history.push_back(DopplerHistorySample {
-            rx_sample: output_rx_sample,
-            doppler_hz: output.carrier_doppler_hz,
-        });
-        let oldest_epoch_sample = output_rx_sample - doppler_window_samples;
-        while active
-            .doppler_history
-            .front()
-            .is_some_and(|sample| sample.rx_sample <= oldest_epoch_sample)
-        {
-            active.doppler_history.pop_front();
-        }
-        active.previous_tracking_output = active.latest_tracking_output.replace(output.clone());
-
-        StreamingTrackingStepResult {
-            prn,
-            output,
-            pre_update_events,
-            nav_events,
-        }
     }
 
     pub fn maybe_emit_pvt(
@@ -1528,6 +1508,63 @@ fn samples_to_ceil_ms(samples: u64, samples_per_ms: usize) -> u64 {
     samples.div_ceil(samples_per_ms)
 }
 
+fn process_tracking_channel_step(
+    prn: u8,
+    active: &mut ActiveTrackingChannel,
+    samples: &[Complex<f64>],
+    now_ms: u64,
+    bit_sync_start_ms: u64,
+    nav_tow_tag_latency_ms: usize,
+    samples_per_ms: usize,
+    doppler_window_samples: f64,
+) -> StreamingTrackingStepResult {
+    let output = active.tracker.process(samples);
+    let prompt_i = output.prompt.re;
+    let mut pre_update_events = Vec::new();
+
+    if active.bit_boundary.is_none() && now_ms >= bit_sync_start_ms {
+        if let Some(boundary) = active.bit_sync.update(prompt_i) {
+            active.set_bit_boundary(boundary, bit_sync_start_ms);
+            pre_update_events.push(StreamingPvtEvent::BitSyncUpdated(StreamingBitSyncUpdate {
+                prn,
+                now_ms,
+                boundary_ms: boundary,
+            }));
+        }
+    }
+
+    let nav_events = process_nav_symbol(
+        prn,
+        now_ms,
+        active,
+        prompt_i,
+        &output,
+        nav_tow_tag_latency_ms,
+        samples_per_ms,
+    );
+    let output_rx_sample = output.tracking_sample_counter as f64 + output.rem_code_phase_samples;
+    active.doppler_history.push_back(DopplerHistorySample {
+        rx_sample: output_rx_sample,
+        doppler_hz: output.carrier_doppler_hz,
+    });
+    let oldest_epoch_sample = output_rx_sample - doppler_window_samples;
+    while active
+        .doppler_history
+        .front()
+        .is_some_and(|sample| sample.rx_sample <= oldest_epoch_sample)
+    {
+        active.doppler_history.pop_front();
+    }
+    active.previous_tracking_output = active.latest_tracking_output.replace(output.clone());
+
+    StreamingTrackingStepResult {
+        prn,
+        output,
+        pre_update_events,
+        nav_events,
+    }
+}
+
 fn process_nav_symbol(
     prn: u8,
     now_ms: u64,
@@ -1658,6 +1695,16 @@ mod tests {
             peak_to_mean: 20.0,
             detected: true,
         }
+    }
+
+    fn tracking_updates(events: &[StreamingPvtEvent]) -> Vec<&StreamingTrackingUpdate> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                StreamingPvtEvent::TrackingUpdated(update) => Some(update),
+                _ => None,
+            })
+            .collect()
     }
 
     fn good_obs(doppler_hz: f64) -> ChannelHealthObservation {
@@ -1915,9 +1962,10 @@ mod tests {
         assert_eq!(config.acquisition.noncoherent_integrations, 10);
         assert_eq!(config.acquisition.max_acq_prns_per_scan, 5);
         assert_eq!(config.acquisition_ring_ms, 10);
-        assert_eq!(config.chunk_ms, 1);
+        assert_eq!(config.chunk_ms, 20);
         assert_eq!(config.pvt_output_rate_ms, 100);
         assert!(config.average_doppler_over_pvt_epoch);
+        assert!(config.parallel_tracking);
     }
 
     #[test]
@@ -2268,6 +2316,45 @@ mod tests {
             assert_eq!(sequential.prn, parallel.prn);
             assert!((sequential.doppler_hz - parallel.doppler_hz).abs() < f64::EPSILON);
             assert!((sequential.code_phase_chips - parallel.code_phase_chips).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn parallel_tracking_matches_serial_results_in_prn_order() {
+        let fs = 4_000_000.0;
+        let samples = synthetic_signal_ms(5, 1_500.0, 512.0, fs, 10.0, fs as usize / 1000);
+        let mut serial_config = StreamingPvtConfig::cttc_fixed_prns(vec![1, 6]);
+        serial_config.sample_rate_hz = fs;
+        serial_config.parallel_tracking = false;
+        serial_config.channel_admission.probation_good_epochs = 1;
+        serial_config.channel_admission.min_cn0_db_hz = 0.0;
+        serial_config.channel_admission.min_pll_lock_metric = 0.0;
+        let mut parallel_config = serial_config.clone();
+        parallel_config.parallel_tracking = true;
+        let mut serial = StreamingPvtRunner::new(serial_config);
+        let mut parallel = StreamingPvtRunner::new(parallel_config);
+        for runner in [&mut serial, &mut parallel] {
+            runner.accept_acquisition(acq(1, 1_000.0), 1);
+            runner.accept_acquisition(acq(6, 1_500.0), 1);
+        }
+
+        let serial_events = serial.process_tracking_ms(&samples, 2, |_| true, |_| true);
+        let parallel_events = parallel.process_tracking_ms(&samples, 2, |_| true, |_| true);
+        let serial_updates = tracking_updates(&serial_events);
+        let parallel_updates = tracking_updates(&parallel_events);
+
+        assert_eq!(serial_updates.len(), 2);
+        assert_eq!(
+            serial_updates
+                .iter()
+                .map(|update| update.prn)
+                .collect::<Vec<_>>(),
+            vec![1, 6]
+        );
+        for (serial, parallel) in serial_updates.iter().zip(parallel_updates) {
+            assert_eq!(serial.prn, parallel.prn);
+            assert_eq!(serial.state, parallel.state);
+            assert_eq!(serial.output, parallel.output);
         }
     }
 

@@ -1,12 +1,11 @@
 //! Streaming runner smoke test on real CTTC Spain data.
 //!
-//! This intentionally stops early: it verifies that the production streaming
-//! entry point can load optional colocated RINEX nav, acquire the fixed CTTC
-//! PRNs, and advance tracking from the IQ reader without the legacy e2e test
-//! hand-driving those stages.
+//! The default smoke duration is short. `GNSSCOPE_STREAMING_TEST_MS` extends it
+//! into a production-path throughput and navigation/PVT regression run.
 
 use gnss_core::receiver::{ReceiverChannelState, StreamingPvtConfig, StreamingPvtRunner};
 use std::path::Path;
+use std::time::Instant;
 
 const DATA_FILE: &str =
     "../../data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat";
@@ -19,7 +18,15 @@ fn test_streaming_runner_real_data_smoke() {
         return;
     }
 
+    let max_ms = std::env::var("GNSSCOPE_STREAMING_TEST_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(25);
+    let parallel_tracking = std::env::var("GNSSCOPE_PARALLEL_TRACKING")
+        .ok()
+        .is_none_or(|value| value != "0");
     let mut config = StreamingPvtConfig::cttc_spain_real_data(DATA_FILE);
+    config.parallel_tracking = parallel_tracking;
     config.channel_admission.probation_good_epochs = 1;
     config.channel_admission.min_cn0_db_hz = 0.0;
     config.channel_admission.min_pll_lock_metric = 0.0;
@@ -34,11 +41,25 @@ fn test_streaming_runner_real_data_smoke() {
         "RINEX ephemeris catalog should be available for streaming PVT"
     );
 
+    let started = Instant::now();
     let summary = runner
-        .stream_iq_file_until_ms(25, |_| {})
+        .stream_iq_file_until_ms(max_ms, |_| {})
         .expect("stream real CTTC IQ");
+    let elapsed = started.elapsed();
+    eprintln!(
+        "streamed {max_ms} ms in {:.3} s ({:.2}x real time), parallel_tracking={parallel_tracking}",
+        elapsed.as_secs_f64(),
+        elapsed.as_secs_f64() * 1000.0 / max_ms as f64,
+    );
+    eprintln!("event counts: {:?}", summary.event_counts);
+    if let Some(output) = summary.latest_pvt_output.as_ref() {
+        eprintln!(
+            "latest PVT time: GPS week {:?}, SOW {:?}, UTC {:?}",
+            output.time.gps_week, output.time.corrected_gps_time_sow, output.time.utc
+        );
+    }
 
-    assert_eq!(summary.samples_read, 100_000);
+    assert_eq!(summary.samples_read, max_ms * 4_000);
     assert!(summary.event_counts.acquisition_scans_completed >= 1);
     assert!(
         summary.event_counts.acquisition_detections >= 4,
@@ -68,4 +89,24 @@ fn test_streaming_runner_real_data_smoke() {
                 | ReceiverChannelState::Suspect
         )
     }));
+
+    if max_ms >= 60_000 {
+        assert!(summary.event_counts.nav_subframes > 0);
+        assert!(summary.event_counts.pvt_outputs > 0);
+        let time = &summary
+            .latest_pvt_output
+            .expect("latest streaming PVT")
+            .time;
+        assert_eq!(time.gps_week, Some(1734));
+        let utc = time.utc.expect("streaming UTC time");
+        assert_eq!((utc.year, utc.month, utc.day), (2013, 4, 4));
+        if max_ms == 60_000 {
+            assert_eq!((utc.hour, utc.minute), (6, 24));
+            assert!(
+                (utc.second - 7.029).abs() < 0.1,
+                "UTC second: {}",
+                utc.second
+            );
+        }
+    }
 }

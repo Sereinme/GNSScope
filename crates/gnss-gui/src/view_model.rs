@@ -1,4 +1,4 @@
-use gnss_core::pvt::{PvtEpochOutput, PvtEpochSolutionKind};
+use gnss_core::pvt::{PvtEpochOutput, PvtEpochSolutionKind, UtcDateTime};
 
 #[derive(Debug, Clone)]
 pub struct GuiPvtViewModel {
@@ -18,6 +18,8 @@ pub struct GuiPvtTime {
     pub gps_week: Option<u16>,
     pub receiver_time_sow: Option<f64>,
     pub corrected_gps_time_sow: Option<f64>,
+    pub utc_unix_seconds: Option<f64>,
+    pub utc: Option<UtcDateTime>,
     pub receiver_clock_bias_us: f64,
     pub receiver_clock_drift_ppm: Option<f64>,
 }
@@ -63,6 +65,8 @@ impl GuiPvtViewModel {
                 gps_week: output.time.gps_week,
                 receiver_time_sow: output.time.receiver_time_sow,
                 corrected_gps_time_sow: output.time.corrected_gps_time_sow,
+                utc_unix_seconds: output.time.utc_unix_seconds,
+                utc: output.time.utc,
                 receiver_clock_bias_us: output.time.receiver_clock_bias_s * 1e6,
                 receiver_clock_drift_ppm: output
                     .time
@@ -115,6 +119,15 @@ mod tests {
                 gps_week: Some(1734),
                 receiver_time_sow: Some(368_658.25),
                 corrected_gps_time_sow: Some(368_658.249_9),
+                utc_unix_seconds: Some(1_365_056_642.249_9),
+                utc: Some(UtcDateTime {
+                    year: 2013,
+                    month: 4,
+                    day: 4,
+                    hour: 6,
+                    minute: 24,
+                    second: 2.249_9,
+                }),
                 transmit_time_sow_min: Some(368_658.17),
                 transmit_time_sow_max: Some(368_658.18),
                 receiver_clock_bias_s: 1.5e-6,
@@ -161,6 +174,7 @@ mod tests {
         assert!((view.longitude_deg - 2.0).abs() < 1e-12);
         assert_eq!(view.time.gps_week, Some(1734));
         assert_eq!(view.time.receiver_clock_bias_us, 1.5);
+        assert_eq!(view.time.utc.map(|utc| utc.year), Some(2013));
         assert_eq!(view.time.receiver_clock_drift_ppm, Some(0.02));
         let velocity = view.velocity.as_ref().unwrap();
         assert_eq!(velocity.horizontal_speed_mps, 5.0);
