@@ -21,8 +21,8 @@ This plan captures the agreed optimization design before changing the receiver p
 
 - `pvt_e2e` reads 60 s at 4 MSPS into `Vec<Complex<f64>>`.
   - 240,000,000 complex samples times 16 bytes is about 3.84 GB before other buffers.
-- Acquisition, fine Doppler, and tracking are currently sequential in the e2e path.
-- The test uses hard-coded GNSS-SDR reference Dopplers and a slow 2 s fine Doppler search.
+- Acquisition and tracking are currently sequential at startup; per-epoch tracking is deterministic parallel.
+- The test now uses 10 ms non-coherent PCPS acquisition Doppler instead of hard-coded GNSS-SDR reference Dopplers and the slow 2 s fine Doppler search.
 - Continuous PVT currently builds epochs at 1 Hz, while the GNSS-SDR CTTC config uses `PVT.output_rate_ms=100`.
 - Position is already close to GNSS-SDR/NMEA reference, but velocity and time are not yet strict GNSS-SDR comparisons.
 
@@ -33,7 +33,7 @@ This plan captures the agreed optimization design before changing the receiver p
 - Replace whole-file IQ loading with streaming reads.
 - Default chunk size is 1 ms.
 - Support `chunk_ms` configuration values of 1, 10, and 20 ms later, but chunks above 1 ms are only batch-read buffers. Tracking still receives 1 ms slices.
-- Preserve current fixed CTTC PRNs and legacy fine Doppler behavior for exact regression.
+- Preserve current fixed CTTC PRNs and legacy fine Doppler behavior for exact regression before Phase C.
 - Keep `Complex<f64>`.
 - Keep current tracking history behavior for result equivalence.
 - Add local memory measurement script or instructions for Windows peak Working Set/Private Bytes.
@@ -59,9 +59,9 @@ Acceptance:
 
 ### Phase C: Replace Legacy Fine Doppler
 
-- Status: PCPS non-coherent integration API is implemented and covered by synthetic and CTTC real-data acquisition tests. The e2e path still keeps legacy fine Doppler until the next migration step.
-- Remove hard-coded `REF_DOPPLERS`.
-- Remove 2 s fine Doppler search and its temporary cache.
+- Status: PCPS non-coherent integration API is implemented and covered by synthetic and CTTC real-data acquisition tests. The e2e path initializes tracking from 10 ms non-coherent PCPS Doppler and no longer uses hard-coded reference Dopplers or the 2 s fine Doppler window.
+- Remove hard-coded `REF_DOPPLERS`. Done in the e2e path.
+- Remove 2 s fine Doppler search and its temporary cache. Done in the e2e path.
 - Extend PCPS acquisition to support non-coherent integration:
   - Use 1 ms coherent PCPS per integration.
   - Accumulate the Doppler/code-phase power grid over `N` integrations, for example 10 ms.

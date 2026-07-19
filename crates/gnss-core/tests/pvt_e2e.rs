@@ -29,19 +29,13 @@ use std::thread::{self, JoinHandle};
 const DATA_FILE: &str =
     "../../data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat";
 const FS: f64 = 4_000_000.0;
-const REF_DOPPLERS: &[(u8, f64)] = &[
-    (1, 7250.0),
-    (11, 5500.0),
-    (17, 9750.0),
-    (20, 8250.0),
-    (32, 6500.0),
-];
+const CTTC_PRNS: &[u8] = &[1, 11, 17, 20, 32];
 const REF_LAT: f64 = 41.2747;
 const REF_LON: f64 = 1.9875;
 const NAV_TOW_TAG_LATENCY_MS: usize = 8 * 20;
 const PROCESS_MS: usize = 60_000;
 const STREAM_CHUNK_MS: usize = 1;
-const LEGACY_FINE_DOPPLER_WINDOW_MS: usize = 2_001;
+const ACQ_NONCOHERENT_MS: usize = 10;
 
 /// One channel's state during the per-ms tracking loop.
 struct Channel {
@@ -107,68 +101,36 @@ fn test_pvt_e2e() {
     // 60 s: need sf 1-3 (each 30 s) for ephemeris; allow time for PLL lock + 3 subframes.
     let total_ms = PROCESS_MS.min(available_ms);
     assert!(
-        total_ms >= LEGACY_FINE_DOPPLER_WINDOW_MS,
-        "need at least {} ms of IQ for legacy fine Doppler, got {} ms",
-        LEGACY_FINE_DOPPLER_WINDOW_MS,
+        total_ms >= ACQ_NONCOHERENT_MS,
+        "need at least {} ms of IQ for non-coherent acquisition, got {} ms",
+        ACQ_NONCOHERENT_MS,
         total_ms
     );
-    let fine_window = read_iq_window_ms(
-        data_path,
-        IqFormat::Int16,
-        LEGACY_FINE_DOPPLER_WINDOW_MS,
-        spm,
-    );
+    let acquisition_window = read_iq_window_ms(data_path, IqFormat::Int16, ACQ_NONCOHERENT_MS, spm);
 
-    // Acquire each PRN and fine-tune Doppler.
+    // Acquire each fixed CTTC PRN. Tracking is initialized from PCPS Doppler;
+    // no GNSS-SDR reference Doppler or 2 s fine Doppler search is used.
     let acq_cfg = PcpsConfig {
         fs: FS,
         doppler_max: 10_000.0,
         doppler_step: 250.0,
-        threshold: 15.0,
+        noncoherent_integrations: ACQ_NONCOHERENT_MS,
+        threshold: 3.0,
         ..Default::default()
     };
     let mut acq = PcpsAcquisition::new(acq_cfg);
 
     let mut channels: Vec<Channel> = Vec::new();
-    for &(prn, ref_dopp) in REF_DOPPLERS {
+    for &prn in CTTC_PRNS {
         let prn_idx = (prn - 1) as usize;
-        let ar = acq.acquire_at_sample(prn_idx, ms_slice(&fine_window, 0, spm), 0);
+        let ar = acq.acquire_at_sample(prn_idx, &acquisition_window, 0);
         if !ar.detected {
             eprintln!("PRN {} not acquired, skipping", prn);
             continue;
         }
-        // Fine Doppler search around the GNSS-SDR reference value.
-        let mut best_dopp = ref_dopp;
-        let mut best_qi = f64::MAX;
-        for offset in (-250..=250).step_by(50) {
-            let init_dopp = ref_dopp + offset as f64;
-            let cfg = TrackingConfig {
-                fs: FS,
-                pll_bw: 50.0,
-                pll_order: 3,
-                dll_bw: 4.0,
-                ..Default::default()
-            };
-            let mut trk = DllPllTracking::new(
-                prn_idx,
-                init_dopp,
-                ar.code_phase_chips,
-                cfg,
-                ar.sample_index,
-            );
-            for ms in 0..2000 {
-                trk.process(ms_slice(&fine_window, ms, spm));
-            }
-            let out = trk.process(ms_slice(&fine_window, 2000, spm));
-            let qi = (out.prompt.im / (out.prompt.re.abs() + 1e-30)).abs();
-            if qi < best_qi {
-                best_qi = qi;
-                best_dopp = init_dopp;
-            }
-        }
         println!(
-            "PRN {}: cp={:.1} | best_dopp={:.0} Q/I={:.3}",
-            prn, ar.code_phase_chips, best_dopp, best_qi
+            "PRN {}: cp={:.1} | acq_dopp={:+.0} peak/mean={:.2}",
+            prn, ar.code_phase_chips, ar.doppler_hz, ar.peak_to_mean
         );
 
         let cfg = TrackingConfig {
@@ -182,7 +144,7 @@ fn test_pvt_e2e() {
             prn,
             trk: DllPllTracking::new(
                 prn_idx,
-                best_dopp,
+                ar.doppler_hz,
                 ar.code_phase_chips,
                 cfg,
                 ar.sample_index,
@@ -1121,12 +1083,6 @@ fn read_iq_exact(reader: &mut IqReader, buffer: &mut [Complex<f64>], count: usiz
         }
         total_read += read;
     }
-}
-
-fn ms_slice(samples: &[Complex<f64>], ms: usize, samples_per_ms: usize) -> &[Complex<f64>] {
-    let start = ms * samples_per_ms;
-    let end = start + samples_per_ms;
-    &samples[start..end]
 }
 
 fn rms(values: &[f64]) -> f64 {
