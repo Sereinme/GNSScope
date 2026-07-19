@@ -8,7 +8,7 @@ use crate::acquisition::{AcquisitionResult, PcpsAcquisition, PcpsConfig};
 use crate::io::{IqFormat, IqReader};
 use crate::nav::RinexNavConfig;
 use crate::pvt::{ContinuousPvtConfig, PvtEpochOutput};
-use crate::tracking::{TrackingConfig, TrackingOutput};
+use crate::tracking::{DllPllTracking, TrackingConfig, TrackingOutput};
 use num_complex::Complex;
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
@@ -113,6 +113,7 @@ pub struct ReceiverChannelSnapshot {
     pub last_doppler_hz: Option<f64>,
     pub last_update_ms: Option<u64>,
     pub pvt_eligible: bool,
+    pub tracking_active: bool,
 }
 
 impl ReceiverChannel {
@@ -244,7 +245,7 @@ impl ChannelManager {
             .collect()
     }
 
-    pub fn snapshots(&self) -> Vec<ReceiverChannelSnapshot> {
+    pub fn snapshots(&self, active_tracking_prns: &[u8]) -> Vec<ReceiverChannelSnapshot> {
         self.channels
             .values()
             .map(|channel| ReceiverChannelSnapshot {
@@ -253,6 +254,7 @@ impl ChannelManager {
                 last_doppler_hz: channel.last_doppler_hz,
                 last_update_ms: channel.last_update_ms,
                 pvt_eligible: channel.state.pvt_eligible(),
+                tracking_active: active_tracking_prns.binary_search(&channel.prn).is_ok(),
             })
             .collect()
     }
@@ -538,9 +540,18 @@ pub struct StreamingAcquisitionScanResult {
 }
 
 #[derive(Debug, Clone)]
+pub struct StreamingTrackingUpdate {
+    pub prn: u8,
+    pub now_ms: u64,
+    pub output: TrackingOutput,
+    pub state: ReceiverChannelState,
+}
+
+#[derive(Debug, Clone)]
 pub enum StreamingPvtEvent {
     AcquisitionScanPlanned(StreamingAcquisitionScan),
     AcquisitionScanCompleted(StreamingAcquisitionScanResult),
+    TrackingUpdated(StreamingTrackingUpdate),
     PvtOutput(Box<PvtEpochOutput>),
 }
 
@@ -577,12 +588,12 @@ impl StreamingPvtRunSummary {
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct StreamingPvtRunner {
     config: StreamingPvtConfig,
     channels: ChannelManager,
     acquisition_scheduler: AcquisitionScheduler,
     acquisition_ring: AcquisitionRingBuffer,
+    active_tracking: BTreeMap<u8, DllPllTracking>,
     next_pvt_output_ms: u64,
 }
 
@@ -601,6 +612,7 @@ impl StreamingPvtRunner {
             channels,
             acquisition_scheduler,
             acquisition_ring,
+            active_tracking: BTreeMap::new(),
             next_pvt_output_ms,
         }
     }
@@ -622,8 +634,12 @@ impl StreamingPvtRunner {
             sample_index: self.acquisition_ring.next_sample_index(),
             next_pvt_output_ms: self.next_pvt_output_ms,
             pvt_output_rate_ms: self.config.pvt_output_rate_ms,
-            channels: self.channels.snapshots(),
+            channels: self.channels.snapshots(&self.active_tracking_prns()),
         }
+    }
+
+    pub fn active_tracking_prns(&self) -> Vec<u8> {
+        self.active_tracking.keys().copied().collect()
     }
 
     pub fn ingest_samples(
@@ -711,11 +727,30 @@ impl StreamingPvtRunner {
         }
     }
 
+    fn tracking_config(&self) -> TrackingConfig {
+        TrackingConfig {
+            fs: self.config.sample_rate_hz,
+            if_freq: self.config.intermediate_frequency_hz,
+            ..self.config.tracking.clone()
+        }
+    }
+
     pub fn accept_acquisition(&mut self, result: AcquisitionResult, now_ms: u64) {
+        if result.detected {
+            let tracker = DllPllTracking::new(
+                (result.prn - 1) as usize,
+                result.doppler_hz,
+                result.code_phase_chips,
+                self.tracking_config(),
+                result.sample_index,
+            );
+            self.active_tracking.insert(result.prn, tracker);
+        }
         self.channels.accept_acquisition(result, now_ms);
     }
 
     pub fn reject_acquisition(&mut self, prn: u8, now_ms: u64) {
+        self.active_tracking.remove(&prn);
         self.channels.reject_acquisition(prn, now_ms);
     }
 
@@ -726,6 +761,49 @@ impl StreamingPvtRunner {
         now_ms: u64,
     ) -> ReceiverChannelState {
         self.channels.observe_tracking(prn, observation, now_ms)
+    }
+
+    pub fn process_tracking_ms(
+        &mut self,
+        samples: &[Complex<f64>],
+        now_ms: u64,
+        nav_time_available: impl Fn(u8) -> bool,
+        ephemeris_available: impl Fn(u8) -> bool,
+    ) -> Vec<StreamingPvtEvent> {
+        let prns = self.active_tracking_prns();
+        let mut events = Vec::with_capacity(prns.len());
+        let mut lost_prns = Vec::new();
+
+        for prn in prns {
+            let output = self
+                .active_tracking
+                .get_mut(&prn)
+                .expect("active PRN should have a tracker")
+                .process(samples);
+            let observation = ChannelHealthObservation::from_tracking_output(
+                &output,
+                nav_time_available(prn),
+                ephemeris_available(prn),
+            );
+            let state = self.channels.observe_tracking(prn, observation, now_ms);
+            if state == ReceiverChannelState::Lost {
+                lost_prns.push(prn);
+            }
+            events.push(StreamingPvtEvent::TrackingUpdated(
+                StreamingTrackingUpdate {
+                    prn,
+                    now_ms,
+                    output,
+                    state,
+                },
+            ));
+        }
+
+        for prn in lost_prns {
+            self.active_tracking.remove(&prn);
+        }
+
+        events
     }
 
     pub fn maybe_emit_pvt(
@@ -1172,6 +1250,7 @@ mod tests {
             .filter_map(|event| match event {
                 StreamingPvtEvent::AcquisitionScanPlanned(scan) => Some(scan),
                 StreamingPvtEvent::AcquisitionScanCompleted(_) => None,
+                StreamingPvtEvent::TrackingUpdated(_) => None,
                 StreamingPvtEvent::PvtOutput(_) => None,
             })
             .collect();
@@ -1185,9 +1264,9 @@ mod tests {
             .flat_map(|step| step.events.iter())
             .filter_map(|event| match event {
                 StreamingPvtEvent::AcquisitionScanCompleted(result) => Some(result),
-                StreamingPvtEvent::AcquisitionScanPlanned(_) | StreamingPvtEvent::PvtOutput(_) => {
-                    None
-                }
+                StreamingPvtEvent::AcquisitionScanPlanned(_)
+                | StreamingPvtEvent::TrackingUpdated(_)
+                | StreamingPvtEvent::PvtOutput(_) => None,
             })
             .collect();
         assert_eq!(completions.len(), 1);
@@ -1222,9 +1301,9 @@ mod tests {
             .iter()
             .find_map(|event| match event {
                 StreamingPvtEvent::AcquisitionScanCompleted(result) => Some(result),
-                StreamingPvtEvent::AcquisitionScanPlanned(_) | StreamingPvtEvent::PvtOutput(_) => {
-                    None
-                }
+                StreamingPvtEvent::AcquisitionScanPlanned(_)
+                | StreamingPvtEvent::TrackingUpdated(_)
+                | StreamingPvtEvent::PvtOutput(_) => None,
             })
             .expect("completed acquisition scan");
         assert_eq!(completed.results.len(), 1);
@@ -1237,6 +1316,51 @@ mod tests {
             runner.channels().state(prn),
             ReceiverChannelState::TrackingProbation
         );
+        assert_eq!(runner.active_tracking_prns(), vec![prn]);
+        let snapshot = runner.state_snapshot();
+        let channel = snapshot
+            .channels
+            .iter()
+            .find(|channel| channel.prn == prn)
+            .expect("PRN snapshot");
+        assert!(channel.tracking_active);
+    }
+
+    #[test]
+    fn streaming_runner_processes_active_tracking_and_promotes_channel() {
+        let fs = 4_000_000.0;
+        let prn_idx = 5;
+        let prn = (prn_idx + 1) as u8;
+        let doppler = 1_500.0;
+        let code_phase = 512.0;
+        let samples =
+            synthetic_signal_ms(prn_idx, doppler, code_phase, fs, 10.0, fs as usize / 1000);
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![prn]);
+        config.sample_rate_hz = fs;
+        config.acquisition.acq_window_ms = 1;
+        config.acquisition.noncoherent_integrations = 1;
+        config.acquisition.cold_acq_interval_ms = 1;
+        config.acquisition.doppler_max_hz = 2_000.0;
+        config.acquisition.doppler_step_hz = 500.0;
+        config.acquisition.threshold = 4.0;
+        config.acquisition_ring_ms = 1;
+        config.channel_admission.probation_good_epochs = 1;
+        config.channel_admission.min_cn0_db_hz = 0.0;
+        let mut runner = StreamingPvtRunner::new(config);
+        runner.ingest_samples(&samples, 1);
+
+        let events = runner.process_tracking_ms(&samples, 2, |_| true, |_| true);
+
+        assert_eq!(events.len(), 1);
+        let StreamingPvtEvent::TrackingUpdated(update) = &events[0] else {
+            panic!("expected tracking update");
+        };
+        assert_eq!(update.prn, prn);
+        assert_eq!(update.now_ms, 2);
+        assert!(update.output.pll_lock_metric > 0.0);
+        assert_eq!(update.state, ReceiverChannelState::Healthy);
+        assert_eq!(runner.channels().state(prn), ReceiverChannelState::Healthy);
+        assert_eq!(runner.channels().pvt_eligible_prns(), vec![prn]);
     }
 
     #[test]
