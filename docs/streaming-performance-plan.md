@@ -292,18 +292,49 @@ Parallelism may change which CPU core computes a channel, but it must not change
 
 Do not put peak-memory assertions inside default Rust unit tests initially.
 
-Add a Windows-friendly local measurement script or documented command that records:
+Use the Windows-friendly local measurement script:
+
+```powershell
+rtk powershell -NoProfile -ExecutionPolicy Bypass -File scripts/measure-pvt-e2e-memory.ps1
+```
+
+It runs:
+
+```text
+cargo test -p gnss-core --test pvt_e2e test_pvt_e2e -- --nocapture
+```
+
+and records:
 
 - peak Working Set
 - peak Private Bytes
 - wall time
 - exit code
+- process tree samples
 
 Use it to compare:
 
 - pre-streaming e2e
 - streaming single-thread e2e
 - deterministic parallel e2e
+
+Default outputs:
+
+```text
+.scratch/pvt_e2e_memory.json
+.scratch/pvt_e2e_memory_stdout.txt
+.scratch/pvt_e2e_memory_stderr.txt
+```
+
+The script should still be launched through `rtk powershell ...` from the shell. It starts `cargo` directly inside the script so Windows process-name sampling can include the `cargo` and `pvt_e2e*` processes.
+
+Current streaming single-thread baseline:
+
+```text
+elapsed_s=242.36
+peak_working_set_mib=194.43
+peak_private_mib=166.77
+```
 
 ## Open Calibration Items
 
