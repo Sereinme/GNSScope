@@ -687,6 +687,7 @@ pub struct StreamingPvtReadStep {
     pub start_sample_index: u64,
     pub samples_read: usize,
     pub now_ms: u64,
+    pub state: StreamingPvtStateSnapshot,
     pub events: Vec<StreamingPvtEvent>,
 }
 
@@ -696,6 +697,8 @@ pub struct StreamingPvtRunSummary {
     pub steps: usize,
     pub events_emitted: usize,
     pub event_counts: StreamingPvtEventCounts,
+    pub final_state: Option<StreamingPvtStateSnapshot>,
+    pub latest_pvt_output: Option<PvtEpochOutput>,
 }
 
 impl StreamingPvtRunSummary {
@@ -706,6 +709,12 @@ impl StreamingPvtRunSummary {
     fn observe_events(&mut self, events: &[StreamingPvtEvent]) {
         self.events_emitted += events.len();
         self.event_counts.observe_events(events);
+        if let Some(output) = events.iter().rev().find_map(|event| match event {
+            StreamingPvtEvent::PvtOutput(output) => Some((**output).clone()),
+            _ => None,
+        }) {
+            self.latest_pvt_output = Some(output);
+        }
     }
 }
 
@@ -1215,10 +1224,13 @@ impl StreamingPvtRunner {
             summary.samples_read += samples_read;
             summary.steps += 1;
             summary.observe_events(&events);
+            let state = self.state_snapshot();
+            summary.final_state = Some(state.clone());
             on_step(StreamingPvtReadStep {
                 start_sample_index,
                 samples_read,
                 now_ms,
+                state,
                 events,
             });
 
@@ -1727,12 +1739,21 @@ mod tests {
         assert_eq!(summary.event_counts.acquisition_scans_completed, 1);
         assert_eq!(summary.event_counts.acquisition_detections, 0);
         assert_eq!(summary.event_counts.tracking_updates, 0);
+        assert_eq!(summary.final_state.as_ref().unwrap().sample_index, 20);
+        assert!(summary.latest_pvt_output.is_none());
         assert_eq!(
             steps
                 .iter()
                 .map(|step| step.start_sample_index)
                 .collect::<Vec<_>>(),
             vec![0, 5, 10, 15]
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.state.sample_index)
+                .collect::<Vec<_>>(),
+            vec![5, 10, 15, 20]
         );
 
         let scans: Vec<&StreamingAcquisitionScan> = steps
@@ -1809,6 +1830,19 @@ mod tests {
         assert_eq!(summary.event_counts.acquisition_detections, 1);
         assert_eq!(summary.event_counts.tracking_updates, 3);
         assert_eq!(summary.event_counts.pvt_outputs, 0);
+        let final_state = summary.final_state.as_ref().expect("final state");
+        let final_channel = final_state
+            .channels
+            .iter()
+            .find(|channel| channel.prn == prn)
+            .expect("PRN channel state");
+        assert!(final_channel.tracking_active);
+        assert!(matches!(
+            final_channel.state,
+            ReceiverChannelState::TrackingProbation
+                | ReceiverChannelState::Healthy
+                | ReceiverChannelState::Suspect
+        ));
         let mut saw_acquisition = false;
         let mut tracking_updates = 0usize;
         for event in steps.iter().flat_map(|step| step.events.iter()) {

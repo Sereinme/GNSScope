@@ -119,7 +119,7 @@ Expected static CTTC behavior:
   - decode nav - bit sync, 20 ms symbol emission, NavDecoder, and EphemerisCollector entry points implemented.
   - build observables - implemented for healthy channel snapshots with TOW history and tracking timestamp inputs.
   - solve continuous PVT - runner entry point implemented.
-  - emit structured results - configured-rate `PvtOutput` event entry point implemented; run summary includes structured acquisition/tracking/nav/PVT event counts.
+  - emit structured results - configured-rate `PvtOutput` event entry point implemented; read steps and run summary include state snapshots, latest PVT output, and structured acquisition/tracking/nav/PVT event counts.
 - Do not include GUI worker, async runtime, multi-constellation, or full UI schema yet.
 
 ### Phase F: Dynamic Acquisition and Reacquisition
