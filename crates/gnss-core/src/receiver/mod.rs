@@ -953,6 +953,7 @@ pub struct StreamingPvtRunner {
     nav_state: StreamingNavState,
     continuous_pvt: ContinuousPvtRunner,
     next_pvt_output_ms: u64,
+    next_pvt_epoch_index: usize,
 }
 
 impl StreamingPvtRunner {
@@ -975,6 +976,7 @@ impl StreamingPvtRunner {
             nav_state: StreamingNavState::default(),
             continuous_pvt,
             next_pvt_output_ms,
+            next_pvt_epoch_index: 0,
         };
         if let Some(path) = runner.config.iq_path.clone() {
             runner.load_configured_rinex_nav_for_iq_path(&path);
@@ -1122,7 +1124,12 @@ impl StreamingPvtRunner {
                 0.0,
             )
         };
-        results.pop().map(|result| result.to_output())
+        results.pop().map(|result| {
+            let mut output = result.to_output();
+            output.epoch_index = self.next_pvt_epoch_index;
+            self.next_pvt_epoch_index += 1;
+            output
+        })
     }
 
     pub fn solve_pvt_epoch_at_latest_sample(&mut self) -> Option<PvtEpochOutput> {
@@ -2659,6 +2666,14 @@ mod tests {
         let receiver_time_sow = output.time.receiver_time_sow.expect("receiver SOW");
         assert!((600.0..601.0).contains(&receiver_time_sow));
         assert_eq!(runner.state_snapshot().next_pvt_output_ms, 200);
+
+        let event = runner
+            .solve_and_maybe_emit_pvt(200)
+            .expect("second PVT output event");
+        let StreamingPvtEvent::PvtOutput(output) = event else {
+            panic!("expected second PVT output");
+        };
+        assert_eq!(output.epoch_index, 1);
     }
 
     #[test]

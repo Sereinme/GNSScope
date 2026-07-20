@@ -412,6 +412,16 @@ impl RunLibrary {
             "UPDATE runs SET status = 'interrupted', message = '应用异常退出，结果不完整' WHERE status = 'processing'",
             [],
         )?;
+        connection.execute(
+            "UPDATE runs
+             SET pvt_epoch_count = (
+                SELECT COUNT(*) FROM epochs WHERE epochs.run_id = runs.id
+             )
+             WHERE pvt_epoch_count != (
+                SELECT COUNT(*) FROM epochs WHERE epochs.run_id = runs.id
+             )",
+            [],
+        )?;
         Ok(Self { connection })
     }
 
@@ -463,6 +473,7 @@ impl RunLibrary {
     pub fn append_epoch(
         &self,
         run_id: Uuid,
+        epoch_ordinal: usize,
         epoch: &GuiPvtViewModel,
         channels: &[GuiChannelStatus],
     ) -> rusqlite::Result<()> {
@@ -470,7 +481,7 @@ impl RunLibrary {
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         self.connection.execute(
             "INSERT OR REPLACE INTO epochs (run_id, epoch_index, snapshot_json) VALUES (?1, ?2, ?3)",
-            params![run_id.to_string(), epoch.epoch_index as i64, snapshot],
+            params![run_id.to_string(), epoch_ordinal as i64, snapshot],
         )?;
         Ok(())
     }
@@ -608,7 +619,7 @@ mod tests {
         let channels = crate::state::sample_channel_statuses();
 
         library
-            .append_epoch(run.id, &epoch, &channels)
+            .append_epoch(run.id, 0, &epoch, &channels)
             .expect("append epoch");
 
         let stored = library.epochs(run.id).expect("load epochs");
@@ -650,5 +661,49 @@ mod tests {
         assert_eq!(restored.quality.n_sats, 5);
         assert_eq!(restored.velocity.expect("legacy velocity").speed_mps, 0.04);
         assert!(stored.channels.is_empty());
+    }
+
+    #[test]
+    fn run_library_does_not_overwrite_repeated_core_epoch_indexes() {
+        let library = RunLibrary::open(":memory:").expect("open in-memory run library");
+        let settings = GuiProcessingSettings {
+            iq_file_path: Some(PathBuf::from("capture.dat")),
+            ..Default::default()
+        };
+        let run = library.create_run(&settings).expect("create run");
+        let first = crate::sample_pvt_view_model();
+        let mut second = first.clone();
+        second.latitude_deg += 0.001;
+
+        library.append_epoch(run.id, 0, &first, &[]).unwrap();
+        library.append_epoch(run.id, 1, &second, &[]).unwrap();
+
+        let stored = library.epochs(run.id).expect("load epochs");
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].latitude_deg, first.latitude_deg);
+        assert_eq!(stored[1].latitude_deg, second.latitude_deg);
+    }
+
+    #[test]
+    fn run_library_reconciles_reported_epoch_count_on_reopen() {
+        let path = std::env::temp_dir().join(format!("gnsscope-runs-{}.sqlite3", Uuid::new_v4()));
+        let settings = GuiProcessingSettings {
+            iq_file_path: Some(PathBuf::from("capture.dat")),
+            ..Default::default()
+        };
+        let library = RunLibrary::open(&path).expect("open run library");
+        let run = library.create_run(&settings).expect("create run");
+        library
+            .append_epoch(run.id, 0, &crate::sample_pvt_view_model(), &[])
+            .unwrap();
+        library
+            .update_progress(run.id, RunStatus::Completed, 100, 100, 810, "complete")
+            .unwrap();
+        drop(library);
+
+        let reopened = RunLibrary::open(&path).expect("reopen run library");
+        assert_eq!(reopened.list_runs().unwrap()[0].pvt_epoch_count, 1);
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
     }
 }

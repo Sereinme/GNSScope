@@ -409,8 +409,9 @@ impl GnsscopeApp {
                 self.status_message = phase;
             }
             WorkerEvent::Epoch { pvt, channels } => {
+                let epoch_ordinal = self.epochs.len();
                 if let Some(library) = &self.library {
-                    let _ = library.append_epoch(run_id, &pvt, &channels);
+                    let _ = library.append_epoch(run_id, epoch_ordinal, &pvt, &channels);
                 }
                 self.channels = channels.clone();
                 self.epoch_channels.push(channels);

@@ -124,3 +124,5 @@ Risk: low to medium. Expected gain is smaller than tracking and ring-buffer work
 ## GUI Gate
 
 The first functional GUI vertical slice now includes the real streaming worker, chunk-boundary cancellation, SQLite run/PVT/channel persistence, PVT-epoch telemetry throttling, historical replay, and a shared epoch cursor, and it passed a complete 100 s CTTC release run plus restart replay. The overall GUI must not be called contract-complete until runtime settings are fully editable, discrete event history is persisted and replayed, satellite geometry is exposed for the sky plot, and a real forced-loss/reacquisition workflow is tested through the GUI worker.
+
+The restart replay regression verifies that the CTTC run stores 810 distinct rows with receiver epoch indexes `0..809`. Persistence uses an independent insertion ordinal, and startup reconciles summary counts with actual rows to expose legacy overwrite damage instead of presenting a disabled one-row timeline as an 810-epoch history.

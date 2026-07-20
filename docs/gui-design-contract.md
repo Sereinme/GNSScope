@@ -36,6 +36,8 @@ The backend and first functional GPUI vertical slice are integrated. `StreamingP
 
 The release GUI was exercised against the complete 100 s CTTC Spain capture using the explicit CTTC preset. It acquired PRNs 1, 11, 17, 20, and 32, persisted 810 PVT epochs, and ended at latitude `41.2748131 deg`, longitude `1.9875802 deg`, altitude `81.116 m`, speed `0.30013 m/s`, clock drift `-5.41427 ppm`, and `2013-04-04 06:24:47.029 UTC`. The preset uses the same relaxed channel-admission parameters and Raw WLS filter configuration as the existing real-data streaming regression; filename matching does not silently apply it.
 
+Streaming PVT epoch identity is monotonic across successive single-epoch solves. SQLite nevertheless uses a GUI-owned insertion ordinal as the epoch primary key rather than trusting a receiver-provided label to be unique. This prevents repeated core indexes from replacing earlier history rows. On startup, stored run summaries are reconciled against the actual epoch row count so older affected records report the recoverable count honestly; rows already replaced by the former schema cannot be reconstructed without reprocessing the IQ file.
+
 This vertical slice is usable but does not yet satisfy the complete interaction contract. Remaining work is explicit:
 
 - extend core PVT output with per-satellite azimuth/elevation before drawing real sky markers; the current sky plot shows an unavailable state instead of fabricated geometry;
