@@ -29,4 +29,6 @@ pub use state::{GuiChannelStatus, GuiReceiverStatus, GuiReceiverWorkspaceState, 
 pub use view_model::{
     GuiPvtQuality, GuiPvtTime, GuiPvtVelocity, GuiPvtViewModel, GuiSatelliteGeometry,
 };
-pub use worker::{spawn_streaming_worker, ActiveWorker, WorkerEvent};
+pub use worker::{
+    spawn_streaming_worker, ActiveWorker, GuiDiagnosticEvent, GuiDiagnosticEventKind, WorkerEvent,
+};

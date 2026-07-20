@@ -1,6 +1,7 @@
 use crate::{
-    spawn_streaming_worker, ActiveWorker, GuiChannelStatus, GuiProcessingSettings, GuiPvtViewModel,
-    GuiSatelliteGeometry, ProcessingRun, RunLibrary, RunStatus, StoredEpoch, WorkerEvent,
+    spawn_streaming_worker, ActiveWorker, GuiChannelStatus, GuiDiagnosticEvent,
+    GuiDiagnosticEventKind, GuiProcessingSettings, GuiPvtViewModel, GuiSatelliteGeometry,
+    ProcessingRun, RunLibrary, RunStatus, StoredEpoch, WorkerEvent,
 };
 use gpui::prelude::*;
 use gpui::{
@@ -129,6 +130,8 @@ pub struct GnsscopeApp {
     epoch_channels: Vec<Vec<GuiChannelStatus>>,
     historical_epochs: Vec<GuiPvtViewModel>,
     historical_channels: Vec<Vec<GuiChannelStatus>>,
+    diagnostic_events: Vec<GuiDiagnosticEvent>,
+    historical_diagnostic_events: Vec<GuiDiagnosticEvent>,
     selected_epoch: Option<usize>,
     timeline: Entity<SliderState>,
     follow_live: bool,
@@ -195,6 +198,12 @@ impl GnsscopeApp {
             .iter()
             .map(StoredEpoch::to_view_model)
             .collect::<Vec<_>>();
+        let historical_diagnostic_events = initial_run_id
+            .and_then(|id| library.as_ref().and_then(|library| library.events(id).ok()))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|event| event.to_view_model())
+            .collect();
         let selected_epoch = historical_epochs.len().checked_sub(1);
         let mut app = Self {
             settings,
@@ -211,6 +220,8 @@ impl GnsscopeApp {
             epoch_channels: Vec::new(),
             historical_epochs,
             historical_channels,
+            diagnostic_events: Vec::new(),
+            historical_diagnostic_events,
             selected_epoch,
             timeline,
             follow_live: true,
@@ -276,6 +287,7 @@ impl GnsscopeApp {
                         this.selected_run_id = None;
                         this.historical_epochs.clear();
                         this.historical_channels.clear();
+                        this.historical_diagnostic_events.clear();
                         this.selected_epoch = None;
                         this.status_message = "IQ 文件已就绪".to_string();
                         cx.notify();
@@ -294,6 +306,81 @@ impl GnsscopeApp {
         };
         self.settings = GuiProcessingSettings::cttc_spain(path);
         self.status_message = "已应用 CTTC Spain 4 Msps / Int16 预设".to_string();
+    }
+
+    fn adjust_setting(&mut self, field: &'static str, direction: i32) {
+        if self.selected_run_id.is_some() || self.active_run.is_some() {
+            return;
+        }
+        let settings = &mut self.settings;
+        match field {
+            "chunk_ms" => {
+                settings.chunk_ms = (settings.chunk_ms as i32 + direction).clamp(1, 100) as usize
+            }
+            "pvt_output_rate_ms" => {
+                settings.pvt_output_rate_ms =
+                    (settings.pvt_output_rate_ms as i32 + direction * 100).clamp(100, 10_000) as u64
+            }
+            "acquisition_window_ms" => {
+                settings.acquisition_window_ms =
+                    (settings.acquisition_window_ms as i32 + direction).clamp(1, 100) as usize
+            }
+            "acquisition_noncoherent_integrations" => {
+                settings.acquisition_noncoherent_integrations =
+                    (settings.acquisition_noncoherent_integrations as i32 + direction).clamp(1, 50)
+                        as usize
+            }
+            "acquisition_threshold" => {
+                settings.acquisition_threshold =
+                    (settings.acquisition_threshold + direction as f64 * 0.1).clamp(1.0, 20.0)
+            }
+            "reacquisition_interval_ms" => {
+                settings.reacquisition_interval_ms = (settings.reacquisition_interval_ms as i32
+                    + direction * 100)
+                    .clamp(100, 60_000) as u64
+            }
+            "dll_bandwidth_hz" => {
+                settings.dll_bandwidth_hz =
+                    (settings.dll_bandwidth_hz + direction as f64 * 0.5).clamp(0.1, 20.0)
+            }
+            "pll_bandwidth_hz" => {
+                settings.pll_bandwidth_hz =
+                    (settings.pll_bandwidth_hz + direction as f64).clamp(1.0, 200.0)
+            }
+            "minimum_pll_lock_metric" => {
+                settings.minimum_pll_lock_metric =
+                    (settings.minimum_pll_lock_metric + direction as f64 * 0.05).clamp(0.0, 1.0)
+            }
+            "minimum_cn0_db_hz" => {
+                settings.minimum_cn0_db_hz =
+                    (settings.minimum_cn0_db_hz + direction as f64).clamp(0.0, 60.0)
+            }
+            "cn0_samples" => {
+                settings.cn0_samples =
+                    (settings.cn0_samples as i32 + direction).clamp(1, 200) as usize
+            }
+            _ => {}
+        }
+    }
+
+    fn toggle_setting(&mut self, field: &'static str) {
+        if self.selected_run_id.is_some() || self.active_run.is_some() {
+            return;
+        }
+        match field {
+            "average_doppler_over_pvt_epoch" => {
+                self.settings.average_doppler_over_pvt_epoch =
+                    !self.settings.average_doppler_over_pvt_epoch
+            }
+            "carrier_aiding" => self.settings.carrier_aiding = !self.settings.carrier_aiding,
+            "parallel_acquisition" => {
+                self.settings.parallel_acquisition = !self.settings.parallel_acquisition
+            }
+            "parallel_tracking" => {
+                self.settings.parallel_tracking = !self.settings.parallel_tracking
+            }
+            _ => {}
+        }
     }
 
     fn enqueue(&mut self) {
@@ -346,6 +433,7 @@ impl GnsscopeApp {
         self.channels.clear();
         self.epochs.clear();
         self.epoch_channels.clear();
+        self.diagnostic_events.clear();
         self.selected_epoch = None;
         self.follow_live = true;
         self.status_message = "初始化接收机".to_string();
@@ -356,6 +444,50 @@ impl GnsscopeApp {
             worker.cancel();
             self.status_message = "将在当前数据块结束后取消".to_string();
         }
+    }
+
+    fn cancel_queued(&mut self, id: Uuid) {
+        let Some(index) = self.queue.iter().position(|run| run.id == id) else {
+            return;
+        };
+        let run = self.queue.remove(index).expect("queued run index");
+        if let Some(library) = &self.library {
+            let _ = library.update_progress(id, RunStatus::Cancelled, 0, 0, 0, "排队任务已取消");
+            self.history = library.list_runs().unwrap_or_default();
+        }
+        if self.selected_run_id == Some(id) {
+            self.selected_run_id = None;
+        }
+        self.status_message = format!(
+            "已取消排队任务 {}",
+            run.source_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        );
+    }
+
+    fn delete_historical_run(&mut self, id: Uuid) {
+        if self.active_run.as_ref().is_some_and(|run| run.id == id) {
+            return;
+        }
+        let Some(library) = &self.library else {
+            return;
+        };
+        if library.delete_run(id).is_err() {
+            self.status_message = "无法删除历史运行".to_string();
+            return;
+        }
+        self.history = library.list_runs().unwrap_or_default();
+        self.queue.retain(|run| run.id != id);
+        if self.selected_run_id == Some(id) {
+            self.selected_run_id = None;
+            self.historical_epochs.clear();
+            self.historical_channels.clear();
+            self.historical_diagnostic_events.clear();
+            self.selected_epoch = None;
+        }
+        self.status_message = "历史运行已删除，源 IQ 文件未修改".to_string();
     }
 
     fn drain_worker_events(&mut self) {
@@ -423,6 +555,12 @@ impl GnsscopeApp {
             }
             WorkerEvent::Channels(channels) => {
                 self.channels = channels;
+            }
+            WorkerEvent::Diagnostic(event) => {
+                if let Some(library) = &self.library {
+                    let _ = library.append_event(run_id, self.diagnostic_events.len(), &event);
+                }
+                self.diagnostic_events.push(event);
             }
             WorkerEvent::Cancelled {
                 processed_samples,
@@ -545,6 +683,14 @@ impl GnsscopeApp {
             .map(StoredEpoch::channel_view_models)
             .collect();
         self.historical_epochs = stored.iter().map(StoredEpoch::to_view_model).collect();
+        self.historical_diagnostic_events = self
+            .library
+            .as_ref()
+            .and_then(|library| library.events(id).ok())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|event| event.to_view_model())
+            .collect();
         self.selected_epoch = self.historical_epochs.len().checked_sub(1);
     }
 
@@ -579,6 +725,14 @@ impl GnsscopeApp {
         self.selected_run()
             .map(|run| &run.settings)
             .unwrap_or(&self.settings)
+    }
+
+    fn display_diagnostic_events(&self) -> &[GuiDiagnosticEvent] {
+        if self.selected_run_id.is_some() && self.selected_run_id == self.live_run_id {
+            &self.diagnostic_events
+        } else {
+            &self.historical_diagnostic_events
+        }
     }
 
     fn file_label(&self) -> SharedString {
@@ -771,19 +925,38 @@ impl GnsscopeApp {
                             .child(format!("等待队列  {}", self.queue.len())),
                     )
                     .children(self.queue.iter().map(|run| {
+                        let id = run.id;
                         div()
                             .mb(px(5.))
                             .px(px(9.))
-                            .py(px(8.))
+                            .py(px(6.))
                             .rounded(px(5.))
                             .bg(palette.surface_alt)
-                            .text_size(px(11.))
+                            .flex()
+                            .items_center()
+                            .justify_between()
                             .child(
-                                run.source_path
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .into_owned(),
+                                div()
+                                    .max_w(px(145.))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_size(px(11.))
+                                    .child(
+                                        run.source_path
+                                            .file_name()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .into_owned(),
+                                    ),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("cancel-queued-{id}")))
+                                    .ghost()
+                                    .label("取消")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.cancel_queued(id);
+                                        cx.notify();
+                                    })),
                             )
                     }))
                     .child(
@@ -868,6 +1041,16 @@ impl GnsscopeApp {
                                                 run.pvt_epoch_count,
                                                 run.progress * 100.0
                                             )),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!("delete-run-{id}")))
+                                            .ghost()
+                                            .text_color(palette.muted)
+                                            .label("删除")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.delete_historical_run(id);
+                                                cx.notify();
+                                            })),
                                     )
                             }),
                     ),
@@ -1041,6 +1224,7 @@ impl GnsscopeApp {
 
     fn render_config_drawer(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = self.display_settings();
+        let editable = self.selected_run_id.is_none() && self.active_run.is_none();
         div()
             .w(px(470.))
             .h_full()
@@ -1150,6 +1334,213 @@ impl GnsscopeApp {
                         )
                 }),
             )
+            .children(editable.then(|| {
+                div()
+                    .mt(px(20.))
+                    .pt(px(14.))
+                    .border_t_1()
+                    .border_color(palette.border)
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(palette.text)
+                            .child("可编辑运行参数"),
+                    )
+                    .child(self.render_setting_stepper(
+                        "读取 chunk",
+                        format!("{} ms", self.settings.chunk_ms),
+                        "chunk_ms",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_stepper(
+                        "PVT 输出 epoch",
+                        format!("{} ms", self.settings.pvt_output_rate_ms),
+                        "pvt_output_rate_ms",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_toggle(
+                        "epoch 多普勒平均",
+                        self.settings.average_doppler_over_pvt_epoch,
+                        "average_doppler_over_pvt_epoch",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_stepper(
+                        "捕获窗口",
+                        format!("{} ms", self.settings.acquisition_window_ms),
+                        "acquisition_window_ms",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_stepper(
+                        "捕获阈值",
+                        format!("{:.1}", self.settings.acquisition_threshold),
+                        "acquisition_threshold",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_stepper(
+                        "重捕获周期",
+                        format!("{} ms", self.settings.reacquisition_interval_ms),
+                        "reacquisition_interval_ms",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_stepper(
+                        "DLL 带宽",
+                        format!("{:.1} Hz", self.settings.dll_bandwidth_hz),
+                        "dll_bandwidth_hz",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_stepper(
+                        "PLL 带宽",
+                        format!("{:.1} Hz", self.settings.pll_bandwidth_hz),
+                        "pll_bandwidth_hz",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_stepper(
+                        "非相干累加",
+                        format!("{} 次", self.settings.acquisition_noncoherent_integrations),
+                        "acquisition_noncoherent_integrations",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_stepper(
+                        "最低 C/N0",
+                        format!("{:.1} dB-Hz", self.settings.minimum_cn0_db_hz),
+                        "minimum_cn0_db_hz",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_stepper(
+                        "PLL lock 阈值",
+                        format!("{:.2}", self.settings.minimum_pll_lock_metric),
+                        "minimum_pll_lock_metric",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_stepper(
+                        "C/N0 窗长",
+                        format!("{} samples", self.settings.cn0_samples),
+                        "cn0_samples",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_toggle(
+                        "载波辅助码环",
+                        self.settings.carrier_aiding,
+                        "carrier_aiding",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_toggle(
+                        "并行捕获",
+                        self.settings.parallel_acquisition,
+                        "parallel_acquisition",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_toggle(
+                        "并行跟踪",
+                        self.settings.parallel_tracking,
+                        "parallel_tracking",
+                        palette,
+                        cx,
+                    ))
+            }))
+    }
+
+    fn render_setting_stepper(
+        &self,
+        label: &'static str,
+        value: String,
+        field: &'static str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .mt(px(10.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(palette.muted)
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(
+                        Button::new(SharedString::from(format!("{field}-down")))
+                            .ghost()
+                            .label("-")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.adjust_setting(field, -1);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .w(px(100.))
+                            .text_center()
+                            .text_size(px(10.))
+                            .text_color(palette.text)
+                            .child(value),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("{field}-up")))
+                            .ghost()
+                            .label("+")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.adjust_setting(field, 1);
+                                cx.notify();
+                            })),
+                    ),
+            )
+    }
+
+    fn render_setting_toggle(
+        &self,
+        label: &'static str,
+        enabled: bool,
+        field: &'static str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .mt(px(10.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(palette.muted)
+                    .child(label),
+            )
+            .child(
+                Button::new(SharedString::from(format!("{field}-toggle")))
+                    .ghost()
+                    .text_color(if enabled {
+                        palette.healthy
+                    } else {
+                        palette.muted
+                    })
+                    .label(if enabled { "开启" } else { "关闭" })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_setting(field);
+                        cx.notify();
+                    })),
+            )
     }
 
     fn render_overview(&self, palette: Palette) -> impl IntoElement {
@@ -1214,6 +1605,10 @@ impl GnsscopeApp {
                 "稳定通道 C/N0",
                 "仅显示 Healthy PRN",
                 cn0_plot(channels, palette),
+                palette,
+            )))
+            .child(div().mt(px(12.)).child(receiver_event_history(
+                self.display_diagnostic_events(),
                 palette,
             )))
             .child(
@@ -1513,6 +1908,77 @@ fn sky_plot_position(azimuth_deg: f64, elevation_deg: f64) -> Option<(f32, f32)>
         0.5 + SKY_PLOT_RADIUS_FRACTION * radial_fraction * azimuth_rad.sin() as f32,
         0.5 - SKY_PLOT_RADIUS_FRACTION * radial_fraction * azimuth_rad.cos() as f32,
     ))
+}
+
+fn receiver_event_history(events: &[GuiDiagnosticEvent], palette: Palette) -> impl IntoElement {
+    let recent = events.iter().rev().take(8).cloned().collect::<Vec<_>>();
+    div()
+        .rounded(px(6.))
+        .bg(palette.surface)
+        .border_1()
+        .border_color(palette.border)
+        .p(px(14.))
+        .child(GnsscopeApp::section_title(
+            "接收机事件",
+            format!("{} 条离散事件", events.len()),
+            palette,
+        ))
+        .children(if recent.is_empty() {
+            vec![div()
+                .mt(px(10.))
+                .text_size(px(11.))
+                .text_color(palette.muted)
+                .child("暂无捕获、重捕获、锁定或导航事件")
+                .into_any_element()]
+        } else {
+            recent
+                .into_iter()
+                .map(|event| {
+                    let color = match event.kind {
+                        GuiDiagnosticEventKind::Acquisition
+                        | GuiDiagnosticEventKind::Reacquisition
+                        | GuiDiagnosticEventKind::Navigation => palette.healthy,
+                        GuiDiagnosticEventKind::AcquisitionFailed
+                        | GuiDiagnosticEventKind::ReacquisitionFailed => palette.warning,
+                        GuiDiagnosticEventKind::ChannelState => palette.accent,
+                    };
+                    div()
+                        .mt(px(8.))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .text_size(px(10.))
+                        .child(
+                            div()
+                                .w(px(52.))
+                                .text_color(palette.muted)
+                                .child(format!("{} ms", event.now_ms)),
+                        )
+                        .child(
+                            div().w(px(32.)).text_color(color).child(
+                                event
+                                    .prn
+                                    .map_or_else(|| "--".to_string(), |prn| format!("G{:02}", prn)),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .w(px(110.))
+                                .text_color(color)
+                                .child(event.kind.as_str()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_color(palette.muted)
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(event.detail),
+                        )
+                        .into_any_element()
+                })
+                .collect()
+        })
 }
 
 fn cardinal_label(label: &'static str, x: f32, y: f32, palette: Palette) -> impl IntoElement {

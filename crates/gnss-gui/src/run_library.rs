@@ -1,6 +1,6 @@
 use crate::{
-    GuiChannelStatus, GuiProcessingSettings, GuiPvtQuality, GuiPvtTime, GuiPvtVelocity,
-    GuiPvtViewModel, GuiSatelliteGeometry,
+    GuiChannelStatus, GuiDiagnosticEvent, GuiDiagnosticEventKind, GuiProcessingSettings,
+    GuiPvtQuality, GuiPvtTime, GuiPvtVelocity, GuiPvtViewModel, GuiSatelliteGeometry,
 };
 use chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc};
 use directories::ProjectDirs;
@@ -154,6 +154,39 @@ pub struct StoredSatellite {
     pub pseudorange_sigma_m: f64,
     pub used_in_solution: bool,
     pub raim_excluded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredDiagnosticEvent {
+    pub now_ms: u64,
+    pub sample_index: u64,
+    pub prn: Option<u8>,
+    pub kind: String,
+    pub detail: String,
+}
+
+impl From<&GuiDiagnosticEvent> for StoredDiagnosticEvent {
+    fn from(value: &GuiDiagnosticEvent) -> Self {
+        Self {
+            now_ms: value.now_ms,
+            sample_index: value.sample_index,
+            prn: value.prn,
+            kind: value.kind.as_str().to_string(),
+            detail: value.detail.clone(),
+        }
+    }
+}
+
+impl StoredDiagnosticEvent {
+    pub fn to_view_model(&self) -> Option<GuiDiagnosticEvent> {
+        Some(GuiDiagnosticEvent {
+            now_ms: self.now_ms,
+            sample_index: self.sample_index,
+            prn: self.prn,
+            kind: GuiDiagnosticEventKind::parse(&self.kind)?,
+            detail: self.detail.clone(),
+        })
+    }
 }
 
 impl StoredEpoch {
@@ -453,6 +486,13 @@ impl RunLibrary {
                 PRIMARY KEY (run_id, epoch_index),
                 FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
              );
+             CREATE TABLE IF NOT EXISTS run_events (
+                run_id TEXT NOT NULL,
+                event_index INTEGER NOT NULL,
+                event_json TEXT NOT NULL,
+                PRIMARY KEY (run_id, event_index),
+                FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+             );
              CREATE TABLE IF NOT EXISTS preferences (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -520,6 +560,12 @@ impl RunLibrary {
         Ok(())
     }
 
+    pub fn delete_run(&self, id: Uuid) -> rusqlite::Result<()> {
+        self.connection
+            .execute("DELETE FROM runs WHERE id = ?1", [id.to_string()])?;
+        Ok(())
+    }
+
     pub fn append_epoch(
         &self,
         run_id: Uuid,
@@ -532,6 +578,21 @@ impl RunLibrary {
         self.connection.execute(
             "INSERT OR REPLACE INTO epochs (run_id, epoch_index, snapshot_json) VALUES (?1, ?2, ?3)",
             params![run_id.to_string(), epoch_ordinal as i64, snapshot],
+        )?;
+        Ok(())
+    }
+
+    pub fn append_event(
+        &self,
+        run_id: Uuid,
+        event_ordinal: usize,
+        event: &GuiDiagnosticEvent,
+    ) -> rusqlite::Result<()> {
+        let snapshot = serde_json::to_string(&StoredDiagnosticEvent::from(event))
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        self.connection.execute(
+            "INSERT OR REPLACE INTO run_events (run_id, event_index, event_json) VALUES (?1, ?2, ?3)",
+            params![run_id.to_string(), event_ordinal as i64, snapshot],
         )?;
         Ok(())
     }
@@ -589,6 +650,21 @@ impl RunLibrary {
             })
             .collect();
         epochs
+    }
+
+    pub fn events(&self, run_id: Uuid) -> rusqlite::Result<Vec<StoredDiagnosticEvent>> {
+        let mut statement = self.connection.prepare(
+            "SELECT event_json FROM run_events WHERE run_id = ?1 ORDER BY event_index ASC",
+        )?;
+        let events = statement
+            .query_map([run_id.to_string()], |row| row.get::<_, String>(0))?
+            .map(|json| {
+                json.and_then(|json| {
+                    serde_json::from_str(&json).map_err(|_| rusqlite::Error::InvalidQuery)
+                })
+            })
+            .collect();
+        events
     }
 
     pub fn preference(&self, key: &str) -> rusqlite::Result<Option<String>> {
@@ -697,6 +773,64 @@ mod tests {
                 .map(|velocity| velocity.speed_mps),
             epoch.velocity.as_ref().map(|velocity| velocity.speed_mps)
         );
+    }
+
+    #[test]
+    fn run_library_round_trips_discrete_receiver_events() {
+        let library = RunLibrary::open(":memory:").expect("open in-memory run library");
+        let settings = GuiProcessingSettings {
+            iq_file_path: Some(PathBuf::from("capture.dat")),
+            ..Default::default()
+        };
+        let run = library.create_run(&settings).expect("create run");
+        let event = GuiDiagnosticEvent {
+            now_ms: 1_250,
+            sample_index: 5_000,
+            prn: Some(17),
+            kind: GuiDiagnosticEventKind::Reacquisition,
+            detail: "Doppler -4321 Hz · metric 4.20".to_string(),
+        };
+
+        library
+            .append_event(run.id, 0, &event)
+            .expect("append event");
+
+        let stored = library.events(run.id).expect("load events");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].kind, "reacquisition");
+        assert_eq!(stored[0].to_view_model(), Some(event));
+    }
+
+    #[test]
+    fn deleting_run_cascades_epochs_and_events() {
+        let library = RunLibrary::open(":memory:").expect("open in-memory run library");
+        let settings = GuiProcessingSettings {
+            iq_file_path: Some(PathBuf::from("capture.dat")),
+            ..Default::default()
+        };
+        let run = library.create_run(&settings).expect("create run");
+        library
+            .append_epoch(run.id, 0, &crate::sample_pvt_view_model(), &[])
+            .unwrap();
+        library
+            .append_event(
+                run.id,
+                0,
+                &GuiDiagnosticEvent {
+                    now_ms: 20,
+                    sample_index: 0,
+                    prn: Some(1),
+                    kind: GuiDiagnosticEventKind::Acquisition,
+                    detail: "detected".to_string(),
+                },
+            )
+            .unwrap();
+
+        library.delete_run(run.id).expect("delete run");
+
+        assert!(library.list_runs().unwrap().is_empty());
+        assert!(library.epochs(run.id).unwrap().is_empty());
+        assert!(library.events(run.id).unwrap().is_empty());
     }
 
     #[test]

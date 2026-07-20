@@ -7,19 +7,20 @@ Date: 2026-07-20
 - The production `StreamingPvtRunner` processes the 60 s CTTC capture in 14.39 s in a release build with parallel tracking, versus 37.98 s with serial tracking.
 - The parallel run acquires five PRNs, emits 299,955 tracking updates, decodes 32 navigation subframes, and produces 410 PVT outputs.
 - The final time is GPS week 1734, SOW 368663.029, or 2013-04-04 06:24:07.029 UTC.
-- `cargo test --workspace` passes 177 tests with 1 ignored test.
+- GUI event/persistence tests pass; the latest workspace run reported 188 passed tests with 1 ignored test. The complete CTTC GUI run persisted 810 epochs and 113 discrete acquisition, channel-state, and navigation events.
 
 This is a single-machine CTTC baseline, not a cross-platform benchmark. No CPU profiler or current peak-memory capture has been recorded, so the optimization list below is ranked from code inspection and must be measured before implementation.
 
 ## Not Implemented
 
-### Required for functional GUI integration
+### Remaining GUI integration work
 
-- A receiver worker that owns `StreamingPvtRunner` and maps `StreamingPvtReadStep` and `StreamingPvtEvent` into `GuiReceiverEvent`.
-- Cancellation and worker shutdown. Pause/resume semantics are also undefined.
-- GUI settings for `chunk_ms`, `pvt_output_rate_ms`, Doppler epoch averaging, parallel acquisition, and parallel tracking.
-- GUI-visible reacquisition state, counters, and recovery history.
-- Event backpressure between the processing worker and GUI thread. Persisted channel diagnostics are aligned to the PVT output epoch; internal 1 ms tracking events must not be forwarded individually to the GUI.
+- Field-level validation and expert controls for navigation policy, ambiguity resolution, Kalman/Hatch parameters, and maximum acquisition PRNs.
+- Historical search/filter/delete/reveal actions and queued-run reorder/cancel controls.
+- Plot focus, sky-marker hover details, PRN linking/pinning, and automated GPUI screenshot coverage.
+- Persist Raw, Smoothed, and Kalman candidate solutions alongside the selected PVT output.
+
+The current worker owns `StreamingPvtRunner`, supports cooperative cancellation, maps discrete acquisition/reacquisition/channel-state/navigation events into GUI events, persists them without forwarding every millisecond tracking update, and exposes the main runtime settings through draft-only stepper/toggle controls.
 
 ### Receiver hardening and later scope
 

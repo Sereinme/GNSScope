@@ -32,7 +32,7 @@ This document defines the first GUI boundary before wiring gpui widgets. The GUI
 
 ## Current Readiness
 
-The backend and first functional GPUI vertical slice are integrated. `StreamingPvtRunner` runs on a single background worker with bounded IQ reads, deterministic parallel acquisition/tracking, cooperative chunk-boundary cancellation, and PVT-epoch channel telemetry. The GPUI workspace persists immutable run/configuration snapshots, complete selected PVT view models, per-satellite WLS geometry, and epoch-aligned channel snapshots in SQLite. Completed runs restore PVT, UTC, ENU, velocity, quality, sky geometry, and C/N0 after application restart; the shared timeline switches every view to the same epoch, manual movement exits live follow, and Return to live restores the active cursor. System/Light/Dark preference is stored independently from receiver configuration.
+The backend and first functional GPUI vertical slice are integrated. `StreamingPvtRunner` runs on a single background worker with bounded IQ reads, deterministic parallel acquisition/tracking, cooperative chunk-boundary cancellation, and PVT-epoch channel telemetry. The GPUI workspace persists immutable run/configuration snapshots, complete selected PVT view models, per-satellite WLS geometry, epoch-aligned channel snapshots, and discrete acquisition/tracking/navigation events in SQLite. Completed runs restore PVT, UTC, ENU, velocity, quality, sky geometry, C/N0, and receiver-event history after application restart; the shared timeline switches every view to the same epoch, manual movement exits live follow, and Return to live restores the active cursor. System/Light/Dark preference is stored independently from receiver configuration.
 
 The release GUI was exercised against the complete 100 s CTTC Spain capture using the explicit CTTC preset after satellite-geometry persistence was added. It acquired PRNs 1, 11, 17, 20, and 32, persisted 810 PVT epochs, produced real sky geometry from the first solved epoch onward, restored the final five-satellite plot after restart, and ended at latitude `41.2748131 deg`, longitude `1.9875802 deg`, altitude `81.116 m`, speed `0.30013 m/s`, clock drift `-5.41427 ppm`, and `2013-04-04 06:24:47.029 UTC`. The preset uses the same relaxed channel-admission parameters and Raw WLS filter configuration as the existing real-data streaming regression; filename matching does not silently apply it.
 
@@ -42,9 +42,8 @@ The sky plot consumes the selected position solution's final WLS satellite diagn
 
 This vertical slice is usable but does not yet satisfy the complete interaction contract. Remaining work is explicit:
 
-- persist discrete acquisition/loss/reacquisition/navigation events between PVT epochs and expose them in historical diagnostics;
 - persist Raw, Smoothed, and Kalman candidates instead of only the selected solution;
-- replace the secondary-configuration summary with editable standard/expert controls and validation;
+- add field-level validation and expert controls for the remaining receiver settings;
 - implement historical search/filter/delete/reveal actions, queued-run reorder/cancel, plot focus, sky-marker hover details, and PRN linking/pinning;
 - verify responsive sidebar collapse/plot stacking and add automated GPUI screenshot tests.
 
@@ -240,6 +239,7 @@ Current GUI-facing Rust modules:
 - `gnss_gui::GuiNavSourceStatus`: resolved navigation source status for GUI settings and processing diagnostics.
 - `gnss_gui::GuiProcessingSettings`: receiver settings and navigation-file policy.
 - `gnss_gui::GuiPvtViewModel`: position, velocity, time, quality, and per-satellite WLS geometry display model.
+- `gnss_gui::GuiDiagnosticEvent`: persisted acquisition, reacquisition, channel-state, and navigation event model.
 - `gnss_gui::GuiReceiverWorkspaceState`: processing lifecycle, settings validation, latest PVT, and channels.
 - `gnss_gui::ReceiverWorkspaceLayout`: first-screen panel layout.
 - `gnss_gui::build_receiver_workspace_screen`: structured pre-render screen model with typed controls, metrics, and channel tables.

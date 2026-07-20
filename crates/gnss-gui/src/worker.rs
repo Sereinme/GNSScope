@@ -10,6 +10,50 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuiDiagnosticEventKind {
+    Acquisition,
+    AcquisitionFailed,
+    Reacquisition,
+    ReacquisitionFailed,
+    ChannelState,
+    Navigation,
+}
+
+impl GuiDiagnosticEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Acquisition => "acquisition",
+            Self::AcquisitionFailed => "acquisition_failed",
+            Self::Reacquisition => "reacquisition",
+            Self::ReacquisitionFailed => "reacquisition_failed",
+            Self::ChannelState => "channel_state",
+            Self::Navigation => "navigation",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "acquisition" => Some(Self::Acquisition),
+            "acquisition_failed" => Some(Self::AcquisitionFailed),
+            "reacquisition" => Some(Self::Reacquisition),
+            "reacquisition_failed" => Some(Self::ReacquisitionFailed),
+            "channel_state" => Some(Self::ChannelState),
+            "navigation" => Some(Self::Navigation),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiDiagnosticEvent {
+    pub now_ms: u64,
+    pub sample_index: u64,
+    pub prn: Option<u8>,
+    pub kind: GuiDiagnosticEventKind,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum WorkerEvent {
     Started {
@@ -25,6 +69,7 @@ pub enum WorkerEvent {
         channels: Vec<GuiChannelStatus>,
     },
     Channels(Vec<GuiChannelStatus>),
+    Diagnostic(GuiDiagnosticEvent),
     Cancelled {
         processed_samples: u64,
         total_samples: u64,
@@ -93,6 +138,7 @@ fn run_streaming_worker(
     let mut buffer = vec![Complex::new(0.0, 0.0); chunk_samples];
     let mut processed_samples = 0_u64;
     let mut channels = BTreeMap::<u8, GuiChannelStatus>::new();
+    let mut channel_states = BTreeMap::<u8, ReceiverChannelState>::new();
     let mut acquired_prns = BTreeSet::new();
     let mut nav_subframes = 0_usize;
     let mut pvt_epochs = 0_usize;
@@ -120,14 +166,46 @@ fn run_streaming_worker(
         for event in events {
             match event {
                 StreamingPvtEvent::AcquisitionScanCompleted(scan) => {
-                    acquired_prns.extend(
-                        scan.results
-                            .iter()
-                            .filter(|result| result.detected)
-                            .map(|result| result.prn),
-                    );
+                    let now_ms = (processed_samples as f64 * 1_000.0 / settings.sample_rate_hz)
+                        .round() as u64;
+                    for result in scan.results {
+                        let seen_before = acquired_prns.contains(&result.prn);
+                        let kind = match (seen_before, result.detected) {
+                            (false, true) => GuiDiagnosticEventKind::Acquisition,
+                            (false, false) => GuiDiagnosticEventKind::AcquisitionFailed,
+                            (true, true) => GuiDiagnosticEventKind::Reacquisition,
+                            (true, false) => GuiDiagnosticEventKind::ReacquisitionFailed,
+                        };
+                        if result.detected {
+                            acquired_prns.insert(result.prn);
+                        }
+                        let _ = sender.send(WorkerEvent::Diagnostic(GuiDiagnosticEvent {
+                            now_ms,
+                            sample_index: scan.scan.sample_index,
+                            prn: Some(result.prn),
+                            kind,
+                            detail: if result.detected {
+                                format!(
+                                    "Doppler {:+.0} Hz · metric {:.2}",
+                                    result.doppler_hz, result.peak_to_mean
+                                )
+                            } else {
+                                format!("未过阈值 · metric {:.2}", result.peak_to_mean)
+                            },
+                        }));
+                    }
                 }
                 StreamingPvtEvent::TrackingUpdated(update) => {
+                    let previous_state = channel_states.insert(update.prn, update.state);
+                    if previous_state != Some(update.state) {
+                        let _ = sender.send(WorkerEvent::Diagnostic(GuiDiagnosticEvent {
+                            now_ms: update.now_ms,
+                            sample_index: processed_samples,
+                            prn: Some(update.prn),
+                            kind: GuiDiagnosticEventKind::ChannelState,
+                            detail: format!("{:?} -> {:?}", previous_state, update.state),
+                        }));
+                    }
                     let healthy = update.state == ReceiverChannelState::Healthy;
                     channels.insert(
                         update.prn,
@@ -145,7 +223,19 @@ fn run_streaming_worker(
                         },
                     );
                 }
-                StreamingPvtEvent::NavSubframeDecoded(_) => nav_subframes += 1,
+                StreamingPvtEvent::NavSubframeDecoded(decoded) => {
+                    nav_subframes += 1;
+                    let _ = sender.send(WorkerEvent::Diagnostic(GuiDiagnosticEvent {
+                        now_ms: decoded.now_ms,
+                        sample_index: decoded.rx_sample,
+                        prn: Some(decoded.prn),
+                        kind: GuiDiagnosticEventKind::Navigation,
+                        detail: format!(
+                            "子帧 {} · TOW count {}",
+                            decoded.subframe_id, decoded.tow_count
+                        ),
+                    }));
+                }
                 StreamingPvtEvent::PvtOutput(output) => {
                     pvt_epochs += 1;
                     let _ = sender.send(WorkerEvent::Epoch {
