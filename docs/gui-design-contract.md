@@ -45,9 +45,9 @@ Continuous PVT applies a terrestrial position-quality gate before a mathematical
 This vertical slice is usable but does not yet satisfy the complete interaction contract. Remaining work is explicit:
 
 - expose the now-persisted Raw, Smoothed, and Kalman candidates in an expert comparison UI;
-- add field-level validation and expert controls for the remaining receiver settings;
+- add editable expert controls for navigation policy and Kalman/Hatch internals; complete receiver-field validation is already enforced before queueing;
 - implement historical search/filter/delete/reveal actions, queued-run reorder/cancel, plot focus, sky-marker hover details, and PRN linking/pinning;
-- verify responsive sidebar collapse/plot stacking and add automated GPUI screenshot tests.
+- extend visual regression beyond the implemented desktop, compact-drawer, and narrow screenshot matrix when additional panels are introduced.
 
 The first GUI exposes only configuration fields that are implemented and behaviorally active in the receiver. Signal type currently offers only GPS L1 C/A. It does not expose a nonfunctional FLL-assist toggle or invented NWPR coherent/noncoherent counts; current C/N0 controls map to the implemented prompt-window length and smoothing factor. Planned receiver capabilities remain in development documentation until their backend behavior and tests exist.
 
@@ -90,7 +90,9 @@ The main workspace is a single scrollable overview rather than top-level `Overvi
 
 Major plots expose a focus command that temporarily expands one visualization to the work area and restores the overview without losing the selected run, epoch, PRN, or live-follow state. Segmented controls inside a plot may change its analytical mode; they do not replace top-level navigation.
 
-The recommended initial window is `1440 x 900` and the minimum usable desktop layout is approximately `1180 x 720`. A client-decorated `gpui-component::TitleBar` provides the draggable region, double-click maximize/restore behavior, and native minimize, maximize/restore, and close controls. Below the wide layout, the run sidebar collapses to a temporary drawer, sky/position plots stack vertically, metric grids reflow, and the secondary-settings drawer overlays rather than compresses charts. Typography does not shrink to force content into narrow widths; vertical scrolling and plot-focus mode preserve legibility. Mobile layout is outside the first release scope.
+The recommended initial window is `1440 x 900`. A client-decorated `gpui-component::TitleBar` provides the draggable region, double-click maximize/restore behavior, and native minimize, maximize/restore, and close controls. Below `1180 px`, sky/position and velocity/altitude plots stack and metric rows reflow; the settings drawer narrows from `470 px` to `340 px`. Below `840 px`, the run library becomes a bounded, vertically scrollable top region so the main workspace retains usable plot width. Typography does not shrink to force content into narrow widths; vertical scrolling and plot-focus mode preserve legibility. The fixed epoch bar stays outside the main scroll container at every breakpoint. Mobile layout is outside the first release scope.
+
+`GNSSCOPE_WINDOW_WIDTH`, `GNSSCOPE_WINDOW_HEIGHT`, and the test-only startup switch `GNSSCOPE_OPEN_SETTINGS` make visual states deterministic. `scripts/capture-gui-layouts.ps1` builds the release GUI, captures desktop, compact-drawer, and narrow windows directly by native window handle, verifies nonempty PNG output, and terminates each spawned process. Generated images live under ignored `artifacts/gui-layouts/`.
 
 ## Processing Run Sidebar
 
@@ -194,6 +196,7 @@ Application state must distinguish `active_run_id` from `selected_run_id`. Recei
 
 - Status lifecycle: idle, ready, processing, completed, failed.
 - `settings_issues` drives disabled processing controls and inline validation messages.
+- Queue creation normalizes dataset compatibility settings first, then runs the same authoritative validation used by the state model and settings drawer; configuration builders no longer silently make an invalid draft appear runnable.
 - `progress_fraction` is a normalized 0-1 processing progress value.
 - `latest_pvt` is the newest `GuiPvtViewModel`.
 - `channels` feeds the channel diagnostics panel.

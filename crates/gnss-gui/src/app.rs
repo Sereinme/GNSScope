@@ -1,7 +1,7 @@
 use crate::{
     spawn_streaming_worker, ActiveWorker, GuiChannelStatus, GuiDiagnosticEvent,
-    GuiProcessingSettings, GuiPvtViewModel, GuiSatelliteGeometry, ProcessingRun, RunLibrary,
-    RunStatus, StoredEpoch, WorkerEvent,
+    GuiProcessingSettings, GuiPvtViewModel, GuiSatelliteGeometry, GuiSettingsIssue, ProcessingRun,
+    RunLibrary, RunStatus, StoredEpoch, WorkerEvent,
 };
 use gpui::prelude::*;
 use gpui::{
@@ -302,7 +302,8 @@ impl GnsscopeApp {
             follow_live: true,
             theme_preference,
             system_dark: cx.theme().mode.is_dark(),
-            settings_open: false,
+            settings_open: std::env::var("GNSSCOPE_OPEN_SETTINGS")
+                .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
             timeline_visible,
             status_message: "请选择 IQ 文件开始解算".to_string(),
         };
@@ -475,15 +476,15 @@ impl GnsscopeApp {
     }
 
     fn enqueue(&mut self) {
-        if !self.settings.is_ready_to_process() {
-            self.status_message = "请先选择有效的 IQ 文件".to_string();
+        self.settings = self.settings.normalized_for_processing();
+        if let Some(issue) = crate::state::validate_settings(&self.settings).first() {
+            self.status_message = format!("{}: {}", issue.field, issue.message);
             return;
         }
         let Some(library) = &self.library else {
             self.status_message = "运行记录数据库不可用".to_string();
             return;
         };
-        self.settings = self.settings.normalized_for_processing();
         match library.create_run(&self.settings) {
             Ok(run) => {
                 self.history.insert(0, run.clone());
@@ -867,6 +868,14 @@ impl GnsscopeApp {
             .unwrap_or(&self.settings)
     }
 
+    fn settings_issues(&self) -> Vec<GuiSettingsIssue> {
+        crate::state::validate_settings(&self.display_settings().normalized_for_processing())
+    }
+
+    fn can_enqueue(&self) -> bool {
+        self.active_run.is_none() && self.settings_issues().is_empty()
+    }
+
     fn file_label(&self) -> SharedString {
         self.selected_run()
             .map(|run| &run.source_path)
@@ -968,7 +977,12 @@ impl GnsscopeApp {
             )
     }
 
-    fn render_sidebar(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_sidebar(
+        &self,
+        palette: Palette,
+        stacked: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let history_query = self.history_search.read(cx).value().to_string();
         let active = self.active_run.as_ref().map(|run| {
             div()
@@ -1010,11 +1024,13 @@ impl GnsscopeApp {
                 )
         });
         div()
-            .w(px(258.))
-            .min_w(px(220.))
-            .h_full()
+            .when(!stacked, |this| {
+                this.w(px(258.)).min_w(px(220.)).h_full().border_r_1()
+            })
+            .when(stacked, |this| {
+                this.w_full().h(px(210.)).flex_shrink_0().border_b_1()
+            })
             .bg(palette.sidebar)
-            .border_r_1()
             .border_color(palette.border)
             .flex()
             .flex_col()
@@ -1396,6 +1412,7 @@ impl GnsscopeApp {
                             } else {
                                 "开始解算"
                             })
+                            .disabled(!self.can_enqueue())
                             .on_click(cx.listener(|this, _, _, _| this.enqueue_selected_or_draft()))
                     }),
             )
@@ -1483,11 +1500,17 @@ impl GnsscopeApp {
             )
     }
 
-    fn render_config_drawer(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_config_drawer(
+        &self,
+        palette: Palette,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let settings = self.display_settings();
+        let issues = self.settings_issues();
         let editable = self.selected_run_id.is_none() && self.active_run.is_none();
         div()
-            .w(px(470.))
+            .w(if compact { px(340.) } else { px(470.) })
             .flex_shrink_0()
             .h_full()
             .overflow_y_scrollbar()
@@ -1538,6 +1561,20 @@ impl GnsscopeApp {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.apply_cttc_preset();
                         cx.notify();
+                    }))
+            }))
+            .children((!issues.is_empty()).then(|| {
+                div()
+                    .mt(px(14.))
+                    .p(px(10.))
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(palette.danger)
+                    .children(issues.iter().map(|issue| {
+                        div()
+                            .text_size(px(10.))
+                            .text_color(palette.danger)
+                            .child(format!("{}: {}", issue.field, issue.message))
                     }))
             }))
             .child(
@@ -1783,49 +1820,66 @@ impl GnsscopeApp {
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let issue = crate::state::validate_settings(&self.settings)
+            .into_iter()
+            .find(|issue| issue.field == field);
         div()
             .mt(px(10.))
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .text_size(px(10.))
-                    .text_color(palette.muted)
-                    .child(label),
-            )
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(5.))
+                    .justify_between()
                     .child(
-                        Button::new(SharedString::from(format!("{field}-down")))
-                            .ghost()
-                            .label("-")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.adjust_setting(field, -1);
-                                cx.notify();
-                            })),
+                        div()
+                            .text_size(px(10.))
+                            .text_color(if issue.is_some() {
+                                palette.danger
+                            } else {
+                                palette.muted
+                            })
+                            .child(label),
                     )
                     .child(
                         div()
-                            .w(px(100.))
-                            .text_center()
-                            .text_size(px(10.))
-                            .text_color(palette.text)
-                            .child(value),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("{field}-up")))
-                            .ghost()
-                            .label("+")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.adjust_setting(field, 1);
-                                cx.notify();
-                            })),
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .child(
+                                Button::new(SharedString::from(format!("{field}-down")))
+                                    .ghost()
+                                    .label("-")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.adjust_setting(field, -1);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .w(px(100.))
+                                    .text_center()
+                                    .text_size(px(10.))
+                                    .text_color(palette.text)
+                                    .child(value),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("{field}-up")))
+                                    .ghost()
+                                    .label("+")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.adjust_setting(field, 1);
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             )
+            .children(issue.map(|issue| {
+                div()
+                    .mt(px(3.))
+                    .text_size(px(9.))
+                    .text_color(palette.danger)
+                    .child(issue.message)
+            }))
     }
 
     fn render_setting_toggle(
@@ -1863,7 +1917,12 @@ impl GnsscopeApp {
             )
     }
 
-    fn render_overview(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_overview(
+        &self,
+        palette: Palette,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let epochs = self.display_epochs();
         let channels = self.display_channels();
         let pvt = self.current_pvt();
@@ -1949,7 +2008,7 @@ impl GnsscopeApp {
             .child(
                 div()
                     .grid()
-                    .grid_cols(2)
+                    .grid_cols(if compact { 1 } else { 2 })
                     .gap(px(12.))
                     .child(self.plot_panel(
                         "卫星天空图",
@@ -1990,7 +2049,7 @@ impl GnsscopeApp {
                 div()
                     .mt(px(12.))
                     .grid()
-                    .grid_cols(2)
+                    .grid_cols(if compact { 1 } else { 2 })
                     .gap(px(12.))
                     .child(self.plot_panel(
                         "速度与钟漂",
@@ -2035,6 +2094,7 @@ impl GnsscopeApp {
                         div()
                             .mt(px(10.))
                             .flex()
+                            .when(compact, |this| this.flex_col())
                             .child(Self::metric("纬度", latitude, "°", palette))
                             .child(Self::metric("经度", longitude, "°", palette))
                             .child(Self::metric("高程", altitude, "m", palette)),
@@ -2042,6 +2102,7 @@ impl GnsscopeApp {
                     .child(
                         div()
                             .flex()
+                            .when(compact, |this| this.flex_col())
                             .child(Self::metric("三维速度", speed, "m/s", palette))
                             .child(Self::metric("钟漂", clock, "ppm", palette))
                             .child(Self::metric("HDOP", hdop, "", palette)),
@@ -2156,8 +2217,11 @@ impl GnsscopeApp {
 }
 
 impl Render for GnsscopeApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = self.palette();
+        let viewport_width = f32::from(window.viewport_size().width);
+        let compact = viewport_width < 1_180.0;
+        let stacked_sidebar = viewport_width < 840.0;
         div()
             .size_full()
             .bg(palette.background)
@@ -2171,7 +2235,8 @@ impl Render for GnsscopeApp {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(self.render_sidebar(palette, cx))
+                    .when(stacked_sidebar, |this| this.flex_col())
+                    .child(self.render_sidebar(palette, stacked_sidebar, cx))
                     .child(
                         div()
                             .flex_1()
@@ -2193,7 +2258,7 @@ impl Render for GnsscopeApp {
                                             .min_h_0()
                                             .overflow_y_scrollbar()
                                             .child(self.render_progress(palette))
-                                            .child(self.render_overview(palette, cx)),
+                                            .child(self.render_overview(palette, compact, cx)),
                                     )
                                     .children(
                                         self.timeline_visible
@@ -2202,7 +2267,7 @@ impl Render for GnsscopeApp {
                             )
                             .children(
                                 self.settings_open
-                                    .then(|| self.render_config_drawer(palette, cx)),
+                                    .then(|| self.render_config_drawer(palette, compact, cx)),
                             ),
                     ),
             )

@@ -164,10 +164,7 @@ impl GuiProcessingSettings {
     }
 
     pub fn is_ready_to_process(&self) -> bool {
-        self.iq_file_path.is_some()
-            && self.sample_rate_hz.is_finite()
-            && self.sample_rate_hz > 0.0
-            && self.intermediate_frequency_hz.is_finite()
+        crate::state::validate_settings(self).is_empty()
     }
 
     pub fn streaming_pvt_config(&self) -> StreamingPvtConfig {

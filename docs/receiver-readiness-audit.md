@@ -15,9 +15,9 @@ This is a single-machine CTTC baseline, not a cross-platform benchmark. No CPU p
 
 ### Remaining GUI integration work
 
-- Field-level validation and expert controls for navigation policy, ambiguity resolution, Kalman/Hatch parameters, and maximum acquisition PRNs.
+- Field-level validation now blocks invalid drafts and reports the exact offending field for input sampling, Nyquist IF, chunk/PVT cadence, acquisition scheduling and Doppler grid, tracking loops, C/N0 estimation, channel admission, fixed PRNs, and the initial LLA prior. Expert controls for navigation policy and Kalman/Hatch internals remain future UI work.
 - Historical search/filter/delete/reveal actions and queued-run reorder/cancel controls are implemented; queue UUID order is persisted in preferences across restarts.
-- Plot focus, sky-marker hover details, and shared sky/C/N0 PRN linking/pinning are implemented; automated GPUI screenshot coverage remains pending.
+- Plot focus, sky-marker hover details, and shared sky/C/N0 PRN linking/pinning are implemented. Deterministic screenshot coverage now launches `1440 x 900`, `1100 x 800` with the settings drawer open, and `800 x 720` layouts through `scripts/capture-gui-layouts.ps1`; window-handle capture avoids occlusion from unrelated desktop windows.
 - Candidate comparison UI is still pending; Raw, Smoothed, and Kalman candidates are now carried through `PvtEpochOutput`, the GUI view model, and backward-compatible epoch JSON persistence.
 
 The current worker owns `StreamingPvtRunner`, supports cooperative cancellation, maps discrete acquisition/reacquisition/channel-state/navigation events into GUI events, persists them without forwarding every millisecond tracking update, and exposes the main runtime settings through draft-only stepper/toggle controls.
@@ -32,7 +32,7 @@ The current worker owns `StreamingPvtRunner`, supports cooperative cancellation,
 
 ## Implemented but Not Fully Tested
 
-- Re-entry into PVT after forced loss is not yet asserted, but real CTTC IQ now covers forced `Lost`, a detected `Reacquisition` scan, and restored tracking through `TrackingProbation`/`Healthy`.
+- Real CTTC IQ covers established tracking, forced `Lost`, a detected `Reacquisition` scan, and restored tracking through `TrackingProbation`/`Healthy`. Re-entry into PVT after deliberately losing enough simultaneous channels remains a separate stress case.
 - Failed reacquisition repeated over multiple configured intervals on real data.
 - Dynamic cold acquisition and reacquisition across all 32 GPS L1 C/A PRNs on real data. CTTC validates a fixed five-PRN set.
 - Automated serial-versus-parallel equality for the complete real-data PVT stream. Tracking-step equality is tested, and manual 60 s runs produced matching event counts and final time.
