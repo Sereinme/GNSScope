@@ -42,9 +42,25 @@ The current worker owns `StreamingPvtRunner`, supports cooperative cancellation,
 - Peak working set/private bytes for the current bounded streaming implementation.
 - Position, velocity, clock drift, and time accuracy across front ends and datasets other than CTTC.
 
-## Position Outlier Gate
+## Position Outlier Diagnosis
 
-The 100 s CTTC GUI history exposed 201 mathematically converged four-satellite WLS epochs with physically impossible altitude, including epochs around `1.12-2.10 Mm`. Their post-fit residuals were near zero because four pseudoranges exactly determine the four WLS unknowns, so residual-only RAIM cannot identify the bad measurement without redundancy. `ContinuousPvtRunner` now rejects candidates outside the configured terrestrial altitude profile or beyond the configured inter-epoch motion envelope before velocity and filtering. A 100 s release streaming regression passes with no converged output outside the altitude gate. The GUI also applies the altitude gate when reading legacy SQLite rows so old outliers no longer distort ENU or altitude history.
+The 100 s CTTC GUI history exposed 201 mathematically converged four-satellite WLS epochs with physically impossible altitude, including epochs around `1.12-2.10 Mm`. Four satellites are sufficient for the four unknowns `x/y/z/clock bias`, but provide no residual redundancy: an incorrect four-satellite pseudorange combination can therefore have an almost-zero post-fit residual without being physically correct.
+
+The receiver did have five healthy tracking channels. Each PVT epoch is formed at one common receiver sample from the latest PVT-eligible observation of every channel; it is not formed only from whichever channel happened to finish its 1 ms tracking update last. The failure occurred after epoch formation: inconsistent integer-millisecond code ambiguities made the initial five-satellite residual large, then RAIM sometimes excluded the wrong satellite and left an exactly determined bad four-satellite set.
+
+The production fix enables integer-millisecond ambiguity resolution for the CTTC preset and uses the last accepted position as the next WLS/ambiguity-resolution numerical prior. This preserves per-epoch observations while selecting the physically continuous ambiguity branch. The terrestrial altitude and inter-epoch motion gates remain final safety nets before velocity and filtering. In the 100 s release regression, 721 outputs converge, 99.72% of them use all five satellites, and no converged output violates the altitude gate. The GUI also applies the gate when reading legacy SQLite rows so old outliers no longer distort ENU or altitude history.
+
+## CTTC Altitude Comparison
+
+The supplied GNSS-SDR NMEA/KML files are reference receiver solutions, not surveyed ground truth. GNSS-SDR writes WGS84 ellipsoidal height to GGA for this artifact: its geoid separation is fixed to `0.0 m`, so its height unit and datum match GNSScope. The dataset configuration uses a 100 ms output period, `averaging_depth=10`, and arithmetic moving averaging.
+
+On the same 100 s capture:
+
+- GNSS-SDR NMEA/KML: 739 samples, mean `57.965 m`, population sigma `5.563 m`, range `42.8-71.3 m`.
+- GNSScope raw WLS: 721 converged samples, mean `77.280 m`, population sigma `11.701 m`.
+- GNSScope 10-point moving average: 712 samples, mean `77.349 m`, population sigma `5.797 m`.
+
+The apparently large GUI sigma was therefore mainly a raw-versus-averaged comparison. Under the same 10-point display average, the sigmas differ by `0.234 m`. A remaining mean offset of about `19.4 m` is real and must not be hidden by averaging, but the supplied GNSS-SDR trajectory cannot establish which solution is absolutely correct. A diagnostic run with GNSScope ionosphere and troposphere corrections disabled moved the 10-point mean farther away, to `83.570 m`; the implemented atmospheric corrections have the correct net direction and reduce this offset by about `6.2 m`. Surveyed antenna coordinates or an independent reference receiver are still required to quantify absolute vertical bias.
 
 ## Runtime Optimization Candidates
 

@@ -198,7 +198,7 @@ impl GuiProcessingSettings {
             minimum_pll_lock_metric: 0.0,
             enable_carrier_smoothing: false,
             enable_kalman: false,
-            enable_integer_ms_ambiguity_resolution: false,
+            enable_integer_ms_ambiguity_resolution: true,
             fixed_prns: Some(fixed_prns),
             ..Default::default()
         }
@@ -342,6 +342,6 @@ mod tests {
         assert_eq!(config.channel_admission.min_pll_lock_metric, 0.0);
         assert!(config.continuous_pvt.hatch.is_none());
         assert!(config.continuous_pvt.kalman.is_none());
-        assert!(config.continuous_pvt.integer_ms_ambiguity.is_none());
+        assert!(config.continuous_pvt.integer_ms_ambiguity.is_some());
     }
 }

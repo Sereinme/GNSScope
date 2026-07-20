@@ -575,6 +575,8 @@ impl StreamingPvtConfig {
         config.acquisition.max_acq_prns_per_scan = Self::CTTC_SPAIN_GPS_L1_CA_PRNS.len();
         config.acquisition.threshold = 3.0;
         config.acquisition_ring_ms = 10;
+        config.continuous_pvt.integer_ms_ambiguity =
+            Some(crate::pvt::IntegerMsAmbiguityConfig::default());
         config
     }
 
@@ -1973,6 +1975,7 @@ mod tests {
         assert_eq!(config.pvt_output_rate_ms, 100);
         assert!(config.average_doppler_over_pvt_epoch);
         assert!(config.parallel_tracking);
+        assert!(config.continuous_pvt.integer_ms_ambiguity.is_some());
     }
 
     #[test]

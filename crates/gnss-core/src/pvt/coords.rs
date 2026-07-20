@@ -63,7 +63,7 @@ mod tests {
     use super::*;
     use std::f64::consts::PI;
 
-    /// CTTC Spain reference position: 41.2747°N, 1.9875°E, alt 52.4 m.
+    /// Round-trip a representative CTTC GNSS-SDR NMEA sample.
     #[test]
     fn test_cttc_round_trip() {
         let lat = 41.2747_f64.to_radians();

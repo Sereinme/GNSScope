@@ -2124,8 +2124,11 @@ fn altitude_plot(
         .filter(|(_, pvt)| pvt_position_is_displayable(pvt))
         .map(|(index, pvt)| (index as f64, pvt.altitude_m))
         .collect::<Vec<_>>();
-    line_plot(
+    let averaged_points = moving_average_points(&points, 10);
+    line_plot_with_secondary(
         points,
+        palette.muted,
+        averaged_points,
         palette.accent,
         palette,
         selected_epoch.map(|index| index as f64),
@@ -2133,32 +2136,74 @@ fn altitude_plot(
 }
 
 fn altitude_statistics(epochs: &[GuiPvtViewModel]) -> String {
-    let values = epochs
+    let points = epochs
         .iter()
-        .filter(|pvt| pvt_position_is_displayable(pvt))
-        .map(|pvt| pvt.altitude_m)
+        .enumerate()
+        .filter(|(_, pvt)| pvt_position_is_displayable(pvt))
+        .map(|(index, pvt)| (index as f64, pvt.altitude_m))
         .collect::<Vec<_>>();
+    let values = points.iter().map(|point| point.1).collect::<Vec<_>>();
     if values.is_empty() {
         return "等待有效高度".to_string();
     }
+    let (mean, standard_deviation) = mean_and_population_sigma(&values);
+    let averaged = moving_average_points(&points, 10)
+        .into_iter()
+        .map(|point| point.1)
+        .collect::<Vec<_>>();
+    let averaged_sigma = (!averaged.is_empty()).then(|| mean_and_population_sigma(&averaged).1);
+    let minimum = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let maximum = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    match averaged_sigma {
+        Some(averaged_sigma) => format!(
+            "均值 {:.1} m · 原始 σ {:.1} m · 10 点 σ {:.1} m · {:.1}–{:.1} m",
+            mean, standard_deviation, averaged_sigma, minimum, maximum
+        ),
+        None => format!(
+            "均值 {:.1} m · 原始 σ {:.1} m · {:.1}–{:.1} m",
+            mean, standard_deviation, minimum, maximum
+        ),
+    }
+}
+
+fn mean_and_population_sigma(values: &[f64]) -> (f64, f64) {
     let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let standard_deviation = (values
+    let sigma = (values
         .iter()
         .map(|value| (value - mean).powi(2))
         .sum::<f64>()
         / values.len() as f64)
         .sqrt();
-    let minimum = values.iter().copied().fold(f64::INFINITY, f64::min);
-    let maximum = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    format!(
-        "均值 {:.1} m · σ {:.1} m · {:.1}–{:.1} m",
-        mean, standard_deviation, minimum, maximum
-    )
+    (mean, sigma)
+}
+
+fn moving_average_points(points: &[(f64, f64)], depth: usize) -> Vec<(f64, f64)> {
+    points
+        .windows(depth)
+        .filter(|window| (window[depth - 1].0 - window[0].0 - (depth - 1) as f64).abs() < 1e-9)
+        .map(|window| {
+            (
+                window[depth - 1].0,
+                window.iter().map(|point| point.1).sum::<f64>() / depth as f64,
+            )
+        })
+        .collect()
 }
 
 fn line_plot(
     points: Vec<(f64, f64)>,
     color: Hsla,
+    palette: Palette,
+    selected_x: Option<f64>,
+) -> impl IntoElement {
+    line_plot_with_secondary(points, color, Vec::new(), color, palette, selected_x)
+}
+
+fn line_plot_with_secondary(
+    points: Vec<(f64, f64)>,
+    color: Hsla,
+    secondary_points: Vec<(f64, f64)>,
+    secondary_color: Hsla,
     palette: Palette,
     selected_x: Option<f64>,
 ) -> impl IntoElement {
@@ -2192,21 +2237,27 @@ fn line_plot(
             let max_y = y_values[high_index];
             let span_x = (max_x - min_x).abs().max(1e-12);
             let span_y = (max_y - min_y).abs().max(1e-12);
-            let mut builder = PathBuilder::stroke(px(1.5));
-            for (index, (x, y)) in points.iter().enumerate() {
-                let px_x =
-                    plot_bounds.origin.x + plot_bounds.size.width * ((*x - min_x) / span_x) as f32;
-                let normalized_y = (y.clamp(min_y, max_y) - min_y) / span_y;
-                let px_y =
-                    plot_bounds.origin.y + plot_bounds.size.height * (1.0 - normalized_y as f32);
-                if index == 0 {
-                    builder.move_to(point(px_x, px_y));
-                } else {
-                    builder.line_to(point(px_x, px_y));
+            let build_path = |series: &[(f64, f64)], width| {
+                let mut builder = PathBuilder::stroke(width);
+                for (index, (x, y)) in series.iter().enumerate() {
+                    let px_x = plot_bounds.origin.x
+                        + plot_bounds.size.width * ((*x - min_x) / span_x) as f32;
+                    let normalized_y = (y.clamp(min_y, max_y) - min_y) / span_y;
+                    let px_y = plot_bounds.origin.y
+                        + plot_bounds.size.height * (1.0 - normalized_y as f32);
+                    if index == 0 {
+                        builder.move_to(point(px_x, px_y));
+                    } else {
+                        builder.line_to(point(px_x, px_y));
+                    }
                 }
-            }
-            if let Ok(path) = builder.build() {
+                builder.build().ok()
+            };
+            if let Some(path) = build_path(&points, px(1.0)) {
                 window.paint_path(path, color);
+            }
+            if let Some(path) = build_path(&secondary_points, px(2.0)) {
+                window.paint_path(path, secondary_color);
             }
             if let Some((x, y)) = selected_x.and_then(|selected_x| {
                 points
@@ -2254,7 +2305,7 @@ mod sky_plot_tests {
 
 #[cfg(test)]
 mod position_quality_tests {
-    use super::{altitude_statistics, pvt_position_is_displayable};
+    use super::{altitude_statistics, moving_average_points, pvt_position_is_displayable};
 
     #[test]
     fn legacy_implausible_altitude_is_excluded_from_position_and_statistics() {
@@ -2267,8 +2318,21 @@ mod position_quality_tests {
         assert!(!pvt_position_is_displayable(&implausible));
         assert_eq!(
             altitude_statistics(&[valid, implausible]),
-            "均值 70.0 m · σ 0.0 m · 70.0–70.0 m"
+            "均值 70.0 m · 原始 σ 0.0 m · 70.0–70.0 m"
         );
+    }
+
+    #[test]
+    fn altitude_moving_average_does_not_bridge_invalid_epoch_gaps() {
+        let points = (0..12)
+            .filter(|index| *index != 5)
+            .map(|index| (index as f64, index as f64))
+            .collect::<Vec<_>>();
+
+        assert_eq!(moving_average_points(&points, 3).first(), Some(&(2.0, 1.0)));
+        assert!(moving_average_points(&points, 3)
+            .iter()
+            .all(|(epoch, _)| *epoch != 6.0 && *epoch != 7.0));
     }
 }
 

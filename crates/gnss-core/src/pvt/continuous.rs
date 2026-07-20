@@ -4,7 +4,7 @@ use crate::nav::ephemeris::{
     ephemeris_map_from_catalog_at_time, EphemerisCatalog, EphemerisMap, EphemerisSelectionConfig,
     IonoParams,
 };
-use crate::pvt::coords::{lla_to_ecef, Ecef};
+use crate::pvt::coords::{ecef_to_lla, lla_to_ecef, Ecef};
 use crate::pvt::kalman::{KalmanConfig, KalmanSolution, PositionVelocityKalman};
 use crate::pvt::pseudorange::{
     from_tracking_timestamp_common_receive_epoch, resolve_integer_ms_ambiguities,
@@ -510,7 +510,11 @@ impl ContinuousPvtRunner {
     ) -> Vec<ContinuousPvtEpochResult> {
         let wls = self.config.wls.clone();
         let apriori_ecef = has_apriori(rx_lat_rad, rx_lon_rad, rx_alt_m)
-            .then(|| lla_to_ecef([rx_lat_rad, rx_lon_rad, rx_alt_m]));
+            .then(|| lla_to_ecef([rx_lat_rad, rx_lon_rad, rx_alt_m]))
+            .or_else(|| self.last_accepted_position.map(|position| position.ecef));
+        let solver_apriori = apriori_ecef
+            .map(ecef_to_lla)
+            .unwrap_or([rx_lat_rad, rx_lon_rad, rx_alt_m]);
         let ambiguity = self.config.integer_ms_ambiguity.clone();
         self.solve_epochs_with_preprocess(
             epochs,
@@ -520,9 +524,9 @@ impl ContinuousPvtRunner {
                     pseudoranges,
                     ephemerides,
                     iono,
-                    rx_lat_rad,
-                    rx_lon_rad,
-                    rx_alt_m,
+                    solver_apriori[0],
+                    solver_apriori[1],
+                    solver_apriori[2],
                     &wls,
                 )
             },
@@ -556,7 +560,11 @@ impl ContinuousPvtRunner {
         let wls = self.config.wls.clone();
         let selection_config = self.config.ephemeris_selection.clone();
         let apriori_ecef = has_apriori(rx_lat_rad, rx_lon_rad, rx_alt_m)
-            .then(|| lla_to_ecef([rx_lat_rad, rx_lon_rad, rx_alt_m]));
+            .then(|| lla_to_ecef([rx_lat_rad, rx_lon_rad, rx_alt_m]))
+            .or_else(|| self.last_accepted_position.map(|position| position.ecef));
+        let solver_apriori = apriori_ecef
+            .map(ecef_to_lla)
+            .unwrap_or([rx_lat_rad, rx_lon_rad, rx_alt_m]);
         let ambiguity = self.config.integer_ms_ambiguity.clone();
         self.solve_epochs_with_preprocess_and_solve(
             epochs,
@@ -569,9 +577,9 @@ impl ContinuousPvtRunner {
                     pseudoranges,
                     ephemerides,
                     iono,
-                    rx_lat_rad,
-                    rx_lon_rad,
-                    rx_alt_m,
+                    solver_apriori[0],
+                    solver_apriori[1],
+                    solver_apriori[2],
                     &wls,
                 )
             },

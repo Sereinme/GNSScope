@@ -13,6 +13,24 @@ use std::time::Instant;
 const DATA_FILE: &str =
     "../../data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat";
 
+fn mean_and_population_sigma(values: &[f64]) -> (f64, f64) {
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let sigma = (values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / values.len() as f64)
+        .sqrt();
+    (mean, sigma)
+}
+
+fn moving_average(values: &[f64], depth: usize) -> Vec<f64> {
+    values
+        .windows(depth)
+        .map(|window| window.iter().sum::<f64>() / depth as f64)
+        .collect()
+}
+
 #[test]
 fn test_streaming_runner_real_data_smoke() {
     let data_path = Path::new(DATA_FILE);
@@ -47,12 +65,18 @@ fn test_streaming_runner_real_data_smoke() {
     let started = Instant::now();
     let position_quality = PositionQualityConfig::default();
     let mut implausible_position_epochs = Vec::new();
+    let mut converged_satellite_counts = Vec::new();
+    let mut converged_altitudes_m = Vec::new();
     let summary = runner
         .stream_iq_file_until_ms(max_ms, |step| {
             implausible_position_epochs.extend(step.events.iter().filter_map(|event| {
                 let StreamingPvtEvent::PvtOutput(output) = event else {
                     return None;
                 };
+                if output.quality.converged {
+                    converged_satellite_counts.push(output.quality.n_sats);
+                    converged_altitudes_m.push(output.lla_rad[2]);
+                }
                 (output.quality.converged
                     && !(position_quality.min_altitude_m..=position_quality.max_altitude_m)
                         .contains(&output.lla_rad[2]))
@@ -117,6 +141,34 @@ fn test_streaming_runner_real_data_smoke() {
             .expect("latest streaming PVT")
             .time;
         assert_eq!(time.gps_week, Some(1734));
+        let five_satellite_fraction = converged_satellite_counts
+            .iter()
+            .filter(|count| **count == 5)
+            .count() as f64
+            / converged_satellite_counts.len() as f64;
+        assert!(
+            five_satellite_fraction >= 0.99,
+            "expected at least 99% five-satellite converged CTTC solutions, got {:.2}%",
+            five_satellite_fraction * 100.0
+        );
+        let (altitude_mean_m, altitude_sigma_m) = mean_and_population_sigma(&converged_altitudes_m);
+        let averaged_altitudes_m = moving_average(&converged_altitudes_m, 10);
+        let (averaged_altitude_mean_m, averaged_altitude_sigma_m) =
+            mean_and_population_sigma(&averaged_altitudes_m);
+        eprintln!(
+            "CTTC altitude: raw n={} mean={altitude_mean_m:.3} m sigma={altitude_sigma_m:.3} m; 10-point n={} mean={averaged_altitude_mean_m:.3} m sigma={averaged_altitude_sigma_m:.3} m; five-satellite={:.2}%",
+            converged_altitudes_m.len(),
+            averaged_altitudes_m.len(),
+            five_satellite_fraction * 100.0,
+        );
+        assert!(
+            altitude_sigma_m < 20.0,
+            "raw CTTC altitude sigma unexpectedly large: {altitude_sigma_m:.3} m"
+        );
+        assert!(
+            averaged_altitude_sigma_m < altitude_sigma_m,
+            "10-point averaging should reduce CTTC altitude sigma: raw={altitude_sigma_m:.3} m averaged={averaged_altitude_sigma_m:.3} m"
+        );
         let utc = time.utc.expect("streaming UTC time");
         assert_eq!((utc.year, utc.month, utc.day), (2013, 4, 4));
         if max_ms == 60_000 {

@@ -2,7 +2,9 @@
 //!
 //! Track 5 satellites (PRN 1, 11, 17, 20, 32 per GNSS-SDR reference), decode
 //! subframes 1-3, parse ephemerides, form pseudoranges, run WLS solver, and
-//! assert the position is near the CTTC reference: 41.2747°N, 1.9875°E.
+//! assert the position is near the CTTC GNSS-SDR reference trajectory:
+//! 41.2747°N, 1.9875°E. The supplied GNSS-SDR outputs are comparison data,
+//! not a surveyed ground-truth receiver coordinate.
 
 use gnss_core::acquisition::{PcpsAcquisition, PcpsConfig};
 use gnss_core::io::{IqFormat, IqReader};

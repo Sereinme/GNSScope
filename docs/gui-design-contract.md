@@ -221,6 +221,8 @@ The primary position visualization is a local ENU horizontal scatter/track plot 
 
 Absolute latitude, longitude, altitude, and ECEF remain visible as selected-epoch numeric values. A segmented position view switches between `Horizontal Track` and `ENU vs Time`; altitude is shown in the time-series view rather than projected into the horizontal plane. Both modes share the global epoch cursor. A geographic map is a later enhancement and must not replace the ENU precision view.
 
+The altitude history preserves the raw accepted WLS curve and overlays a 10-point arithmetic moving-average trend. Its summary labels raw population sigma and 10-point population sigma separately. The moving average is a presentation statistic compatible with the supplied GNSS-SDR CTTC configuration; it is not a replacement PVT solution and must not bridge rejected or missing epochs.
+
 Channel diagnostics should show:
 
 - PRN
