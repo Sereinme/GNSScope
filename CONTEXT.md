@@ -6,15 +6,15 @@
 
 ## 信号处理流程
 
-- **IQ 文件**（IQ file）：SDR 前端采集后存储的本地文件。先支持 `int8` 实部/虚部交错格式。测试数据集使用 GNSS-SDR 的 `2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN`（100s GPS L1 C/A, 4 Msps, 零中频, 16-bit interleaved）。
+- **IQ 文件**（IQ file）：SDR 前端采集后存储的本地文件。当前支持 `int8` 和 `int16` 实部/虚部交错格式。测试数据集使用 GNSS-SDR 的 `2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN`（100s GPS L1 C/A, 4 Msps, 零中频, 16-bit interleaved）。
 - **采样率**（sample rate, fs）：IQ 文件的采样频率，单位 Msps，用户在 GUI 中配置。
 - **中频**（intermediate frequency, IF）：ADC 采样后的残余载波频率，零中频时为 0 Hz。
 - **环路带宽**（loop bandwidth）：跟踪环路（DLL/PLL）的噪声带宽，单位 Hz。
 - **捕获**（acquisition）：在频率-码相位二维搜索空间中检测 GPS L1 C/A 信号的存在，输出粗略的多普勒频率和码相位。采用**并行码相位搜索**（Parallel Code Phase Search, PCPS）——通过 FFT 将本地 PRN 码与输入信号的循环互相关一次性完成，逐多普勒频点扫描。FFT 使用 **RustFFT** 库。
-- **跟踪**（tracking）：对捕获到的信号进行精密跟踪，持续输出解扩后的符号、载噪比（C/N₀）和码相位/载波相位。默认采用**二阶 DLL + 二阶 Costas PLL**（两象限反正切鉴别器），可选**FLL+PLL 级联**用于弱信号/高动态场景。
+- **跟踪**（tracking）：对捕获到的信号进行精密跟踪，持续输出解扩后的符号、载噪比（C/N₀）和码相位/载波相位。当前生产实现采用**二阶 DLL + 二阶 Costas PLL**（两象限反正切鉴别器）。
 - **DLL**（Delay Lock Loop）：码跟踪环，采用非相干早减迟归一化鉴别器（`dll_nc_e_minus_l_normalized`），E/L 间距可配。
 - **PLL**（Phase Lock Loop）：载波相位跟踪环，默认 Costas PLL，对导航电文 180° 相位翻转免疫。
-- **FLL**（Frequency Lock Loop）：载波频率跟踪环，引入频率锁定辅助 PLL，适用于弱信号初始锁定阶段。
+- **FLL**（Frequency Lock Loop）：未来可用于弱信号初始锁定或高动态场景的载波频率跟踪环。当前接收机尚未实现可工作的 FLL 辅助，因此 GUI 不暴露对应配置。
 - **导航电文解码**（nav message decoding）：从跟踪输出的符号流中提取定位必需信息——星历（ephemeris）、电离层参数、UTC 参数、卫星健康状态。**不实现完整历书（almanac）解码**（离线场景已知大致时间，历书无必要）。
 - **电离层延迟**（ionospheric delay）：单频接收机使用 GPS 广播的 **Klobuchar 模型**（8 参数 α₀-α₃, β₀-β₃），从导航电文第 4 子帧提取。
 - **对流层延迟**（tropospheric delay）：采用 **Saastamoinen 模型**，气象参数先硬编码标准值（P=1013.25 hPa, T=20°C, RH=50%），后续考虑 GUI 可配。
@@ -23,6 +23,9 @@
 - **多普勒频率**（doppler frequency）：卫星与接收机相对运动造成的载波频率偏移，典型范围 ±10 kHz。
 - **捕获检测**（acquisition detection）：PCPS 结果中峰值/均值比超过设定阈值则判定信号存在，阈值由期望虚警率 PFA 推导。
 - **PVT 解算**（PVT solution）：利用至少 4 颗卫星的伪距和多普勒测量，通过**加权最小二乘**（Weighted Least Squares, WLS）求解接收机位置（Position）、速度（Velocity）和时间（Time）。权重基于各卫星跟踪通道输出的 **C/N₀**（载噪比越高，权重越大）。
+- **PVT 候选解**（PVT candidate）：同一 PVT epoch 内由 Raw WLS、载波平滑 WLS（Smoothed）或 Kalman 产生的可比较解。候选解包含位置、速度、钟差、质量和卫星诊断；候选解存在不表示它被接收机采用。
+- **最终选中解**（selected PVT solution）：接收机在一个 PVT epoch 内按质量门限和 `Kalman > Smoothed WLS > Raw WLS` 优先级自动选择的输出。GUI 默认曲线只展示最终选中解；历史结果中的选择不可由界面改写。
+- **候选解比较**（candidate comparison）：针对当前选中 epoch 的只读专家诊断视图，对比 Raw、Smoothed 和 Kalman 候选解及其相对差值、可用状态和拒绝信息。它不改变最终选中解，也不触发重新处理。
 - **解算任务记录**（processing run）：一次针对指定 IQ 文件、使用固定配置执行的完整接收机处理记录。记录具有独立身份和不可变配置快照，可处于排队、处理中、已完成、失败、已取消或已中断状态；已完成记录包含可跨应用重启查看的 PVT 历史与通道诊断结果。重复处理同一 IQ 文件仍产生新的解算任务记录。
 - **已中断任务**（interrupted processing run）：应用或系统在任务正常终止前退出而留下的解算任务记录。已中断任务保留退出前产生的结果，但不包含可恢复的接收机内部状态；重新处理会创建新任务并从 IQ 文件开头开始。
 - **解算任务队列**（processing run queue）：等待成为活动解算任务的有序任务集合。同一时刻最多存在一个活动解算任务；活动任务终止后，队首任务自动开始。排队任务可以取消或调整顺序，但不会并行占用接收机处理资源。
@@ -54,6 +57,6 @@
 - **离线接收机**（offline receiver）：从本地 IQ 文件读取数据进行后处理，不做实时流式处理。采用**分段流式流水线**架构（见 ADR-0001）——IQ 文件按固定大小 chunk 分段读取，单遍遍历，每 chunk 内所有通道并行处理。
 - **多通道并行处理**（multi-channel parallel）：所有 32 颗 GPS L1 C/A 卫星（PRN 1-32）同时捕获和跟踪。每个活跃通道维护独立的跟踪状态。
 - **通道**（channel）：一个通道负责一颗卫星从捕获到导航电文输出的完整处理流水线。通道状态可以是：空闲（idle）、捕获中（acquiring）、跟踪中（tracking）、已锁定（locked）。内部通过 **trait 抽象**（`SignalSpec`、`Acquisition`、`Tracking`、`NavDecoder`）解耦具体信号制式（见 ADR-0002），当前仅实现 GPS L1 C/A，后续可扩展 GPS L1C/L2C/L5 等。
-- **chunk**：IQ 文件的分段读取单元，固定为 **1 ms**（一个 C/A 码周期）。在 2.048 Msps 下约 4 KB，内存极小。捕获通过跨 chunk 的**非相干累积**（non-coherent integration）达到所需的积分时间（典型 10-20 ms）。跟踪每 1 ms 更新一次环路。
-- **GUI**：用户界面，基于 **gpui**（Zed 编辑器同款 GPU 加速框架），提供文件选择、参数配置、结果展示（定位、C/N₀、捕获/跟踪状态图表），每 chunk 刷新一次。
-- **线程模型**：信号处理跑在独立工作线程上，通过 channel（`crossbeam` 或 `std::sync::mpsc`）向 gpui 主线程发送状态更新。每 chunk 内用 **Rayon** 并行化 32 通道的相关器运算，保证 GUI 流畅和信号处理吞吐。
+- **读取 chunk**（read chunk）：IQ 文件每次进入有界流式流水线的可配置批次。接收机把读取批次继续切分为 1 ms GPS L1 C/A 跟踪步；捕获可以跨多个跟踪步进行非相干累积，跟踪环仍每 1 ms 更新一次。
+- **GUI**：基于 **gpui** 的桌面用户界面，提供文件选择、参数配置、结果展示和历史重放。通道诊断按配置的 PVT output epoch 更新；捕获、失锁、重捕获、导航解码和任务生命周期事件立即更新，不按每个 1 ms 跟踪步重绘。
+- **线程模型**：信号处理运行在独立工作线程上，通过有界事件通道向 gpui 主线程发送状态更新。捕获按 PRN 并行，活跃跟踪通道使用 **Rayon** 并行，并在修改接收机状态前按 PRN 确定性合并；PVT epoch 按时间顺序串行推进。

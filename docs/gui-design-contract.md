@@ -42,11 +42,10 @@ The sky plot consumes the selected position solution's final WLS satellite diagn
 
 Continuous PVT applies a terrestrial position-quality gate before a mathematically converged WLS candidate can enter velocity, Hatch, Kalman, persistence, or the visible position series. This is required for exactly determined four-satellite epochs: one millisecond-class pseudorange error can be fitted with nearly zero residual while producing a receiver altitude above one million metres. The default profile accepts altitudes from `-2 km` to `20 km`, limits post-fit pseudorange residual RMS to `1 km`, and constrains inter-epoch displacement using a `12 km/s` maximum implied speed plus a `1 km` jump margin. The limits are configuration, not a static-position clamp. Historical rows written before this gate are defensively excluded from position, sky, and altitude views when they violate the same altitude range.
 
-This vertical slice is usable but does not yet satisfy the complete interaction contract. Remaining work is explicit:
+This vertical slice is usable. Remaining interaction work is explicit:
 
-- expose the now-persisted Raw, Smoothed, and Kalman candidates in an expert comparison UI;
+- expose the now-persisted Raw, Smoothed, and Kalman candidates in the selected-epoch expert comparison drawer defined below;
 - add deeper Kalman/Hatch algorithm parameters only after they become behaviorally active receiver configuration rather than hard-coded defaults;
-- implement historical search/filter/delete/reveal actions, queued-run reorder/cancel, plot focus, sky-marker hover details, and PRN linking/pinning;
 - extend visual regression beyond the implemented desktop, compact-drawer, and narrow screenshot matrix when additional panels are introduced.
 
 The first GUI exposes only configuration fields that are implemented and behaviorally active in the receiver. Signal type currently offers only GPS L1 C/A. It does not expose a nonfunctional FLL-assist toggle or invented NWPR coherent/noncoherent counts; current C/N0 controls map to the implemented prompt-window length and smoothing factor. Planned receiver capabilities remain in development documentation until their backend behavior and tests exist.
@@ -188,6 +187,14 @@ For navigation data, long captures or full RINEX files should keep multiple reco
 
 The main workspace renders only the final selected solution using the receiver preference `Kalman > Smoothed WLS > Raw WLS`, with an explicit solution-kind label. Default plots never overlay all candidate solutions. `PvtEpochOutput`, the GUI view model, and the persisted epoch record store every available Raw, Smoothed, and Kalman candidate plus the final selection so expert details can compare position, velocity, residual, and uncertainty without reprocessing the IQ source.
 
+### Candidate Comparison Drawer
+
+Candidate comparison is a read-only expert view for the currently selected epoch. An icon action in the PVT result header opens a right-side drawer; it is mutually exclusive with the advanced-settings drawer, and opening either drawer causes the main workspace to reflow. The persistent bottom epoch timeline remains visible, and changing its cursor updates the comparison synchronously.
+
+The drawer presents Raw, Smoothed, and Kalman as aligned comparison columns or rows with stable dimensions. It identifies the receiver-selected candidate and compares latitude/longitude or local ENU delta, altitude, ECEF position, 3D/horizontal/vertical velocity, heading, receiver clock bias, clock drift, residual RMS, DOP/sigma, used PRNs, excluded PRNs, and delta from the selected solution. Missing numeric values render as unavailable, never as zero. A compact disposition label distinguishes selected, available but lower priority, non-converged, rejected by a quality gate, and unavailable; this requires structured backend data where the current persisted candidate record is insufficient.
+
+The drawer never changes a completed result's selected solution. A future manual candidate preference, if required, belongs to processing configuration and creates a new run; it must not mutate historical output. Default position, altitude, velocity, and clock plots continue to show only the receiver-selected series.
+
 Sky markers expose hover detail for PRN, C/N0, azimuth, elevation, residual, and PVT use. Clicking a sky marker or healthy C/N0 column pins the PRN and links its highlight across both panels. Every plot panel supports a full-width focus mode with an icon-only enter/exit control.
 
 ## Application State
@@ -202,7 +209,7 @@ Application state must distinguish `active_run_id` from `selected_run_id`. Recei
 - `progress_fraction` is a normalized 0-1 processing progress value.
 - `latest_pvt` is the newest `GuiPvtViewModel`.
 - `channels` feeds the channel diagnostics panel.
-- `apply_event` accepts backend/worker events so the future GUI can update state without parsing logs or calling receiver internals directly.
+- `apply_event` accepts backend/worker events so the GUI updates state without parsing logs or calling receiver internals directly.
 
 While processing is active, users may select and inspect any completed run without pausing the worker. The active run stays pinned at the top of the sidebar with live progress, a narrow global activity indicator remains visible, and a clear command returns the workspace to the live run. Completion updates the sidebar without forcing navigation away from the selected historical run.
 
@@ -265,6 +272,6 @@ The snapshot renderer is not the final UI. It exists so the graphical renderer c
 
 The worker adapter and first visual workspace are implemented. Full contract completion remains gated by the explicit Current Readiness items.
 
-## First Implementation Milestone
+## Completed First Implementation Milestone
 
-The first milestone is a real vertical slice, not a disposable static prototype. It must open a GPUI window, create and persist a processing run, execute a real IQ file through `StreamingPvtRunner` on the single worker, report progress and cancellation, persist epochs incrementally, update the live workspace, and reopen completed results from SQLite after restart. Fixtures remain appropriate for unit and visual tests, but the shipped application path must not depend on preview-only data.
+The first milestone is complete as a real vertical slice rather than a disposable static prototype. It opens a GPUI window, creates and persists processing runs, executes real IQ through `StreamingPvtRunner` on the single worker, reports progress and cancellation, persists epochs incrementally, updates the live workspace, and reopens completed results from SQLite after restart. Fixtures remain appropriate for unit and visual tests, but the shipped application path does not depend on preview-only data.

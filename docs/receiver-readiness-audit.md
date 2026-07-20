@@ -7,20 +7,32 @@ Date: 2026-07-20
 - The production `StreamingPvtRunner` processes the 60 s CTTC capture in 14.39 s in a release build with parallel tracking, versus 37.98 s with serial tracking.
 - The parallel run acquires five PRNs, emits 299,955 tracking updates, decodes 32 navigation subframes, and produces 410 PVT outputs.
 - The final time is GPS week 1734, SOW 368663.029, or 2013-04-04 06:24:07.029 UTC.
-- GUI event/persistence tests pass; the latest workspace run reported 188 passed tests with 1 ignored test. The complete CTTC GUI run persisted 810 epochs and 113 discrete acquisition, channel-state, and navigation events.
+- The current targeted baseline passes 128 `gnss-core` library tests and 51 `gnss-gui` library tests. The complete CTTC GUI run persisted 810 epochs and 113 discrete acquisition, channel-state, and navigation events.
 
 This is a single-machine CTTC baseline, not a cross-platform benchmark. No CPU profiler or current peak-memory capture has been recorded, so the optimization list below is ranked from code inspection and must be measured before implementation.
 
-## Not Implemented
+## Current Product Status
 
-### Remaining GUI integration work
+### Implemented GUI foundation
 
 - Every behaviorally active `GuiProcessingSettings` field is now selectable or directly editable in a draft: primary sampling/IF/IQ format controls are in the command header, while the detailed drawer covers navigation policy, initial LLA, acquisition/reacquisition, Doppler grid, tracking loops, C/N0, channel admission, fixed PRNs, PVT/filter toggles, RAIM, and parallelism. Field-level parsing and receiver validation both block invalid queue creation.
 - Historical search/filter/delete/reveal actions and queued-run reorder/cancel controls are implemented; queue UUID order is persisted in preferences across restarts.
 - Plot focus, sky-marker hover details, and shared sky/C/N0 PRN linking/pinning are implemented. Deterministic screenshot coverage now launches `1440 x 900`, `1100 x 800` with the settings drawer open, and `800 x 720` layouts through `scripts/capture-gui-layouts.ps1`; window-handle capture avoids occlusion from unrelated desktop windows.
-- Candidate comparison UI is still pending; Raw, Smoothed, and Kalman candidates are now carried through `PvtEpochOutput`, the GUI view model, and backward-compatible epoch JSON persistence.
-
 The current worker owns `StreamingPvtRunner`, supports cooperative cancellation, maps discrete acquisition/reacquisition/channel-state/navigation events into GUI events, and persists them without forwarding every millisecond tracking update. Editable text is retained independently from the last valid typed value, so incomplete or malformed input remains visible with an inline error instead of being silently clamped. Queued and historical settings remain immutable; a historical snapshot can be copied into a new editable draft.
+
+### Next GUI milestone: candidate comparison
+
+Raw, Smoothed, and Kalman candidates are carried through `PvtEpochOutput`, the GUI view model, and backward-compatible epoch JSON persistence, but they are not yet visible. The next product milestone is a read-only expert comparison drawer for the currently selected epoch:
+
+- an icon action in the PVT result header opens a right-side comparison drawer;
+- the comparison and advanced-settings drawers are mutually exclusive, and the workspace reflows instead of being covered;
+- moving the persistent epoch timeline updates all candidate values in the drawer;
+- the default workspace continues to render only the receiver-selected solution;
+- the drawer compares position, altitude, velocity, clock bias/drift, solution quality, satellite use, and deltas relative to the selected solution;
+- unavailable or non-converged candidates are shown explicitly rather than replaced with zero values;
+- candidate selection remains receiver-owned and cannot be rewritten from historical UI.
+
+The persisted candidate contract does not yet contain a structured rejection reason. Implementing the drawer therefore also requires a small backend/view-model addition that distinguishes unavailable, non-converged, quality-gated, and lower-priority candidates without inventing explanations in the GUI.
 
 ### Receiver hardening and later scope
 
@@ -137,14 +149,14 @@ Risk: medium. Cached state must be keyed by all acquisition parameters.
 
 Risk: low to medium. Expected gain is smaller than tracking and ring-buffer work.
 
-## Recommended Measurement Order
+## Recommended Next Work
 
-1. Add a release benchmark that separately reports acquisition startup, steady-state tracking, navigation/PVT, event generation, and total elapsed time.
-2. Capture CPU profiles and peak memory for serial and parallel 60 s CTTC runs.
-3. Implement carrier/code phase recurrences behind an equivalence test.
-4. Replace the acquisition ring with a bulk circular buffer.
-5. Add configurable telemetry throttling before wiring the GUI worker.
-6. Re-profile before attempting batched workers, SIMD, or numeric-type changes.
+1. Implement the selected-epoch Raw/Smoothed/Kalman comparison drawer and structured candidate disposition.
+2. Add focused state/persistence tests and desktop, drawer, and narrow-layout screenshots for the new panel.
+3. Add a real-IQ stress regression that loses enough simultaneous channels to interrupt PVT and proves PVT resumes after reacquisition.
+4. Broaden accuracy coverage with real `Int8`, dynamic/high-rate, and independent position/velocity/time datasets.
+5. Capture CPU profiles, phase timings, and peak memory for serial and parallel CTTC runs.
+6. Optimize incremental code phase, the acquisition circular buffer, acquisition caches, and multi-millisecond dispatch in measured order, re-running deterministic real-data regressions after each change.
 
 ## GUI Gate
 

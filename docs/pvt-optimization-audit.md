@@ -1,8 +1,8 @@
 # PVT Optimization Audit
 
-See `docs/receiver-readiness-audit.md` for the current production gaps and runtime optimization backlog.
+This file is the historical PVT implementation checklist. See `docs/receiver-readiness-audit.md` for the authoritative current gaps, verification baseline, next product milestone, and runtime optimization backlog.
 
-Current status: positioning, velocity, and absolute-time correctness are implemented and verified on CTTC real data. Streaming input, deterministic parallel acquisition/tracking, periodic reacquisition scheduling, and the GUI-facing state contracts are implemented; the real GUI worker adapter is not yet wired.
+Current status: positioning, velocity, and absolute-time correctness are implemented and verified on CTTC real data. Streaming input, deterministic parallel acquisition/tracking, periodic reacquisition, the real GUI worker, persistence, editable receiver configuration, and historical replay are implemented. Raw, Smoothed, and Kalman candidates are persisted; their selected-epoch comparison drawer is the next GUI milestone.
 
 ## User Checklist
 
@@ -23,30 +23,24 @@ Current status: positioning, velocity, and absolute-time correctness are impleme
 | Time output | Done | `PvtTimeOutput` exposes receiver/corrected GPST, GPS week, structured UTC, Unix seconds, transmit SOW bounds, receiver clock bias, and clock drift; leap seconds and truncated broadcast-week expansion are tested. |
 | Streaming IQ input | Done | `StreamingPvtRunner` reads bounded chunks with reusable conversion buffers and advances acquisition, tracking, navigation, and PVT without full-file loading. |
 | Parallel acquisition/tracking | Done | Acquisition is PRN-parallel and active tracking uses Rayon with deterministic PRN-ordered merge; serial/parallel tracking equivalence is tested. |
-| Periodic reacquisition | Implemented, acceptance pending | `AcquisitionScheduler` prioritizes `Lost` PRNs at `reacq_interval_ms`; `StreamingPvtRunner` executes scans and reinitializes detected channels. A real forced-loss/recovery test is still missing. |
+| Periodic reacquisition | Done, additional stress coverage pending | `AcquisitionScheduler` prioritizes `Lost` PRNs at `reacq_interval_ms`; a real CTTC regression forces `Lost`, detects reacquisition, and restores tracking through probation to healthy. Simultaneous loss sufficient to interrupt and resume PVT remains untested. |
 | Parse full RINEX GPS navigation ephemerides | Done | `parse_rinex_ephemeris_catalog` parses GPS RINEX 2 `.n` records and GPS records in RINEX 3 nav files into `EphemerisCatalog`; `load_optional_rinex_nav_capabilities` resolves optional nav files while preserving IQ-only operation. |
 | Multi-ephemeris selection for long RINEX/captures | Done | `EphemerisCatalog` stores multiple ephemerides per PRN; `EphemerisSelectionConfig` selects healthy, non-stale records nearest TOE/TOC; `ContinuousPvtRunner::solve_epochs_with_catalog` applies selection per epoch. |
 | GUI pre-design module contract | Done | `gnss-gui` exposes settings, nav-source status, PVT view model, receiver state, event bridge, structured screen model, and deterministic snapshot renderer. `GuiNavSourceStatus` reports both ionosphere and ephemeris availability. |
 
 ## Verification
 
-Latest verification commands run through `rtk`:
+Historical release verification and the current targeted library baseline run through `rtk`:
 
 - `cargo fmt --check`: passed.
-- `cargo test --workspace`: passed, 177 tests with 1 ignored test.
+- `cargo test -p gnss-core --lib`: passed, 128 tests on 2026-07-20.
+- `cargo test -p gnss-gui --lib`: passed, 51 tests on 2026-07-20.
 - `cargo clippy --workspace --tests -- -D warnings`: passed with no issues.
 - `cargo test --release -p gnss-core --test pvt_e2e -- --nocapture`: passed on real CTTC data.
 - `streaming_runner_real` passed the 60 s production stream: 5 acquisitions, 32 nav subframes, 410 PVT outputs, and UTC `2013-04-04 06:24:07.029`.
 
 The real-data e2e covers acquisition, tracking, bit sync, nav decode, optional RINEX ionosphere fallback, observables, WLS, Doppler velocity, continuous PVT, Hatch smoothing, Kalman output, and GUI-facing PVT output conversion. RINEX ephemeris parsing is covered by fixed-width field unit tests, including glued negative fields common in broadcast nav files.
 
-## Remaining Production Hardening
+## Current Follow-up
 
-These are not blockers for the current optimization goal, but they are the next sensible production tasks:
-
-- Wire `StreamingPvtRunner` into a real GUI worker that emits `GuiReceiverEvent` snapshots, handles cancellation, and reports completion/failure.
-- Calibrate the WLS sigma model with more datasets and receiver front-end settings.
-- Add a forced-loss/reacquisition real-data regression and expose reacquisition counters/events to the GUI.
-- Expose streaming controls such as PVT epoch rate, chunk size, and parallel tracking in `GuiProcessingSettings`.
-- For segmented GUI processing, pass nonzero acquisition sample stamps when acquisition windows do not start at file sample 0.
-- Extend RINEX support beyond GPS `.n`/GPS RINEX 3 records if future datasets need multi-constellation navigation files.
+Do not use this historical checklist as a second backlog. The agreed next feature is the read-only selected-epoch Raw/Smoothed/Kalman comparison drawer, including structured candidate disposition. Receiver hardening and performance priorities are maintained in `docs/receiver-readiness-audit.md`.
