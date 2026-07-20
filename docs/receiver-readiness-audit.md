@@ -8,6 +8,7 @@ Date: 2026-07-20
 - The parallel run acquires five PRNs, emits 299,955 tracking updates, decodes 32 navigation subframes, and produces 410 PVT outputs.
 - The final time is GPS week 1734, SOW 368663.029, or 2013-04-04 06:24:07.029 UTC.
 - The current targeted baseline passes 128 `gnss-core` library tests and 52 `gnss-gui` library tests. The complete CTTC GUI run persisted 810 epochs and 113 discrete acquisition, channel-state, and navigation events.
+- The release-only CTTC PVT recovery regression forces G01/G11/G17 to `Lost` after converged epoch 79. Three subsequent PVT outputs are non-converged while fewer than four channels are eligible; all three PRNs are then reacquired and resume tracking, and converged PVT returns at epoch 85 with four satellites.
 
 This is a single-machine CTTC baseline, not a cross-platform benchmark. No CPU profiler or current peak-memory capture has been recorded, so the optimization list below is ranked from code inspection and must be measured before implementation. Product sequencing is maintained in `docs/roadmap.md`.
 
@@ -45,7 +46,6 @@ The candidate contract now distinguishes selected, available-but-lower-priority,
 
 ## Implemented but Not Fully Tested
 
-- Real CTTC IQ covers established tracking, forced `Lost`, a detected `Reacquisition` scan, and restored tracking through `TrackingProbation`/`Healthy`. Re-entry into PVT after deliberately losing enough simultaneous channels remains a separate stress case.
 - Failed reacquisition repeated over multiple configured intervals on real data.
 - Dynamic cold acquisition and reacquisition across all 32 GPS L1 C/A PRNs on real data. CTTC validates a fixed five-PRN set.
 - Automated serial-versus-parallel equality for the complete real-data PVT stream. Tracking-step equality is tested, and manual 60 s runs produced matching event counts and final time.
@@ -152,7 +152,7 @@ Risk: low to medium. Expected gain is smaller than tracking and ring-buffer work
 
 ## Recommended Next Work
 
-See `docs/roadmap.md` for the authoritative priority order. The current first priority combines GUI visual polish with the real-IQ forced-loss/reacquisition PVT recovery regression.
+See `docs/roadmap.md` for the authoritative priority order. The real-IQ forced-loss/reacquisition PVT recovery regression is complete; GUI visual polish is the remaining Priority 1 work.
 
 ## GUI Gate
 

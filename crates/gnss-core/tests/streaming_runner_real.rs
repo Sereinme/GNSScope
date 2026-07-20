@@ -9,6 +9,7 @@ use gnss_core::receiver::{
     AcquisitionScanKind, ChannelHealthObservation, ReceiverChannelState, StreamingPvtConfig,
     StreamingPvtEvent, StreamingPvtRunner,
 };
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Instant;
 
@@ -281,5 +282,190 @@ fn test_streaming_runner_real_data_reacquires_forced_lost_channel() {
     assert!(
         tracking_restored,
         "reacquired PRN {prn} did not resume tracking"
+    );
+}
+
+#[test]
+#[ignore = "requires 28 seconds of real CTTC IQ; run in release mode"]
+fn test_streaming_runner_real_data_resumes_pvt_after_multi_channel_reacquisition() {
+    let data_path = Path::new(DATA_FILE);
+    if !data_path.exists() {
+        eprintln!("SKIP: real data not present");
+        return;
+    }
+
+    let mut config = StreamingPvtConfig::cttc_spain_real_data(DATA_FILE);
+    config.acquisition.reacq_interval_ms = 500;
+    config.acquisition.max_acq_prns_per_scan = 1;
+    config.channel_admission.probation_good_epochs = 1;
+    config.channel_admission.min_cn0_db_hz = 0.0;
+    config.channel_admission.min_pll_lock_metric = 0.0;
+    let samples_per_ms = config.samples_per_ms() as u64;
+    let mut runner = StreamingPvtRunner::new(config);
+    let mut reader = IqReader::open(data_path, IqFormat::Int16).expect("open real CTTC IQ");
+
+    let established = runner
+        .stream_iq_reader_until_ms(&mut reader, 27_000, |_| {})
+        .expect("establish converged real-data PVT");
+    let pre_loss_pvt = established
+        .latest_pvt_output
+        .expect("converged PVT before forced multi-channel loss");
+    assert!(
+        pre_loss_pvt.quality.converged,
+        "latest pre-loss PVT must be converged"
+    );
+
+    let eligible_prns = runner.channels().pvt_eligible_prns();
+    assert_eq!(
+        eligible_prns.len(),
+        5,
+        "CTTC recovery regression requires all five channels healthy before injection: {eligible_prns:?}"
+    );
+    let forced_lost_prns = eligible_prns.into_iter().take(3).collect::<Vec<_>>();
+    let loss_now_ms = runner.state_snapshot().sample_index / samples_per_ms;
+    let bad_observation = ChannelHealthObservation {
+        pll_lock_metric: 0.0,
+        cn0_db_hz: 0.0,
+        dll_error_chips: 10.0,
+        pll_error_cycles: 1.0,
+        doppler_hz: 0.0,
+        nav_time_available: false,
+        ephemeris_available: false,
+    };
+    for &prn in &forced_lost_prns {
+        for offset_ms in 0..10 {
+            runner.observe_tracking(prn, bad_observation, loss_now_ms + offset_ms);
+        }
+        assert_eq!(
+            runner.channels().state(prn),
+            ReceiverChannelState::Lost,
+            "PRN {prn} did not enter Lost after forced health failures"
+        );
+    }
+    assert_eq!(runner.channels().pvt_eligible_prns().len(), 2);
+
+    let mut reacquired_prns = BTreeSet::new();
+    let mut restored_tracking_prns = BTreeSet::new();
+    let mut degraded_pvt_outputs = Vec::new();
+    let degraded = runner
+        .stream_iq_reader_until_ms(&mut reader, 300, |step| {
+            for event in step.events {
+                match event {
+                    StreamingPvtEvent::AcquisitionScanCompleted(scan)
+                        if scan.scan.plan.kind == AcquisitionScanKind::Reacquisition =>
+                    {
+                        reacquired_prns.extend(scan.results.iter().filter_map(|result| {
+                            (result.detected && forced_lost_prns.contains(&result.prn))
+                                .then_some(result.prn)
+                        }));
+                    }
+                    StreamingPvtEvent::TrackingBatch(updates) => {
+                        restored_tracking_prns.extend(updates.iter().filter_map(|update| {
+                            (forced_lost_prns.contains(&update.prn)
+                                && matches!(
+                                    update.state,
+                                    ReceiverChannelState::TrackingProbation
+                                        | ReceiverChannelState::Healthy
+                                ))
+                            .then_some(update.prn)
+                        }));
+                    }
+                    StreamingPvtEvent::PvtOutput(output) => {
+                        degraded_pvt_outputs.push(*output);
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .expect("stream forced PVT interruption window");
+    let degraded_eligible_count = degraded
+        .final_state
+        .expect("degraded final state")
+        .channels
+        .iter()
+        .filter(|channel| channel.pvt_eligible)
+        .count();
+    assert!(
+        degraded_eligible_count < 4,
+        "PVT interruption window unexpectedly retained {degraded_eligible_count} eligible channels"
+    );
+    assert_eq!(
+        degraded_pvt_outputs.len(),
+        3,
+        "300 ms interruption window must retain the configured 100 ms PVT cadence"
+    );
+    assert!(
+        degraded_pvt_outputs
+            .iter()
+            .all(|output| !output.quality.converged),
+        "PVT converged with fewer than four eligible channels: {:?}",
+        degraded_pvt_outputs
+            .iter()
+            .map(|output| (output.epoch_index, output.quality.n_sats))
+            .collect::<Vec<_>>()
+    );
+
+    let mut recovered_pvt_outputs = Vec::new();
+    runner
+        .stream_iq_reader_until_ms(&mut reader, 1_200, |step| {
+            for event in step.events {
+                match event {
+                    StreamingPvtEvent::AcquisitionScanCompleted(scan)
+                        if scan.scan.plan.kind == AcquisitionScanKind::Reacquisition =>
+                    {
+                        reacquired_prns.extend(scan.results.iter().filter_map(|result| {
+                            (result.detected && forced_lost_prns.contains(&result.prn))
+                                .then_some(result.prn)
+                        }));
+                    }
+                    StreamingPvtEvent::TrackingBatch(updates) => {
+                        restored_tracking_prns.extend(updates.iter().filter_map(|update| {
+                            (forced_lost_prns.contains(&update.prn)
+                                && matches!(
+                                    update.state,
+                                    ReceiverChannelState::TrackingProbation
+                                        | ReceiverChannelState::Healthy
+                                ))
+                            .then_some(update.prn)
+                        }));
+                    }
+                    StreamingPvtEvent::PvtOutput(output) => {
+                        recovered_pvt_outputs.push(*output);
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .expect("stream real-data PVT recovery window");
+
+    assert!(
+        reacquired_prns.len() >= 2,
+        "fewer than two forced-lost PRNs were reacquired: forced={forced_lost_prns:?} reacquired={reacquired_prns:?}"
+    );
+    assert!(
+        restored_tracking_prns.len() >= 2,
+        "fewer than two reacquired PRNs resumed tracking: {restored_tracking_prns:?}"
+    );
+    let recovered_pvt = recovered_pvt_outputs
+        .iter()
+        .find(|output| output.quality.converged)
+        .expect("converged PVT must resume after reacquisition");
+    assert!(
+        recovered_pvt.epoch_index > pre_loss_pvt.epoch_index,
+        "recovered PVT epoch {} did not advance beyond pre-loss epoch {}",
+        recovered_pvt.epoch_index,
+        pre_loss_pvt.epoch_index
+    );
+    assert!(
+        recovered_pvt.quality.n_sats >= 4,
+        "recovered PVT used only {} satellites",
+        recovered_pvt.quality.n_sats
+    );
+    eprintln!(
+        "PVT recovery: pre-loss epoch={}, forced={forced_lost_prns:?}, reacquired={reacquired_prns:?}, restored={restored_tracking_prns:?}, degraded_outputs={}, recovered_epoch={}, recovered_sats={}",
+        pre_loss_pvt.epoch_index,
+        degraded_pvt_outputs.len(),
+        recovered_pvt.epoch_index,
+        recovered_pvt.quality.n_sats,
     );
 }

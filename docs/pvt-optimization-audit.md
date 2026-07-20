@@ -43,4 +43,4 @@ The real-data e2e covers acquisition, tracking, bit sync, nav decode, optional R
 
 ## Current Follow-up
 
-Do not use this historical checklist as a second backlog. Product sequencing, including GUI polish and the forced-loss/reacquisition regression, is maintained in `docs/roadmap.md`.
+Do not use this historical checklist as a second backlog. The forced-loss/reacquisition PVT recovery regression is complete; current sequencing and the remaining GUI-polish work are maintained in `docs/roadmap.md`.
