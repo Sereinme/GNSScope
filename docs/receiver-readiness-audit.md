@@ -19,7 +19,7 @@ This is a single-machine CTTC baseline, not a cross-platform benchmark. No CPU p
 - Cancellation and worker shutdown. Pause/resume semantics are also undefined.
 - GUI settings for `chunk_ms`, `pvt_output_rate_ms`, Doppler epoch averaging, parallel acquisition, and parallel tracking.
 - GUI-visible reacquisition state, counters, and recovery history.
-- Event backpressure or display-rate throttling between the processing worker and GUI thread.
+- Event backpressure between the processing worker and GUI thread. Persisted channel diagnostics are aligned to the PVT output epoch; internal 1 ms tracking events must not be forwarded individually to the GUI.
 
 ### Receiver hardening and later scope
 
@@ -74,7 +74,7 @@ The runner currently creates a `TrackingUpdated` event and clones `TrackingOutpu
 Candidate changes:
 
 - Continue health, navigation, and Doppler-history updates every millisecond.
-- Emit GUI telemetry at a configurable display interval.
+- Emit and persist GUI telemetry at the configurable PVT output epoch.
 - Keep loss, acquisition, navigation decode, and PVT events immediate.
 - Let summaries count internal tracking epochs without retaining one public event per epoch.
 
@@ -123,4 +123,4 @@ Risk: low to medium. Expected gain is smaller than tracking and ring-buffer work
 
 ## GUI Gate
 
-Visual GUI design can start. A functional GUI should not be called complete until the worker adapter, cancellation, runtime settings, event throttling, and a real forced-loss/reacquisition test are implemented.
+The first functional GUI vertical slice now includes the real streaming worker, chunk-boundary cancellation, SQLite run/PVT persistence, and PVT-epoch telemetry throttling, and it passed a complete 100 s CTTC release run. The overall GUI must not be called contract-complete until runtime settings are fully editable, channel/event history is persisted and replayed, satellite geometry is exposed for the sky plot, and a real forced-loss/reacquisition workflow is tested through the GUI worker.

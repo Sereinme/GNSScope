@@ -2,13 +2,72 @@
 
 Receiver integration gates and performance work are tracked in `docs/receiver-readiness-audit.md`.
 
+## Visual Language
+
+GNSScope uses a precise signal-laboratory visual language for technical desktop work: moderate layout variance, restrained motion, and high but organized information density. It explicitly avoids neon dark-tech styling, glow-heavy charts, glassmorphism, oversized radii, marketing composition, and decorative card stacks.
+
+- Light theme: cool white/neutral workspace, dark ink text, restrained surface separation.
+- Dark theme: neutral graphite/black surfaces rather than a dark-blue monochrome palette.
+- Primary interaction color: signal cyan-blue for selection, live state, progress, and primary commands.
+- Semantic colors: green for healthy/valid, amber for acquiring/probation/suspect, red for lost/failed/excluded, and neutral gray for unavailable/absent.
+- Components use stable dimensions, 4-8 px radii, fine separators, and unframed full-width work areas where possible.
+- Numeric output uses tabular figures or a restrained monospace face so coordinates, time, speed, and percentages do not shift.
+- Motion is limited to progress, drawers, status transitions, chart cursors, and epoch interpolation, with reduced-motion behavior.
+
+Light and dark themes preserve identical information hierarchy and semantic meaning; theme is never used to hide controls or change status interpretation.
+
+Theme preference has three persistent application modes: `System`, `Light`, and `Dark`, with `System` as the default. Manual selection applies immediately and is stored as an application preference, not a processing-run configuration. All components and plots consume semantic theme tokens; system changes affect the app only while `System` is selected. Theme transition is restrained and disabled under reduced-motion preferences.
+
+## Interface Language
+
+The first GUI uses Simplified Chinese while retaining standard GNSS abbreviations and units such as PVT, PRN, C/N0, DLL, PLL, RAIM, WLS, ECEF, ENU, UTC, Hz, dB-Hz, m/s, ppm, and chips. Labels pair Chinese meaning with the abbreviation where useful, and tooltips provide concise Chinese explanations and parameter impact.
+
+Visible strings are addressed through stable message keys so English can be added later, but the first release does not require a language switch. Persisted run data stores typed values and enums rather than translated status text.
+
+## UI Technology Boundary
+
+As recorded by ADR-0004, `gpui-component` owns standard desktop controls, themes, forms, menus, progress, drawers, virtualized lists/tables, and focus/keyboard behavior. Native GPUI drawing is reserved for GNSS domain plots: sky plot, ENU scatter/track, C/N0 bars and history, velocity/clock charts, and the shared epoch cursor. Standard buttons, inputs, menus, and dialogs must not be reimplemented as custom canvas elements.
+
 This document defines the first GUI boundary before wiring gpui widgets. The GUI should consume structured state from `gnss-gui` instead of reading test-only logs.
 
 ## Current Readiness
 
-The backend is ready for GUI integration: `StreamingPvtRunner` has bounded IQ streaming, deterministic parallel acquisition/tracking, periodic lost-channel reacquisition, navigation decoding, continuous PVT, and structured UTC output. The remaining integration boundary is a worker adapter that owns the runner, converts `StreamingPvtReadStep`/`StreamingPvtEvent` into `GuiReceiverEvent`, and provides cancellation and failure handling.
+The backend and first functional GPUI vertical slice are integrated. `StreamingPvtRunner` runs on a single background worker with bounded IQ reads, deterministic parallel acquisition/tracking, cooperative chunk-boundary cancellation, and PVT-epoch channel telemetry. The GPUI workspace persists immutable run/configuration snapshots and selected PVT outputs in SQLite and renders determinate progress, Healthy-only C/N0 bars, robust ENU scatter, velocity history, current PVT, UTC, and persistent run history. System/Light/Dark preference is stored independently from receiver configuration.
 
-The current GUI settings model does not yet expose `chunk_ms`, `pvt_output_rate_ms`, Doppler epoch averaging, or parallel acquisition/tracking. Those fields must be added before the GUI can claim full runtime configurability.
+The release GUI was exercised against the complete 100 s CTTC Spain capture using the explicit CTTC preset. It acquired PRNs 1, 11, 17, 20, and 32, persisted 810 PVT epochs, and ended at latitude `41.2748131 deg`, longitude `1.9875802 deg`, altitude `81.116 m`, speed `0.30013 m/s`, clock drift `-5.41427 ppm`, and `2013-04-04 06:24:47.029 UTC`. The preset uses the same relaxed channel-admission parameters and Raw WLS filter configuration as the existing real-data streaming regression; filename matching does not silently apply it.
+
+This vertical slice is usable but does not yet satisfy the complete interaction contract. Remaining work is explicit:
+
+- extend core PVT output with per-satellite azimuth/elevation before drawing real sky markers; the current sky plot shows an unavailable state instead of fabricated geometry;
+- persist epoch-aligned channel snapshots and discrete acquisition/loss/reacquisition/navigation events, then restore complete historical plots after restart;
+- persist Raw, Smoothed, and Kalman candidates instead of only the selected solution;
+- replace the secondary-configuration summary with editable standard/expert controls and validation;
+- implement historical search/filter/actions, queued-run reorder/cancel, timeline interaction, plot focus, PRN linking/pinning, and Return to live;
+- verify responsive sidebar collapse/plot stacking and add automated GPUI screenshot tests.
+
+The first GUI exposes only configuration fields that are implemented and behaviorally active in the receiver. Signal type currently offers only GPS L1 C/A. It does not expose a nonfunctional FLL-assist toggle or invented NWPR coherent/noncoherent counts; current C/N0 controls map to the implemented prompt-window length and smoothing factor. Planned receiver capabilities remain in development documentation until their backend behavior and tests exist.
+
+## Processing Run Library
+
+The left sidebar represents a persistent local processing run library, not an in-memory recent-files list. Every processing attempt creates a distinct run with an immutable configuration snapshot, lifecycle status, source IQ identity, timestamps, summary, PVT epoch history, and per-PRN diagnostics aligned to the PVT output epochs. Reprocessing the same IQ file creates another run so results remain reproducible and comparable.
+
+Completed runs remain inspectable after application restart. The library stores derived results and source-file metadata, but does not copy the original IQ file. A missing or moved IQ source must not prevent viewing results that were already persisted.
+
+The library uses a versioned SQLite database in the user's application-data directory, as recorded by ADR-0003. Runs and derived observations are written incrementally so an interrupted process can recover an accurate terminal or resumable status without rebuilding a history index from loose files.
+
+Each persisted PVT output epoch owns the channel-diagnostic snapshot for that same epoch: active PRNs, C/N0, Doppler, acquisition/tracking/navigation state, and available residuals. Changing `pvt_output_rate_ms` therefore changes both the persisted PVT cadence and diagnostic-chart cadence. Discrete acquisition, loss, reacquisition, navigation-lock, failure, and completion events are persisted immediately between epochs.
+
+## Processing Queue
+
+The first GUI supports one active processing run and any number of persisted queued runs. Starting another file while processing is active creates a queued run rather than another receiver worker. Users may cancel or reorder queued runs; completion, failure, or cancellation of the active run starts the next queued run automatically.
+
+This is a resource policy, not a viewing restriction: users may continue browsing completed runs while the single active worker processes in the background.
+
+## Cancellation and Interruption
+
+The first GUI does not checkpoint receiver internals for resume. Cancellation is cooperative at an IQ read-chunk boundary; persisted PVT epochs, channel diagnostics, and events remain viewable and the run becomes `Cancelled`. On application startup, any run left in `Processing` becomes `Interrupted` while retaining its partial results.
+
+Retrying a cancelled, interrupted, or failed run creates a new run with a new identity and starts from the beginning of the IQ file. It never mutates the historical run or attempts to restore DLL/PLL, bit synchronization, navigation decoding, Hatch, or Kalman state.
 
 ## First Screen
 
@@ -21,9 +80,63 @@ GNSScope opens directly into the receiver workspace, not a landing page.
 - Quality pane: satellites used/excluded, residual RMS, standardized residual RMS, HDOP/GDOP, horizontal/vertical sigma.
 - Lower diagnostics: per-channel C/N0, Doppler, lock state, and residual chart.
 
+The main workspace is a single scrollable overview rather than top-level `Overview`, `Signals`, or `PVT` tabs. Its stable order is: task command bar, processing status/progress, sky plot plus ENU position view, full-width channel/C/N0 diagnostics, velocity and selected-epoch PVT details, then the shared epoch timeline. Core correlations remain visible in one navigation context.
+
+Major plots expose a focus command that temporarily expands one visualization to the work area and restores the overview without losing the selected run, epoch, PRN, or live-follow state. Segmented controls inside a plot may change its analytical mode; they do not replace top-level navigation.
+
+The recommended initial window is `1440 x 900` and the minimum usable desktop layout is approximately `1180 x 720`. Below the wide layout, the run sidebar collapses to a temporary drawer, sky/position plots stack vertically, metric grids reflow, and the secondary-settings drawer overlays rather than compresses charts. Typography does not shrink to force content into narrow widths; vertical scrolling and plot-focus mode preserve legibility. Mobile layout is outside the first release scope.
+
+## Processing Run Sidebar
+
+The persistent left sidebar is approximately `280-320 px` wide and has three ordered regions: the pinned active run, queued runs, and history grouped by date. The active row shows filename, live state, compact progress, and percentage. Queued rows show queue order and may be reordered or cancelled. Historical rows show filename, signal type, creation time, terminal status, and source signal duration; detailed PVT values remain in the main workspace.
+
+History supports filename search and terminal-status filtering. Row actions include viewing results, duplicating configuration into a new run, revealing the source IQ file, and deleting the derived run record. Deletion never deletes the source IQ file. The sidebar may collapse to a narrow task-status rail, but complete history remains available through expansion rather than being reduced to ambiguous icons.
+
+## Processing Progress
+
+Determinate progress is computed from processed IQ samples divided by total file samples and must be monotonic. PVT availability, acquisition success, and channel loss do not change file-processing progress. Indeterminate motion is reserved for short phases before the file length is known.
+
+The main run header combines a refined progress rail, tabular percentage, processed/total signal duration, and a concise phase label such as opening, initializing, acquiring, tracking/navigation, solving, or finalizing. The active sidebar row uses a compact progress rail and percentage. A spinner is not shown continuously beside determinate progress.
+
+Progress styling must remain precise in both themes: stable geometry, restrained accent fill, no rainbow gradient or glow, smooth transform-based interpolation, and reduced-motion support. Percentage alignment must not shift as digits change, and status text must remain readable at narrow window widths.
+
+## Sky Plot
+
+The constellation visualization is a receiver-centered sky plot: zenith at the center, horizon at the outer ring, north at the top, and east on the right. It is driven by the selected PVT epoch and uses the per-satellite azimuth/elevation already produced by WLS diagnostics.
+
+- Every visible satellite has a readable PRN label.
+- Color communicates channel/PVT state using the same semantics in light and dark themes.
+- Marker size or a restrained outer ring may communicate C/N0.
+- PVT-used and RAIM-excluded satellites must remain distinguishable without relying on color alone.
+- Hover or selection reveals C/N0, Doppler, residual, elevation, azimuth, and lock state.
+- Selecting a historical epoch updates the sky plot and all time-aligned diagnostics together.
+- The plot must remain legible with overlapping satellites, low elevation, missing ephemeris, and 32 visible PRNs.
+
+The sky plot should read as a precise instrument, not a decorative illustration: no glow-heavy markers, orbital artwork, 3D globe, or excessive animation. Motion is limited to interpolated epoch changes, selection, and status transitions, with reduced-motion support.
+
+## C/N0 Presentation
+
+The primary signal-quality view is a dynamic vertical bar chart with stable PRN 1-32 positions and C/N0 in dB-Hz. It draws bars only for channels whose epoch state is `Healthy`; probation, suspect, lost, reacquiring, and absent channels remain visible in channel-state diagnostics but do not enter the stable C/N0 comparison. Empty PRN slots preserve axis stability without implying a measurement. The active run updates bars at each PVT output epoch; moving the historical epoch cursor restores the bar snapshot for that time.
+
+Selecting a bar links the PRN across the sky plot and channel details, and reveals that PRN's C/N0 history below the bar chart. A small set of PRNs may be pinned for historical comparison. State is not encoded by arbitrary per-PRN rainbow colors: acquisition/tracking/navigation/PVT state uses semantic markers and styling, while selection uses the primary interaction accent.
+
 ## Settings Contract
 
 `gnss_gui::GuiProcessingSettings` is the GUI-facing source of truth.
+
+A run receives an immutable processing-configuration snapshot when it is queued. Queued, active, completed, failed, cancelled, and interrupted runs expose that snapshot read-only. Changing settings for an existing run is expressed as "process again with this configuration": duplicate the snapshot into an editable draft, then create a new run with a new identity.
+
+Application display preferences such as light/dark theme are not processing configuration and are not stored in the run snapshot. Changing defaults affects only future drafts, never queued or historical runs.
+
+Primary settings stay in the main workspace beside the run command: source IQ file, signal type, sample rate, intermediate frequency, and the essential start/queue action. Secondary settings open in a `440-520 px` right-side drawer so the technical workspace remains visible.
+
+The secondary-settings drawer groups controls by input/sampling, acquisition, tracking loops, lock/channel admission, C/N0 estimation, navigation/external ephemeris, PVT/filtering, and performance/parallelism. Groups are independently collapsible; labels expose units, defaults, and concise parameter impact through tooltips. Editable drafts have persistent apply/cancel actions. Queued and historical snapshots reuse the same drawer in read-only mode with a command to duplicate the configuration into a new draft.
+
+Standard mode exposes the commonly useful controls in those groups: IQ/chunk settings, acquisition integration and threshold, DLL/PLL bandwidth, lock and minimum C/N0 thresholds, C/N0 window/smoothing, PVT epoch and Doppler averaging, RINEX policy, Hatch/Kalman/integer-ms toggles, and parallel acquisition/tracking. Expert mode additionally exposes Doppler search details, acquisition/reacquisition scheduling, correlator/loop details, full channel-admission thresholds, WLS/RAIM and sigma calibration, Hatch/Kalman internals, GPS-week reference, and navigation timing parameters.
+
+Expert-mode visibility is an application preference and is not part of a processing configuration. Every parameter value used by the receiver is part of the immutable run snapshot. Each category can restore its own defaults; risky expert fields use concise inline warnings rather than repeated blocking dialogs.
+
+New run drafts support built-in `GPS L1 C/A Standard` and `CTTC Spain 4 Msps / Int16` presets, a custom state, and later user-saved presets. Selecting a preset copies values into the draft; edits mark it modified without creating a live dependency on the preset. Preset updates never change queued or historical snapshots, and filename matching may offer a non-blocking suggestion but must not silently apply dataset-specific settings.
 
 - `iq_file_path`: required to process; nav is optional.
 - `sample_rate_hz`: defaults to 4 MHz for the CTTC dataset.
@@ -63,9 +176,13 @@ For navigation data, long captures or full RINEX files should keep multiple reco
 - Clock drift display uses ppm in the GUI model, with raw m/s available in velocity.
 - Quality display keeps PRN lists and DOP/sigma values numeric so charts can reuse them.
 
+The main workspace renders only the final selected solution using the receiver preference `Kalman > Smoothed WLS > Raw WLS`, with an explicit solution-kind label. Default plots never overlay all candidate solutions. The persisted epoch record nevertheless stores every available Raw, Smoothed, and Kalman candidate plus the final selection so expert details can compare position, velocity, residual, and uncertainty without reprocessing the IQ source. The current final-only `PvtEpochOutput` boundary must be extended for this persistence path.
+
 ## Application State
 
 `gnss_gui::GuiReceiverWorkspaceState` is the UI state container for the first gpui screen.
+
+Application state must distinguish `active_run_id` from `selected_run_id`. Receiver events update the active run in the processing run library even when a historical run is selected; they must never overwrite the historical view model currently shown in the main workspace.
 
 - Status lifecycle: idle, ready, processing, completed, failed.
 - `settings_issues` drives disabled processing controls and inline validation messages.
@@ -73,6 +190,32 @@ For navigation data, long captures or full RINEX files should keep multiple reco
 - `latest_pvt` is the newest `GuiPvtViewModel`.
 - `channels` feeds the channel diagnostics panel.
 - `apply_event` accepts backend/worker events so the future GUI can update state without parsing logs or calling receiver internals directly.
+
+While processing is active, users may select and inspect any completed run without pausing the worker. The active run stays pinned at the top of the sidebar with live progress, a narrow global activity indicator remains visible, and a clear command returns the workspace to the live run. Completion updates the sidebar without forcing navigation away from the selected historical run.
+
+## Epoch Timeline
+
+A PVT output epoch is a complete time-aligned solution snapshot, not only a position point. It contains position, ECEF/ENU velocity, speed, receiver time, UTC, quality, used/excluded satellites, sky-plot geometry, and the per-PRN diagnostic snapshot for that epoch.
+
+Completed runs initially select their last valid PVT epoch. A shared timeline cursor synchronizes the sky plot, numeric position/velocity/time values, current PRN states, and all diagnostic charts. Historical charts retain the complete run range and highlight the selected epoch. Clicking a chart point or moving the timeline selects another epoch.
+
+Active runs follow the latest epoch by default. Manual timeline movement exits live-follow mode without stopping processing; a clear "Return to live" command restores it. Runs without a valid PVT solution still expose acquisition/tracking epochs while position, velocity, and time show an unavailable state.
+
+## Velocity Presentation
+
+The velocity panel combines selected-epoch values with complete-run history. Persistent headline values include 3D speed, horizontal/vertical speed, ENU components, heading, receiver clock drift, and Doppler residual RMS. A compact segmented control switches the history chart between `Speed`, `ENU`, and `Clock drift`; every mode shares the global epoch cursor and highlights the selected sample. Aggregate statistics are secondary summaries and never replace the epoch solution.
+
+## Time Presentation
+
+Corrected UTC is the primary selected-epoch time and is always labeled explicitly, for example `2013-04-04 06:24:07.029 UTC`; it is not silently converted to the operating-system timezone. GPS week, corrected GPS SOW, receiver SOW, receiver clock bias in microseconds, and clock drift in ppm are secondary technical values, with raw clock-drift m/s available in details. Clock bias/drift may be charted over epochs, while calendar time remains a value rather than a plotted series.
+
+When a full GPS week is unavailable, the panel displays `UTC unavailable`, continues to show available GPS SOW, and identifies the missing week anchor. It never guesses an absolute date from a truncated broadcast week.
+
+## Position Presentation
+
+The primary position visualization is a local ENU horizontal scatter/track plot whose stable origin is the first valid PVT epoch. Every valid PVT epoch contributes one East/North point and the selected epoch uses a high-contrast outline plus crosshair. Static captures naturally form a precision cloud; dynamic captures add a restrained line between consecutive points to reveal the path.
+
+Absolute latitude, longitude, altitude, and ECEF remain visible as selected-epoch numeric values. A segmented position view switches between `Horizontal Track` and `ENU vs Time`; altitude is shown in the time-series view rather than projected into the horizontal plane. Both modes share the global epoch cursor. A geographic map is a later enhancement and must not replace the ENU precision view.
 
 Channel diagnostics should show:
 
@@ -102,4 +245,8 @@ Current GUI-facing Rust modules:
 
 The snapshot renderer is not the final UI. It exists so the graphical renderer can be checked against a stable list of required sections: settings, position, ECEF, velocity, clock drift, time, quality, and channel diagnostics.
 
-Visual design can begin now; end-to-end GUI processing remains pending the worker adapter and streaming-control settings.
+The worker adapter and first visual workspace are implemented. Full contract completion remains gated by the explicit Current Readiness items.
+
+## First Implementation Milestone
+
+The first milestone is a real vertical slice, not a disposable static prototype. It must open a GPUI window, create and persist a processing run, execute a real IQ file through `StreamingPvtRunner` on the single worker, report progress and cancellation, persist epochs incrementally, update the live workspace, and reopen completed results from SQLite after restart. Fixtures remain appropriate for unit and visual tests, but the shipped application path must not depend on preview-only data.
