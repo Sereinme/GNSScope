@@ -27,8 +27,8 @@ pub use screen::{
 pub use settings::{GuiIqFormat, GuiProcessingSettings};
 pub use state::{GuiChannelStatus, GuiReceiverStatus, GuiReceiverWorkspaceState, GuiSettingsIssue};
 pub use view_model::{
-    GuiPvtCandidate, GuiPvtQuality, GuiPvtTime, GuiPvtVelocity, GuiPvtViewModel,
-    GuiSatelliteGeometry,
+    GuiPvtCandidate, GuiPvtCandidateStatus, GuiPvtQuality, GuiPvtTime, GuiPvtVelocity,
+    GuiPvtViewModel, GuiSatelliteGeometry,
 };
 pub use worker::{
     spawn_streaming_worker, ActiveWorker, GuiDiagnosticEvent, GuiDiagnosticEventKind, WorkerEvent,

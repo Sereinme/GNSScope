@@ -7,7 +7,7 @@ Date: 2026-07-20
 - The production `StreamingPvtRunner` processes the 60 s CTTC capture in 14.39 s in a release build with parallel tracking, versus 37.98 s with serial tracking.
 - The parallel run acquires five PRNs, emits 299,955 tracking updates, decodes 32 navigation subframes, and produces 410 PVT outputs.
 - The final time is GPS week 1734, SOW 368663.029, or 2013-04-04 06:24:07.029 UTC.
-- The current targeted baseline passes 128 `gnss-core` library tests and 51 `gnss-gui` library tests. The complete CTTC GUI run persisted 810 epochs and 113 discrete acquisition, channel-state, and navigation events.
+- The current targeted baseline passes 128 `gnss-core` library tests and 52 `gnss-gui` library tests. The complete CTTC GUI run persisted 810 epochs and 113 discrete acquisition, channel-state, and navigation events.
 
 This is a single-machine CTTC baseline, not a cross-platform benchmark. No CPU profiler or current peak-memory capture has been recorded, so the optimization list below is ranked from code inspection and must be measured before implementation.
 
@@ -18,11 +18,12 @@ This is a single-machine CTTC baseline, not a cross-platform benchmark. No CPU p
 - Every behaviorally active `GuiProcessingSettings` field is now selectable or directly editable in a draft: primary sampling/IF/IQ format controls are in the command header, while the detailed drawer covers navigation policy, initial LLA, acquisition/reacquisition, Doppler grid, tracking loops, C/N0, channel admission, fixed PRNs, PVT/filter toggles, RAIM, and parallelism. Field-level parsing and receiver validation both block invalid queue creation.
 - Historical search/filter/delete/reveal actions and queued-run reorder/cancel controls are implemented; queue UUID order is persisted in preferences across restarts.
 - Plot focus, sky-marker hover details, and shared sky/C/N0 PRN linking/pinning are implemented. Deterministic screenshot coverage now launches `1440 x 900`, `1100 x 800` with the settings drawer open, and `800 x 720` layouts through `scripts/capture-gui-layouts.ps1`; window-handle capture avoids occlusion from unrelated desktop windows.
+- The selected-epoch Raw/Smoothed/Kalman comparison drawer is implemented with structured candidate disposition, receiver-selected highlighting, position/velocity/clock/quality deltas, immutable historical behavior, and epoch-timeline synchronization. Candidate status and values survive SQLite JSON round trips; legacy rows infer conservative status from their existing candidate payloads.
 The current worker owns `StreamingPvtRunner`, supports cooperative cancellation, maps discrete acquisition/reacquisition/channel-state/navigation events into GUI events, and persists them without forwarding every millisecond tracking update. Editable text is retained independently from the last valid typed value, so incomplete or malformed input remains visible with an inline error instead of being silently clamped. Queued and historical settings remain immutable; a historical snapshot can be copied into a new editable draft.
 
-### Next GUI milestone: candidate comparison
+### Implemented candidate comparison
 
-Raw, Smoothed, and Kalman candidates are carried through `PvtEpochOutput`, the GUI view model, and backward-compatible epoch JSON persistence, but they are not yet visible. The next product milestone is a read-only expert comparison drawer for the currently selected epoch:
+Raw, Smoothed, and Kalman candidates are carried through `PvtEpochOutput`, the GUI view model, backward-compatible epoch JSON persistence, and a read-only expert comparison drawer for the currently selected epoch:
 
 - an icon action in the PVT result header opens a right-side comparison drawer;
 - the comparison and advanced-settings drawers are mutually exclusive, and the workspace reflows instead of being covered;
@@ -32,7 +33,7 @@ Raw, Smoothed, and Kalman candidates are carried through `PvtEpochOutput`, the G
 - unavailable or non-converged candidates are shown explicitly rather than replaced with zero values;
 - candidate selection remains receiver-owned and cannot be rewritten from historical UI.
 
-The persisted candidate contract does not yet contain a structured rejection reason. Implementing the drawer therefore also requires a small backend/view-model addition that distinguishes unavailable, non-converged, quality-gated, and lower-priority candidates without inventing explanations in the GUI.
+The candidate contract now distinguishes selected, available-but-lower-priority, non-converged, quality-gated, and unavailable candidates without asking the GUI to infer new-run rejection reasons. Rejected Smoothed candidates retain their diagnostic values without becoming eligible for selection or Kalman input.
 
 ### Receiver hardening and later scope
 
@@ -151,12 +152,10 @@ Risk: low to medium. Expected gain is smaller than tracking and ring-buffer work
 
 ## Recommended Next Work
 
-1. Implement the selected-epoch Raw/Smoothed/Kalman comparison drawer and structured candidate disposition.
-2. Add focused state/persistence tests and desktop, drawer, and narrow-layout screenshots for the new panel.
-3. Add a real-IQ stress regression that loses enough simultaneous channels to interrupt PVT and proves PVT resumes after reacquisition.
-4. Broaden accuracy coverage with real `Int8`, dynamic/high-rate, and independent position/velocity/time datasets.
-5. Capture CPU profiles, phase timings, and peak memory for serial and parallel CTTC runs.
-6. Optimize incremental code phase, the acquisition circular buffer, acquisition caches, and multi-millisecond dispatch in measured order, re-running deterministic real-data regressions after each change.
+1. Add a real-IQ stress regression that loses enough simultaneous channels to interrupt PVT and proves PVT resumes after reacquisition.
+2. Broaden accuracy coverage with real `Int8`, dynamic/high-rate, and independent position/velocity/time datasets.
+3. Capture CPU profiles, phase timings, and peak memory for serial and parallel CTTC runs.
+4. Optimize incremental code phase, the acquisition circular buffer, acquisition caches, and multi-millisecond dispatch in measured order, re-running deterministic real-data regressions after each change.
 
 ## GUI Gate
 

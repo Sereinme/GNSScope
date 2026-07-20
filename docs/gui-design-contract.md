@@ -44,7 +44,6 @@ Continuous PVT applies a terrestrial position-quality gate before a mathematical
 
 This vertical slice is usable. Remaining interaction work is explicit:
 
-- expose the now-persisted Raw, Smoothed, and Kalman candidates in the selected-epoch expert comparison drawer defined below;
 - add deeper Kalman/Hatch algorithm parameters only after they become behaviorally active receiver configuration rather than hard-coded defaults;
 - extend visual regression beyond the implemented desktop, compact-drawer, and narrow screenshot matrix when additional panels are introduced.
 
@@ -189,11 +188,13 @@ The main workspace renders only the final selected solution using the receiver p
 
 ### Candidate Comparison Drawer
 
-Candidate comparison is a read-only expert view for the currently selected epoch. An icon action in the PVT result header opens a right-side drawer; it is mutually exclusive with the advanced-settings drawer, and opening either drawer causes the main workspace to reflow. The persistent bottom epoch timeline remains visible, and changing its cursor updates the comparison synchronously.
+Candidate comparison is an implemented read-only expert view for the currently selected epoch. An icon action in the PVT result header opens a right-side drawer; it is mutually exclusive with the advanced-settings drawer, and opening either drawer causes the main workspace to reflow. The persistent bottom epoch timeline remains visible, and changing its cursor updates the comparison synchronously.
 
 The drawer presents Raw, Smoothed, and Kalman as aligned comparison columns or rows with stable dimensions. It identifies the receiver-selected candidate and compares latitude/longitude or local ENU delta, altitude, ECEF position, 3D/horizontal/vertical velocity, heading, receiver clock bias, clock drift, residual RMS, DOP/sigma, used PRNs, excluded PRNs, and delta from the selected solution. Missing numeric values render as unavailable, never as zero. A compact disposition label distinguishes selected, available but lower priority, non-converged, rejected by a quality gate, and unavailable; this requires structured backend data where the current persisted candidate record is insufficient.
 
 The drawer never changes a completed result's selected solution. A future manual candidate preference, if required, belongs to processing configuration and creates a new run; it must not mutate historical output. Default position, altitude, velocity, and clock plots continue to show only the receiver-selected series.
+
+`scripts/capture-gui-layouts.ps1` exercises the drawer at `1440 x 900` and `1100 x 800` using deterministic preview data, in addition to the settings-drawer and narrow workspace layouts. The preview hook is environment-only and does not alter the production receiver or run library.
 
 Sky markers expose hover detail for PRN, C/N0, azimuth, elevation, residual, and PVT use. Clicking a sky marker or healthy C/N0 column pins the PRN and links its highlight across both panels. Every plot panel supports a full-width focus mode with an icon-only enter/exit control.
 

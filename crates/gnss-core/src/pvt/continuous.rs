@@ -156,10 +156,14 @@ pub struct ContinuousPvtEpochResult {
     pub raw_pseudoranges: Vec<Pseudorange>,
     pub smoothed_pseudoranges: Option<Vec<Pseudorange>>,
     pub raw_solution: PvtSolution,
+    pub raw_candidate_disposition: PvtCandidateDisposition,
     pub raw_velocity_solution: Option<VelocitySolution>,
     pub smoothed_solution: Option<PvtSolution>,
+    pub smoothed_candidate_solution: Option<PvtSolution>,
+    pub smoothed_candidate_disposition: PvtCandidateDisposition,
     pub smoothed_velocity_solution: Option<VelocitySolution>,
     pub kalman_solution: Option<KalmanSolution>,
+    pub kalman_candidate_disposition: PvtCandidateDisposition,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +172,15 @@ pub enum PvtEpochSolutionKind {
     Smoothed,
     Kalman,
     Unconverged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PvtCandidateDisposition {
+    Selected,
+    Available,
+    NonConverged,
+    QualityRejected,
+    Unavailable,
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +253,12 @@ pub struct PvtCandidateOutput {
     pub satellites: Vec<PvtSatelliteOutput>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PvtCandidateStatusOutput {
+    pub solution_kind: PvtEpochSolutionKind,
+    pub disposition: PvtCandidateDisposition,
+}
+
 #[derive(Debug, Clone)]
 pub struct PvtEpochOutput {
     pub epoch_index: usize,
@@ -251,6 +270,7 @@ pub struct PvtEpochOutput {
     pub quality: PvtQualityOutput,
     pub satellites: Vec<PvtSatelliteOutput>,
     pub candidates: Vec<PvtCandidateOutput>,
+    pub candidate_statuses: Vec<PvtCandidateStatusOutput>,
 }
 
 impl ContinuousPvtEpochResult {
@@ -271,6 +291,7 @@ impl ContinuousPvtEpochResult {
             quality: selection.quality,
             satellites: selection.satellites,
             candidates: self.candidate_outputs(),
+            candidate_statuses: self.candidate_status_outputs(selection.kind),
         }
     }
 
@@ -288,7 +309,7 @@ impl ContinuousPvtEpochResult {
             quality: quality_from_position(&self.raw_solution, None),
             satellites: satellites_from_position(&self.raw_solution),
         });
-        if let Some(smoothed) = self.smoothed_solution.as_ref() {
+        if let Some(smoothed) = self.smoothed_candidate_solution.as_ref() {
             candidates.push(PvtCandidateOutput {
                 solution_kind: PvtEpochSolutionKind::Smoothed,
                 ecef: smoothed.ecef,
@@ -319,6 +340,33 @@ impl ContinuousPvtEpochResult {
             });
         }
         candidates
+    }
+
+    fn candidate_status_outputs(
+        &self,
+        selected_kind: PvtEpochSolutionKind,
+    ) -> Vec<PvtCandidateStatusOutput> {
+        [
+            (PvtEpochSolutionKind::Raw, self.raw_candidate_disposition),
+            (
+                PvtEpochSolutionKind::Smoothed,
+                self.smoothed_candidate_disposition,
+            ),
+            (
+                PvtEpochSolutionKind::Kalman,
+                self.kalman_candidate_disposition,
+            ),
+        ]
+        .into_iter()
+        .map(|(solution_kind, disposition)| PvtCandidateStatusOutput {
+            solution_kind,
+            disposition: if solution_kind == selected_kind {
+                PvtCandidateDisposition::Selected
+            } else {
+                disposition
+            },
+        })
+        .collect()
     }
 
     fn selected_solution(&self) -> SelectedEpochSolution {
@@ -759,19 +807,25 @@ impl ContinuousPvtRunner {
                 let mut raw_solution =
                     solve_if_enough_satellites(&raw_pseudoranges, &mut solve_raw);
                 let receive_time_sow = mean_receive_time_sow(&raw_pseudoranges);
-                if !position_solution_is_acceptable(
+                let raw_candidate_disposition = if !raw_solution.converged {
+                    PvtCandidateDisposition::NonConverged
+                } else if !position_solution_is_acceptable(
                     &raw_solution,
                     receive_time_sow,
                     last_accepted_position,
                     &position_quality,
                 ) {
                     raw_solution.converged = false;
+                    PvtCandidateDisposition::QualityRejected
                 } else if let Some(receive_time_sow) = receive_time_sow {
                     last_accepted_position = Some(AcceptedPosition {
                         ecef: raw_solution.ecef,
                         receive_time_sow,
                     });
-                }
+                    PvtCandidateDisposition::Available
+                } else {
+                    PvtCandidateDisposition::Available
+                };
                 let raw_velocity = velocity_if_position_converged(
                     &raw_pseudoranges,
                     &raw_solution,
@@ -784,6 +838,8 @@ impl ContinuousPvtRunner {
                 let (
                     smoothed_pseudoranges,
                     smoothed_solution,
+                    smoothed_candidate_solution,
+                    smoothed_candidate_disposition,
                     smoothed_velocity_solution,
                     smoothed_velocity_for_kalman,
                 ) = match self.hatch.as_mut() {
@@ -806,22 +862,50 @@ impl ContinuousPvtRunner {
                             );
                             (
                                 Some(smoothed),
+                                Some(solution.clone()),
                                 Some(solution),
+                                PvtCandidateDisposition::Available,
                                 velocity_result.accepted,
                                 velocity_result.kalman,
                             )
                         } else {
+                            let disposition = if solution.converged {
+                                PvtCandidateDisposition::QualityRejected
+                            } else {
+                                PvtCandidateDisposition::NonConverged
+                            };
                             if hatch.config().reset_on_rejected_solution {
                                 hatch.reset();
                             }
-                            (Some(smoothed), None, None, None)
+                            (
+                                Some(smoothed),
+                                None,
+                                Some(solution),
+                                disposition,
+                                None,
+                                None,
+                            )
                         }
                     }
                     Some(hatch) => {
                         hatch.reset();
-                        (None, None, None, None)
+                        (
+                            None,
+                            None,
+                            None,
+                            PvtCandidateDisposition::Unavailable,
+                            None,
+                            None,
+                        )
                     }
-                    None => (None, None, None, None),
+                    None => (
+                        None,
+                        None,
+                        None,
+                        PvtCandidateDisposition::Unavailable,
+                        None,
+                        None,
+                    ),
                 };
                 let kalman_solution = update_kalman(
                     self.kalman.as_mut(),
@@ -831,6 +915,11 @@ impl ContinuousPvtRunner {
                     smoothed_solution.as_ref(),
                     smoothed_velocity_for_kalman.as_ref(),
                 );
+                let kalman_candidate_disposition = match kalman_solution.as_ref() {
+                    Some(solution) if solution.converged => PvtCandidateDisposition::Available,
+                    _ if self.kalman.is_some() => PvtCandidateDisposition::NonConverged,
+                    _ => PvtCandidateDisposition::Unavailable,
+                };
 
                 ContinuousPvtEpochResult {
                     epoch_index,
@@ -838,10 +927,14 @@ impl ContinuousPvtRunner {
                     raw_pseudoranges,
                     smoothed_pseudoranges,
                     raw_solution,
+                    raw_candidate_disposition,
                     raw_velocity_solution,
                     smoothed_solution,
+                    smoothed_candidate_solution,
+                    smoothed_candidate_disposition,
                     smoothed_velocity_solution,
                     kalman_solution,
+                    kalman_candidate_disposition,
                 }
             })
             .collect();
@@ -1186,6 +1279,24 @@ mod tests {
         assert!(results[0].raw_velocity_solution.is_none());
         assert!(results[0].smoothed_solution.is_none());
         assert!(results[0].smoothed_velocity_solution.is_none());
+        let statuses = results[0].to_output().candidate_statuses;
+        assert_eq!(
+            statuses,
+            vec![
+                PvtCandidateStatusOutput {
+                    solution_kind: PvtEpochSolutionKind::Raw,
+                    disposition: PvtCandidateDisposition::NonConverged,
+                },
+                PvtCandidateStatusOutput {
+                    solution_kind: PvtEpochSolutionKind::Smoothed,
+                    disposition: PvtCandidateDisposition::Unavailable,
+                },
+                PvtCandidateStatusOutput {
+                    solution_kind: PvtEpochSolutionKind::Kalman,
+                    disposition: PvtCandidateDisposition::Unavailable,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1497,6 +1608,10 @@ mod tests {
         });
 
         assert!(!results[0].raw_solution.converged);
+        assert_eq!(
+            results[0].raw_candidate_disposition,
+            PvtCandidateDisposition::QualityRejected
+        );
     }
 
     #[test]
@@ -1602,7 +1717,20 @@ mod tests {
         assert!(results[0].raw_solution.converged);
         assert!(results[0].smoothed_pseudoranges.is_some());
         assert!(results[0].smoothed_solution.is_none());
+        assert!(results[0].smoothed_candidate_solution.is_some());
+        assert_eq!(
+            results[0].smoothed_candidate_disposition,
+            PvtCandidateDisposition::QualityRejected
+        );
         assert!(results[0].smoothed_velocity_solution.is_none());
+        let output = results[0].to_output();
+        assert!(output.candidates.iter().any(|candidate| {
+            candidate.solution_kind == PvtEpochSolutionKind::Smoothed && candidate.quality.converged
+        }));
+        assert!(output.candidate_statuses.iter().any(|status| {
+            status.solution_kind == PvtEpochSolutionKind::Smoothed
+                && status.disposition == PvtCandidateDisposition::QualityRejected
+        }));
     }
 
     #[test]

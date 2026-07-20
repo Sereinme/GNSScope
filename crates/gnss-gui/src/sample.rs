@@ -1,7 +1,7 @@
 use crate::GuiPvtViewModel;
 use gnss_core::pvt::{
-    PvtCandidateOutput, PvtEpochOutput, PvtEpochSolutionKind, PvtQualityOutput, PvtTimeOutput,
-    PvtVelocityOutput, UtcDateTime,
+    PvtCandidateDisposition, PvtCandidateOutput, PvtCandidateStatusOutput, PvtEpochOutput,
+    PvtEpochSolutionKind, PvtQualityOutput, PvtTimeOutput, PvtVelocityOutput, UtcDateTime,
 };
 
 pub fn sample_pvt_view_model() -> GuiPvtViewModel {
@@ -51,14 +51,39 @@ fn sample_pvt_epoch_output() -> PvtEpochOutput {
         PvtEpochSolutionKind::Kalman,
     ]
     .into_iter()
-    .map(|solution_kind| PvtCandidateOutput {
+    .map(|solution_kind| {
+        let offset_m = match solution_kind {
+            PvtEpochSolutionKind::Raw => 3.5,
+            PvtEpochSolutionKind::Smoothed => 1.2,
+            _ => 0.0,
+        };
+        let mut candidate_velocity = velocity.clone();
+        candidate_velocity.speed_mps += offset_m * 0.01;
+        candidate_velocity.horizontal_speed_mps += offset_m * 0.008;
+        PvtCandidateOutput {
+            solution_kind,
+            ecef: [ecef[0] + offset_m, ecef[1], ecef[2]],
+            lla_rad: [lla_rad[0], lla_rad[1], lla_rad[2] + offset_m],
+            receiver_clock_bias_s: (7_755.461 + offset_m * 0.1) * 1e-6,
+            velocity: Some(candidate_velocity),
+            quality: quality.clone(),
+            satellites: Vec::new(),
+        }
+    })
+    .collect();
+    let candidate_statuses = [
+        PvtEpochSolutionKind::Raw,
+        PvtEpochSolutionKind::Smoothed,
+        PvtEpochSolutionKind::Kalman,
+    ]
+    .into_iter()
+    .map(|solution_kind| PvtCandidateStatusOutput {
         solution_kind,
-        ecef,
-        lla_rad,
-        receiver_clock_bias_s: 7_755.461e-6,
-        velocity: Some(velocity.clone()),
-        quality: quality.clone(),
-        satellites: Vec::new(),
+        disposition: if solution_kind == PvtEpochSolutionKind::Kalman {
+            PvtCandidateDisposition::Selected
+        } else {
+            PvtCandidateDisposition::Available
+        },
     })
     .collect();
     PvtEpochOutput {
@@ -88,6 +113,7 @@ fn sample_pvt_epoch_output() -> PvtEpochOutput {
         quality,
         satellites: Vec::new(),
         candidates,
+        candidate_statuses,
     }
 }
 
@@ -98,7 +124,7 @@ mod tests {
 
     #[test]
     fn test_sample_pvt_view_model_is_gui_ready() {
-        let sample = sample_pvt_view_model();
+        let mut sample = sample_pvt_view_model();
 
         assert_eq!(sample.solution_kind, PvtEpochSolutionKind::Kalman);
         assert!(sample.quality.converged);
@@ -109,5 +135,18 @@ mod tests {
             .is_some_and(|velocity| velocity.speed_mps > 0.0));
         assert!(sample.time.corrected_gps_time_sow.is_some());
         assert_eq!(sample.candidates.len(), 3);
+        assert_eq!(
+            sample.candidate_disposition(PvtEpochSolutionKind::Kalman),
+            PvtCandidateDisposition::Selected
+        );
+        sample.candidate_statuses.clear();
+        assert_eq!(
+            sample.candidate_disposition(PvtEpochSolutionKind::Raw),
+            PvtCandidateDisposition::Available
+        );
+        assert_eq!(
+            sample.candidate_disposition(PvtEpochSolutionKind::Kalman),
+            PvtCandidateDisposition::Selected
+        );
     }
 }

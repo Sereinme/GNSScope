@@ -3,6 +3,7 @@ use crate::{
     GuiProcessingSettings, GuiPvtViewModel, GuiSatelliteGeometry, GuiSettingsIssue, ProcessingRun,
     RunLibrary, RunStatus, StoredEpoch, WorkerEvent,
 };
+use gnss_core::pvt::{PvtCandidateDisposition, PvtEpochSolutionKind};
 use gpui::prelude::*;
 use gpui::{
     bounds, canvas, div, point, px, quad, rgb, size, AnyElement, Bounds, Context, Entity, Hsla,
@@ -142,6 +143,12 @@ enum PlotFocus {
     Cn0,
     Velocity,
     Altitude,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SideDrawer {
+    Settings,
+    CandidateComparison,
 }
 
 impl PlotFocus {
@@ -286,7 +293,7 @@ pub struct GnsscopeApp {
     follow_live: bool,
     theme_preference: ThemePreference,
     system_dark: bool,
-    settings_open: bool,
+    side_drawer: Option<SideDrawer>,
     timeline_visible: bool,
     status_message: String,
 }
@@ -420,11 +427,32 @@ impl GnsscopeApp {
             follow_live: true,
             theme_preference,
             system_dark: cx.theme().mode.is_dark(),
-            settings_open: std::env::var("GNSSCOPE_OPEN_SETTINGS")
-                .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
+            side_drawer: if std::env::var("GNSSCOPE_OPEN_COMPARISON")
+                .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            {
+                Some(SideDrawer::CandidateComparison)
+            } else if std::env::var("GNSSCOPE_OPEN_SETTINGS")
+                .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            {
+                Some(SideDrawer::Settings)
+            } else {
+                None
+            },
             timeline_visible,
             status_message: "请选择 IQ 文件开始解算".to_string(),
         };
+        if std::env::var("GNSSCOPE_PREVIEW")
+            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        {
+            app.history.clear();
+            app.queue.clear();
+            app.selected_run_id = None;
+            app.live_run_id = None;
+            app.historical_epochs = vec![crate::sample_pvt_view_model()];
+            app.historical_channels = vec![crate::state::sample_channel_statuses()];
+            app.selected_epoch = Some(0);
+            app.status_message = "确定性界面预览".to_string();
+        }
         if std::env::var_os("GNSSCOPE_AUTORUN").is_some() {
             app.enqueue();
         }
@@ -1643,7 +1671,8 @@ impl GnsscopeApp {
                             .icon(IconName::Settings2)
                             .tooltip("接收机详细配置")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_open = !this.settings_open;
+                                this.side_drawer =
+                                    toggled_side_drawer(this.side_drawer, SideDrawer::Settings);
                                 cx.notify();
                             })),
                     )
@@ -1847,7 +1876,7 @@ impl GnsscopeApp {
                             .icon(IconName::CircleX)
                             .tooltip("关闭详细配置")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_open = false;
+                                this.side_drawer = None;
                                 cx.notify();
                             })),
                     ),
@@ -2443,18 +2472,38 @@ impl GnsscopeApp {
                     .border_1()
                     .border_color(palette.border)
                     .p(px(14.))
-                    .child(Self::section_title(
-                        "当前 PVT",
-                        if valid_pvt.is_some() {
-                            pvt.map(|p| format!("{:?}", p.solution_kind))
-                                .unwrap_or_else(|| "等待解算".to_string())
-                        } else if pvt.is_some() {
-                            "质量门限拒绝".to_string()
-                        } else {
-                            "等待解算".to_string()
-                        },
-                        palette,
-                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .justify_between()
+                            .child(Self::section_title(
+                                "当前 PVT",
+                                if valid_pvt.is_some() {
+                                    pvt.map(|p| format!("{:?}", p.solution_kind))
+                                        .unwrap_or_else(|| "等待解算".to_string())
+                                } else if pvt.is_some() {
+                                    "质量门限拒绝".to_string()
+                                } else {
+                                    "等待解算".to_string()
+                                },
+                                palette,
+                            ))
+                            .child(
+                                Button::new("candidate-comparison")
+                                    .ghost()
+                                    .icon(IconName::PanelRightOpen)
+                                    .tooltip("比较 Raw / Smoothed / Kalman")
+                                    .disabled(pvt.is_none())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.side_drawer = toggled_side_drawer(
+                                            this.side_drawer,
+                                            SideDrawer::CandidateComparison,
+                                        );
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
                     .child(
                         div()
                             .mt(px(10.))
@@ -2485,6 +2534,225 @@ impl GnsscopeApp {
                     ),
             )
             .into_any_element()
+    }
+
+    fn render_candidate_drawer(
+        &self,
+        palette: Palette,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let pvt = self.current_pvt();
+        let epoch_number = self.selected_epoch.map(|index| index + 1).unwrap_or(0);
+        let epoch_count = self.display_epochs().len();
+        div()
+            .w(if compact { px(350.) } else { px(430.) })
+            .flex_shrink_0()
+            .h_full()
+            .overflow_y_scrollbar()
+            .bg(palette.surface)
+            .border_l_1()
+            .border_color(palette.border)
+            .shadow_lg()
+            .p(px(18.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .child(
+                                div()
+                                    .text_size(px(16.))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(palette.text)
+                                    .child("候选解比较"),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(3.))
+                                    .text_size(px(10.))
+                                    .text_color(palette.muted)
+                                    .child(format!("Epoch {epoch_number} / {epoch_count}")),
+                            ),
+                    )
+                    .child(
+                        Button::new("close-candidate-comparison")
+                            .ghost()
+                            .icon(IconName::CircleX)
+                            .tooltip("关闭候选解比较")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.side_drawer = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(10.))
+                    .text_size(px(10.))
+                    .text_color(palette.muted)
+                    .child("只读诊断 · 最终解由接收机质量门限与优先级自动选择"),
+            )
+            .children(
+                [
+                    PvtEpochSolutionKind::Raw,
+                    PvtEpochSolutionKind::Smoothed,
+                    PvtEpochSolutionKind::Kalman,
+                ]
+                .into_iter()
+                .map(|kind| self.render_candidate_card(pvt, kind, palette)),
+            )
+    }
+
+    fn render_candidate_card(
+        &self,
+        pvt: Option<&GuiPvtViewModel>,
+        kind: PvtEpochSolutionKind,
+        palette: Palette,
+    ) -> impl IntoElement {
+        let candidate = pvt.and_then(|pvt| pvt.candidate(kind));
+        let disposition = pvt
+            .map(|pvt| pvt.candidate_disposition(kind))
+            .unwrap_or(PvtCandidateDisposition::Unavailable);
+        let status_color = candidate_disposition_color(disposition, palette);
+        let position_delta_m = pvt.zip(candidate).map(|(pvt, candidate)| {
+            ((candidate.ecef_m[0] - pvt.ecef_m[0]).powi(2)
+                + (candidate.ecef_m[1] - pvt.ecef_m[1]).powi(2)
+                + (candidate.ecef_m[2] - pvt.ecef_m[2]).powi(2))
+            .sqrt()
+        });
+        let clock_drift_ppm = candidate
+            .and_then(|candidate| candidate.velocity.as_ref())
+            .map(|velocity| velocity.clock_drift_mps / 299_792_458.0 * 1e6);
+        div()
+            .mt(px(12.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(if disposition == PvtCandidateDisposition::Selected {
+                palette.accent
+            } else {
+                palette.border
+            })
+            .bg(palette.surface_alt)
+            .p(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(palette.text)
+                            .child(candidate_kind_label(kind)),
+                    )
+                    .child(
+                        div()
+                            .px(px(7.))
+                            .py(px(3.))
+                            .rounded(px(4.))
+                            .bg(status_color.opacity(0.12))
+                            .text_size(px(9.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(status_color)
+                            .child(candidate_disposition_label(disposition)),
+                    ),
+            )
+            .children(candidate.map(|candidate| {
+                div()
+                    .mt(px(10.))
+                    .child(comparison_group_title("位置", palette))
+                    .child(comparison_metric(
+                        "纬度 / 经度",
+                        format!(
+                            "{:.7}° / {:.7}°",
+                            candidate.latitude_deg, candidate.longitude_deg
+                        ),
+                        palette,
+                    ))
+                    .child(comparison_metric(
+                        "高度",
+                        format!("{:.3} m", candidate.altitude_m),
+                        palette,
+                    ))
+                    .child(comparison_metric(
+                        "相对最终解",
+                        format_optional_metric(position_delta_m, "m", 3),
+                        palette,
+                    ))
+                    .child(comparison_group_title("速度与时钟", palette))
+                    .child(comparison_metric(
+                        "三维 / 水平速度",
+                        candidate
+                            .velocity
+                            .as_ref()
+                            .map(|velocity| {
+                                format!(
+                                    "{:.4} / {:.4} m/s",
+                                    velocity.speed_mps, velocity.horizontal_speed_mps
+                                )
+                            })
+                            .unwrap_or_else(|| "不可用".to_string()),
+                        palette,
+                    ))
+                    .child(comparison_metric(
+                        "垂直速度",
+                        candidate
+                            .velocity
+                            .as_ref()
+                            .map(|velocity| format!("{:.4} m/s", velocity.vertical_speed_mps))
+                            .unwrap_or_else(|| "不可用".to_string()),
+                        palette,
+                    ))
+                    .child(comparison_metric(
+                        "钟差 / 钟漂",
+                        format!(
+                            "{:.3} µs / {}",
+                            candidate.receiver_clock_bias_us,
+                            format_optional_metric(clock_drift_ppm, "ppm", 5)
+                        ),
+                        palette,
+                    ))
+                    .child(comparison_group_title("质量", palette))
+                    .child(comparison_metric(
+                        "卫星 / HDOP",
+                        format!(
+                            "{} / {:.3}",
+                            candidate.quality.n_sats, candidate.quality.hdop
+                        ),
+                        palette,
+                    ))
+                    .child(comparison_metric(
+                        "残差 RMS",
+                        format!("{:.3} m", candidate.quality.residual_rms_m),
+                        palette,
+                    ))
+                    .child(comparison_metric(
+                        "水平 / 垂直 σ",
+                        format!(
+                            "{:.3} / {:.3} m",
+                            candidate.quality.horizontal_sigma_m,
+                            candidate.quality.vertical_sigma_m
+                        ),
+                        palette,
+                    ))
+                    .child(comparison_metric(
+                        "使用 PRN",
+                        format_prns(&candidate.quality.used_prns),
+                        palette,
+                    ))
+            }))
+            .children(candidate.is_none().then(|| {
+                div()
+                    .mt(px(10.))
+                    .py(px(8.))
+                    .text_size(px(10.))
+                    .text_color(palette.muted)
+                    .child(candidate_empty_message(disposition))
+            }))
     }
 
     fn render_timeline_bar(&self, palette: Palette) -> impl IntoElement {
@@ -2630,13 +2898,111 @@ impl Render for GnsscopeApp {
                                             .then(|| self.render_timeline_bar(palette)),
                                     ),
                             )
-                            .children(
-                                self.settings_open
-                                    .then(|| self.render_config_drawer(palette, compact, cx)),
-                            ),
+                            .children(match self.side_drawer {
+                                Some(SideDrawer::Settings) => Some(
+                                    self.render_config_drawer(palette, compact, cx)
+                                        .into_any_element(),
+                                ),
+                                Some(SideDrawer::CandidateComparison) => Some(
+                                    self.render_candidate_drawer(palette, compact, cx)
+                                        .into_any_element(),
+                                ),
+                                None => None,
+                            }),
                     ),
             )
     }
+}
+
+fn candidate_kind_label(kind: PvtEpochSolutionKind) -> &'static str {
+    match kind {
+        PvtEpochSolutionKind::Raw => "Raw WLS",
+        PvtEpochSolutionKind::Smoothed => "Smoothed WLS",
+        PvtEpochSolutionKind::Kalman => "Kalman",
+        PvtEpochSolutionKind::Unconverged => "Unconverged",
+    }
+}
+
+fn toggled_side_drawer(current: Option<SideDrawer>, target: SideDrawer) -> Option<SideDrawer> {
+    (current != Some(target)).then_some(target)
+}
+
+fn candidate_disposition_label(disposition: PvtCandidateDisposition) -> &'static str {
+    match disposition {
+        PvtCandidateDisposition::Selected => "已采用",
+        PvtCandidateDisposition::Available => "可用 · 较低优先级",
+        PvtCandidateDisposition::NonConverged => "未收敛",
+        PvtCandidateDisposition::QualityRejected => "质量门限拒绝",
+        PvtCandidateDisposition::Unavailable => "不可用",
+    }
+}
+
+fn candidate_disposition_color(disposition: PvtCandidateDisposition, palette: Palette) -> Hsla {
+    match disposition {
+        PvtCandidateDisposition::Selected => palette.accent,
+        PvtCandidateDisposition::Available => palette.healthy,
+        PvtCandidateDisposition::NonConverged | PvtCandidateDisposition::QualityRejected => {
+            palette.warning
+        }
+        PvtCandidateDisposition::Unavailable => palette.muted,
+    }
+}
+
+fn candidate_empty_message(disposition: PvtCandidateDisposition) -> &'static str {
+    match disposition {
+        PvtCandidateDisposition::NonConverged => "本 epoch 未产生收敛候选解。",
+        PvtCandidateDisposition::QualityRejected => "候选解被质量门限拒绝，数值未进入最终输出。",
+        PvtCandidateDisposition::Unavailable => "该处理配置或当前 epoch 未产生此候选解。",
+        _ => "候选数值不可用。",
+    }
+}
+
+fn comparison_group_title(title: &'static str, palette: Palette) -> impl IntoElement {
+    div()
+        .mt(px(9.))
+        .mb(px(2.))
+        .text_size(px(9.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(palette.muted)
+        .child(title)
+}
+
+fn comparison_metric(
+    label: &'static str,
+    value: impl Into<SharedString>,
+    palette: Palette,
+) -> impl IntoElement {
+    div()
+        .min_h(px(24.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(12.))
+        .text_size(px(10.))
+        .child(div().text_color(palette.muted).child(label))
+        .child(
+            div()
+                .text_right()
+                .text_color(palette.text)
+                .child(value.into()),
+        )
+}
+
+fn format_optional_metric(value: Option<f64>, unit: &str, digits: usize) -> String {
+    value
+        .filter(|value| value.is_finite())
+        .map(|value| format!("{value:.digits$} {unit}"))
+        .unwrap_or_else(|| "不可用".to_string())
+}
+
+fn format_prns(prns: &[u8]) -> String {
+    if prns.is_empty() {
+        return "无".to_string();
+    }
+    prns.iter()
+        .map(|prn| format!("G{prn:02}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 #[derive(Clone, Copy)]
@@ -3453,7 +3819,7 @@ mod history_queue_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::epoch_index_for_percent;
+    use super::{epoch_index_for_percent, toggled_side_drawer, SideDrawer};
 
     #[test]
     fn timeline_percent_maps_to_shared_epoch_index() {
@@ -3462,5 +3828,24 @@ mod tests {
         assert_eq!(epoch_index_for_percent(101, 0.0), Some(0));
         assert_eq!(epoch_index_for_percent(101, 50.0), Some(50));
         assert_eq!(epoch_index_for_percent(101, 100.0), Some(100));
+    }
+
+    #[test]
+    fn side_drawers_are_mutually_exclusive() {
+        assert_eq!(
+            toggled_side_drawer(None, SideDrawer::Settings),
+            Some(SideDrawer::Settings)
+        );
+        assert_eq!(
+            toggled_side_drawer(Some(SideDrawer::Settings), SideDrawer::CandidateComparison),
+            Some(SideDrawer::CandidateComparison)
+        );
+        assert_eq!(
+            toggled_side_drawer(
+                Some(SideDrawer::CandidateComparison),
+                SideDrawer::CandidateComparison
+            ),
+            None
+        );
     }
 }

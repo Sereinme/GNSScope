@@ -16,9 +16,9 @@ pub mod velocity;
 
 pub use continuous::{
     ContinuousPvtConfig, ContinuousPvtEpochResult, ContinuousPvtRunner, IntegerMsAmbiguityConfig,
-    PositionQualityConfig, PseudorangeEpoch, PvtCandidateOutput, PvtEpochOutput,
-    PvtEpochSolutionKind, PvtQualityOutput, PvtSatelliteOutput, PvtTimeOutput, PvtVelocityOutput,
-    VelocityQualityConfig,
+    PositionQualityConfig, PseudorangeEpoch, PvtCandidateDisposition, PvtCandidateOutput,
+    PvtCandidateStatusOutput, PvtEpochOutput, PvtEpochSolutionKind, PvtQualityOutput,
+    PvtSatelliteOutput, PvtTimeOutput, PvtVelocityOutput, VelocityQualityConfig,
 };
 pub use coords::{ecef_to_lla, lla_to_ecef, Ecef, Lla};
 pub use kalman::{KalmanConfig, KalmanSolution, PositionVelocityKalman};

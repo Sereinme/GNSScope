@@ -38,9 +38,11 @@ if (-not (Test-Path -LiteralPath $binaryPath)) {
 
 New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
 $layouts = @(
-    @{ Name = "desktop"; Width = 1440; Height = 900; OpenSettings = $false },
-    @{ Name = "compact-drawer"; Width = 1100; Height = 800; OpenSettings = $true },
-    @{ Name = "narrow"; Width = 800; Height = 720; OpenSettings = $false }
+    @{ Name = "desktop"; Width = 1440; Height = 900; OpenSettings = $false; OpenComparison = $false },
+    @{ Name = "compact-drawer"; Width = 1100; Height = 800; OpenSettings = $true; OpenComparison = $false },
+    @{ Name = "candidate-comparison"; Width = 1440; Height = 900; OpenSettings = $false; OpenComparison = $true },
+    @{ Name = "candidate-comparison-compact"; Width = 1100; Height = 800; OpenSettings = $false; OpenComparison = $true },
+    @{ Name = "narrow"; Width = 800; Height = 720; OpenSettings = $false; OpenComparison = $false }
 )
 
 foreach ($layout in $layouts) {
@@ -49,7 +51,9 @@ foreach ($layout in $layouts) {
     $processInfo.UseShellExecute = $false
     $processInfo.Environment["GNSSCOPE_WINDOW_WIDTH"] = $layout.Width.ToString()
     $processInfo.Environment["GNSSCOPE_WINDOW_HEIGHT"] = $layout.Height.ToString()
+    $processInfo.Environment["GNSSCOPE_PREVIEW"] = "1"
     $processInfo.Environment["GNSSCOPE_OPEN_SETTINGS"] = if ($layout.OpenSettings) { "1" } else { "0" }
+    $processInfo.Environment["GNSSCOPE_OPEN_COMPARISON"] = if ($layout.OpenComparison) { "1" } else { "0" }
     $processInfo.Environment["GNSSCOPE_START_DRAFT"] = if ($layout.OpenSettings) { "1" } else { "0" }
     $process = [System.Diagnostics.Process]::Start($processInfo)
     try {

@@ -1,11 +1,11 @@
 use crate::{
     GuiChannelStatus, GuiDiagnosticEvent, GuiDiagnosticEventKind, GuiProcessingSettings,
-    GuiPvtCandidate, GuiPvtQuality, GuiPvtTime, GuiPvtVelocity, GuiPvtViewModel,
-    GuiSatelliteGeometry,
+    GuiPvtCandidate, GuiPvtCandidateStatus, GuiPvtQuality, GuiPvtTime, GuiPvtVelocity,
+    GuiPvtViewModel, GuiSatelliteGeometry,
 };
 use chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc};
 use directories::ProjectDirs;
-use gnss_core::pvt::{PvtEpochSolutionKind, UtcDateTime};
+use gnss_core::pvt::{PvtCandidateDisposition, PvtEpochSolutionKind, UtcDateTime};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -85,6 +85,8 @@ pub struct StoredEpoch {
     pub satellites: Vec<StoredSatellite>,
     #[serde(default)]
     pub candidates: Vec<StoredCandidate>,
+    #[serde(default)]
+    pub candidate_statuses: Vec<StoredCandidateStatus>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -170,6 +172,12 @@ pub struct StoredCandidate {
     pub velocity: Option<StoredVelocity>,
     pub quality: StoredQuality,
     pub satellites: Vec<StoredSatellite>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredCandidateStatus {
+    pub solution_kind: String,
+    pub disposition: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +275,11 @@ impl StoredEpoch {
             channels: channels.iter().map(StoredChannel::from).collect(),
             satellites: value.satellites.iter().map(StoredSatellite::from).collect(),
             candidates: value.candidates.iter().map(StoredCandidate::from).collect(),
+            candidate_statuses: value
+                .candidate_statuses
+                .iter()
+                .map(StoredCandidateStatus::from)
+                .collect(),
         }
     }
 
@@ -336,6 +349,11 @@ impl StoredEpoch {
                 .map(GuiSatelliteGeometry::from)
                 .collect(),
             candidates: self.candidates.iter().map(GuiPvtCandidate::from).collect(),
+            candidate_statuses: self
+                .candidate_statuses
+                .iter()
+                .map(GuiPvtCandidateStatus::from)
+                .collect(),
         }
     }
 
@@ -363,6 +381,16 @@ fn parse_solution_kind(value: &str) -> PvtEpochSolutionKind {
         "Smoothed" => PvtEpochSolutionKind::Smoothed,
         "Kalman" => PvtEpochSolutionKind::Kalman,
         _ => PvtEpochSolutionKind::Unconverged,
+    }
+}
+
+fn parse_candidate_disposition(value: &str) -> PvtCandidateDisposition {
+    match value {
+        "Selected" => PvtCandidateDisposition::Selected,
+        "Available" => PvtCandidateDisposition::Available,
+        "NonConverged" => PvtCandidateDisposition::NonConverged,
+        "QualityRejected" => PvtCandidateDisposition::QualityRejected,
+        _ => PvtCandidateDisposition::Unavailable,
     }
 }
 
@@ -479,6 +507,24 @@ impl From<&StoredCandidate> for GuiPvtCandidate {
                 .iter()
                 .map(GuiSatelliteGeometry::from)
                 .collect(),
+        }
+    }
+}
+
+impl From<&GuiPvtCandidateStatus> for StoredCandidateStatus {
+    fn from(value: &GuiPvtCandidateStatus) -> Self {
+        Self {
+            solution_kind: format!("{:?}", value.solution_kind),
+            disposition: format!("{:?}", value.disposition),
+        }
+    }
+}
+
+impl From<&StoredCandidateStatus> for GuiPvtCandidateStatus {
+    fn from(value: &StoredCandidateStatus) -> Self {
+        Self {
+            solution_kind: parse_solution_kind(&value.solution_kind),
+            disposition: parse_candidate_disposition(&value.disposition),
         }
     }
 }
@@ -859,6 +905,7 @@ mod tests {
         assert_eq!(restored.quality.used_prns, epoch.quality.used_prns);
         assert_eq!(restored.satellites, epoch.satellites);
         assert_eq!(restored.candidates.len(), epoch.candidates.len());
+        assert_eq!(restored.candidate_statuses, epoch.candidate_statuses);
         for (restored, expected) in restored.candidates.iter().zip(&epoch.candidates) {
             assert_eq!(restored.solution_kind, expected.solution_kind);
             assert!((restored.latitude_deg - expected.latitude_deg).abs() < 1e-12);
@@ -959,6 +1006,7 @@ mod tests {
         assert!(stored.channels.is_empty());
         assert!(stored.satellites.is_empty());
         assert!(stored.candidates.is_empty());
+        assert!(stored.candidate_statuses.is_empty());
     }
 
     #[test]

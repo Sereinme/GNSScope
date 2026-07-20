@@ -2,7 +2,7 @@
 
 This file is the historical PVT implementation checklist. See `docs/receiver-readiness-audit.md` for the authoritative current gaps, verification baseline, next product milestone, and runtime optimization backlog.
 
-Current status: positioning, velocity, and absolute-time correctness are implemented and verified on CTTC real data. Streaming input, deterministic parallel acquisition/tracking, periodic reacquisition, the real GUI worker, persistence, editable receiver configuration, and historical replay are implemented. Raw, Smoothed, and Kalman candidates are persisted; their selected-epoch comparison drawer is the next GUI milestone.
+Current status: positioning, velocity, and absolute-time correctness are implemented and verified on CTTC real data. Streaming input, deterministic parallel acquisition/tracking, periodic reacquisition, the real GUI worker, persistence, editable receiver configuration, historical replay, and the selected-epoch Raw/Smoothed/Kalman comparison drawer are implemented.
 
 ## User Checklist
 
@@ -34,7 +34,7 @@ Historical release verification and the current targeted library baseline run th
 
 - `cargo fmt --check`: passed.
 - `cargo test -p gnss-core --lib`: passed, 128 tests on 2026-07-20.
-- `cargo test -p gnss-gui --lib`: passed, 51 tests on 2026-07-20.
+- `cargo test -p gnss-gui --lib`: passed, 52 tests on 2026-07-20.
 - `cargo clippy --workspace --tests -- -D warnings`: passed with no issues.
 - `cargo test --release -p gnss-core --test pvt_e2e -- --nocapture`: passed on real CTTC data.
 - `streaming_runner_real` passed the 60 s production stream: 5 acquisitions, 32 nav subframes, 410 PVT outputs, and UTC `2013-04-04 06:24:07.029`.
@@ -43,4 +43,4 @@ The real-data e2e covers acquisition, tracking, bit sync, nav decode, optional R
 
 ## Current Follow-up
 
-Do not use this historical checklist as a second backlog. The agreed next feature is the read-only selected-epoch Raw/Smoothed/Kalman comparison drawer, including structured candidate disposition. Receiver hardening and performance priorities are maintained in `docs/receiver-readiness-audit.md`.
+Do not use this historical checklist as a second backlog. The next receiver-hardening task is a real-IQ regression that interrupts PVT by losing enough simultaneous channels and proves output resumes after reacquisition. Performance priorities are maintained in `docs/receiver-readiness-audit.md`.

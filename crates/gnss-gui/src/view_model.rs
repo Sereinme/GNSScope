@@ -1,6 +1,6 @@
 use gnss_core::pvt::{
-    PvtCandidateOutput, PvtEpochOutput, PvtEpochSolutionKind, PvtQualityOutput, PvtSatelliteOutput,
-    PvtVelocityOutput, UtcDateTime,
+    PvtCandidateDisposition, PvtCandidateOutput, PvtCandidateStatusOutput, PvtEpochOutput,
+    PvtEpochSolutionKind, PvtQualityOutput, PvtSatelliteOutput, PvtVelocityOutput, UtcDateTime,
 };
 
 #[derive(Debug, Clone)]
@@ -16,6 +16,7 @@ pub struct GuiPvtViewModel {
     pub quality: GuiPvtQuality,
     pub satellites: Vec<GuiSatelliteGeometry>,
     pub candidates: Vec<GuiPvtCandidate>,
+    pub candidate_statuses: Vec<GuiPvtCandidateStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +30,12 @@ pub struct GuiPvtCandidate {
     pub velocity: Option<GuiPvtVelocity>,
     pub quality: GuiPvtQuality,
     pub satellites: Vec<GuiSatelliteGeometry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuiPvtCandidateStatus {
+    pub solution_kind: PvtEpochSolutionKind,
+    pub disposition: PvtCandidateDisposition,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -115,11 +122,51 @@ impl GuiPvtViewModel {
                 .iter()
                 .map(GuiPvtCandidate::from_output)
                 .collect(),
+            candidate_statuses: output
+                .candidate_statuses
+                .iter()
+                .map(GuiPvtCandidateStatus::from_output)
+                .collect(),
         }
     }
 
     pub fn from_epoch_outputs(outputs: &[PvtEpochOutput]) -> Vec<Self> {
         outputs.iter().map(Self::from_epoch_output).collect()
+    }
+
+    pub fn candidate(&self, kind: PvtEpochSolutionKind) -> Option<&GuiPvtCandidate> {
+        self.candidates
+            .iter()
+            .find(|candidate| candidate.solution_kind == kind)
+    }
+
+    pub fn candidate_disposition(&self, kind: PvtEpochSolutionKind) -> PvtCandidateDisposition {
+        self.candidate_statuses
+            .iter()
+            .find(|status| status.solution_kind == kind)
+            .map(|status| status.disposition)
+            .unwrap_or_else(|| {
+                if self.solution_kind == kind {
+                    PvtCandidateDisposition::Selected
+                } else if let Some(candidate) = self.candidate(kind) {
+                    if candidate.quality.converged {
+                        PvtCandidateDisposition::Available
+                    } else {
+                        PvtCandidateDisposition::NonConverged
+                    }
+                } else {
+                    PvtCandidateDisposition::Unavailable
+                }
+            })
+    }
+}
+
+impl GuiPvtCandidateStatus {
+    fn from_output(output: &PvtCandidateStatusOutput) -> Self {
+        Self {
+            solution_kind: output.solution_kind,
+            disposition: output.disposition,
+        }
     }
 }
 
@@ -263,6 +310,7 @@ mod tests {
                 raim_excluded: false,
             }],
             candidates: Vec::new(),
+            candidate_statuses: Vec::new(),
         };
 
         let view = GuiPvtViewModel::from_epoch_output(&output);
