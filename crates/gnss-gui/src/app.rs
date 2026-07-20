@@ -1,7 +1,7 @@
 use crate::{
     spawn_streaming_worker, ActiveWorker, GuiChannelStatus, GuiDiagnosticEvent,
-    GuiDiagnosticEventKind, GuiProcessingSettings, GuiPvtViewModel, GuiSatelliteGeometry,
-    ProcessingRun, RunLibrary, RunStatus, StoredEpoch, WorkerEvent,
+    GuiProcessingSettings, GuiPvtViewModel, GuiSatelliteGeometry, ProcessingRun, RunLibrary,
+    RunStatus, StoredEpoch, WorkerEvent,
 };
 use gpui::prelude::*;
 use gpui::{
@@ -725,14 +725,6 @@ impl GnsscopeApp {
         self.selected_run()
             .map(|run| &run.settings)
             .unwrap_or(&self.settings)
-    }
-
-    fn display_diagnostic_events(&self) -> &[GuiDiagnosticEvent] {
-        if self.selected_run_id.is_some() && self.selected_run_id == self.live_run_id {
-            &self.diagnostic_events
-        } else {
-            &self.historical_diagnostic_events
-        }
     }
 
     fn file_label(&self) -> SharedString {
@@ -1547,24 +1539,25 @@ impl GnsscopeApp {
         let epochs = self.display_epochs();
         let channels = self.display_channels();
         let pvt = self.current_pvt();
-        let latitude = pvt
+        let valid_pvt = pvt.filter(|pvt| pvt_position_is_displayable(pvt));
+        let latitude = valid_pvt
             .map(|p| format!("{:.7}", p.latitude_deg))
             .unwrap_or_else(|| "--".to_string());
-        let longitude = pvt
+        let longitude = valid_pvt
             .map(|p| format!("{:.7}", p.longitude_deg))
             .unwrap_or_else(|| "--".to_string());
-        let altitude = pvt
+        let altitude = valid_pvt
             .map(|p| format!("{:.2}", p.altitude_m))
             .unwrap_or_else(|| "--".to_string());
-        let speed = pvt
+        let speed = valid_pvt
             .and_then(|p| p.velocity.as_ref())
             .map(|v| format!("{:.3}", v.speed_mps))
             .unwrap_or_else(|| "--".to_string());
-        let clock = pvt
+        let clock = valid_pvt
             .and_then(|p| p.time.receiver_clock_drift_ppm)
             .map(|v| format!("{v:.4}"))
             .unwrap_or_else(|| "--".to_string());
-        let hdop = pvt
+        let hdop = valid_pvt
             .map(|p| format!("{:.2}", p.quality.hdop))
             .unwrap_or_else(|| "--".to_string());
         let utc = pvt
@@ -1584,16 +1577,20 @@ impl GnsscopeApp {
                     .grid()
                     .grid_cols(2)
                     .gap(px(12.))
-                    .child(self.plot_panel(
-                        "卫星天空图",
-                        "真实方位/仰角",
-                        sky_plot(
-                            pvt.map(|pvt| pvt.satellites.as_slice()).unwrap_or(&[]),
-                            channels,
+                    .child(
+                        self.plot_panel(
+                            "卫星天空图",
+                            "真实方位/仰角",
+                            sky_plot(
+                                valid_pvt
+                                    .map(|pvt| pvt.satellites.as_slice())
+                                    .unwrap_or(&[]),
+                                channels,
+                                palette,
+                            ),
                             palette,
                         ),
-                        palette,
-                    ))
+                    )
                     .child(self.plot_panel(
                         "ENU 位置",
                         "首个有效 epoch 为原点",
@@ -1605,10 +1602,6 @@ impl GnsscopeApp {
                 "稳定通道 C/N0",
                 "仅显示 Healthy PRN",
                 cn0_plot(channels, palette),
-                palette,
-            )))
-            .child(div().mt(px(12.)).child(receiver_event_history(
-                self.display_diagnostic_events(),
                 palette,
             )))
             .child(
@@ -1623,45 +1616,58 @@ impl GnsscopeApp {
                         velocity_plot(epochs, self.selected_epoch, palette),
                         palette,
                     ))
+                    .child(self.plot_panel(
+                        "高度历史",
+                        altitude_statistics(epochs),
+                        altitude_plot(epochs, self.selected_epoch, palette),
+                        palette,
+                    )),
+            )
+            .child(
+                div()
+                    .mt(px(12.))
+                    .rounded(px(6.))
+                    .bg(palette.surface)
+                    .border_1()
+                    .border_color(palette.border)
+                    .p(px(14.))
+                    .child(Self::section_title(
+                        "当前 PVT",
+                        if valid_pvt.is_some() {
+                            pvt.map(|p| format!("{:?}", p.solution_kind))
+                                .unwrap_or_else(|| "等待解算".to_string())
+                        } else if pvt.is_some() {
+                            "质量门限拒绝".to_string()
+                        } else {
+                            "等待解算".to_string()
+                        },
+                        palette,
+                    ))
                     .child(
                         div()
-                            .rounded(px(6.))
-                            .bg(palette.surface)
-                            .border_1()
+                            .mt(px(10.))
+                            .flex()
+                            .child(Self::metric("纬度", latitude, "°", palette))
+                            .child(Self::metric("经度", longitude, "°", palette))
+                            .child(Self::metric("高程", altitude, "m", palette)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .child(Self::metric("三维速度", speed, "m/s", palette))
+                            .child(Self::metric("钟漂", clock, "ppm", palette))
+                            .child(Self::metric("HDOP", hdop, "", palette)),
+                    )
+                    .child(
+                        div()
+                            .mt(px(8.))
+                            .pt(px(10.))
+                            .border_t_1()
                             .border_color(palette.border)
-                            .p(px(14.))
-                            .child(Self::section_title(
-                                "当前 PVT",
-                                pvt.map(|p| format!("{:?}", p.solution_kind))
-                                    .unwrap_or_else(|| "等待解算".to_string()),
-                                palette,
-                            ))
-                            .child(
-                                div()
-                                    .mt(px(10.))
-                                    .flex()
-                                    .child(Self::metric("纬度", latitude, "°", palette))
-                                    .child(Self::metric("经度", longitude, "°", palette))
-                                    .child(Self::metric("高程", altitude, "m", palette)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .child(Self::metric("三维速度", speed, "m/s", palette))
-                                    .child(Self::metric("钟漂", clock, "ppm", palette))
-                                    .child(Self::metric("HDOP", hdop, "", palette)),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(8.))
-                                    .pt(px(10.))
-                                    .border_t_1()
-                                    .border_color(palette.border)
-                                    .text_size(px(13.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(palette.text)
-                                    .child(utc),
-                            ),
+                            .text_size(px(13.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(palette.text)
+                            .child(utc),
                     ),
             )
             .child(
@@ -1703,8 +1709,8 @@ impl GnsscopeApp {
 
     fn plot_panel(
         &self,
-        title: &'static str,
-        subtitle: &'static str,
+        title: impl Into<SharedString>,
+        subtitle: impl Into<SharedString>,
         plot: impl IntoElement,
         palette: Palette,
     ) -> impl IntoElement {
@@ -1910,77 +1916,6 @@ fn sky_plot_position(azimuth_deg: f64, elevation_deg: f64) -> Option<(f32, f32)>
     ))
 }
 
-fn receiver_event_history(events: &[GuiDiagnosticEvent], palette: Palette) -> impl IntoElement {
-    let recent = events.iter().rev().take(8).cloned().collect::<Vec<_>>();
-    div()
-        .rounded(px(6.))
-        .bg(palette.surface)
-        .border_1()
-        .border_color(palette.border)
-        .p(px(14.))
-        .child(GnsscopeApp::section_title(
-            "接收机事件",
-            format!("{} 条离散事件", events.len()),
-            palette,
-        ))
-        .children(if recent.is_empty() {
-            vec![div()
-                .mt(px(10.))
-                .text_size(px(11.))
-                .text_color(palette.muted)
-                .child("暂无捕获、重捕获、锁定或导航事件")
-                .into_any_element()]
-        } else {
-            recent
-                .into_iter()
-                .map(|event| {
-                    let color = match event.kind {
-                        GuiDiagnosticEventKind::Acquisition
-                        | GuiDiagnosticEventKind::Reacquisition
-                        | GuiDiagnosticEventKind::Navigation => palette.healthy,
-                        GuiDiagnosticEventKind::AcquisitionFailed
-                        | GuiDiagnosticEventKind::ReacquisitionFailed => palette.warning,
-                        GuiDiagnosticEventKind::ChannelState => palette.accent,
-                    };
-                    div()
-                        .mt(px(8.))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .text_size(px(10.))
-                        .child(
-                            div()
-                                .w(px(52.))
-                                .text_color(palette.muted)
-                                .child(format!("{} ms", event.now_ms)),
-                        )
-                        .child(
-                            div().w(px(32.)).text_color(color).child(
-                                event
-                                    .prn
-                                    .map_or_else(|| "--".to_string(), |prn| format!("G{:02}", prn)),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .w(px(110.))
-                                .text_color(color)
-                                .child(event.kind.as_str()),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_color(palette.muted)
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(event.detail),
-                        )
-                        .into_any_element()
-                })
-                .collect()
-        })
-}
-
 fn cardinal_label(label: &'static str, x: f32, y: f32, palette: Palette) -> impl IntoElement {
     div()
         .absolute()
@@ -2052,6 +1987,16 @@ fn cn0_plot(channels: &[GuiChannelStatus], palette: Palette) -> impl IntoElement
         }))
 }
 
+fn pvt_position_is_displayable(pvt: &GuiPvtViewModel) -> bool {
+    let quality = gnss_core::pvt::PositionQualityConfig::default();
+    pvt.quality.converged
+        && pvt.ecef_m.iter().all(|value| value.is_finite())
+        && pvt.latitude_deg.is_finite()
+        && pvt.longitude_deg.is_finite()
+        && pvt.altitude_m.is_finite()
+        && (quality.min_altitude_m..=quality.max_altitude_m).contains(&pvt.altitude_m)
+}
+
 fn position_plot(
     epochs: &[GuiPvtViewModel],
     selected_epoch: Option<usize>,
@@ -2060,9 +2005,7 @@ fn position_plot(
     let lla = epochs
         .iter()
         .enumerate()
-        .filter(|(_, pvt)| {
-            pvt.quality.converged && pvt.latitude_deg.is_finite() && pvt.longitude_deg.is_finite()
-        })
+        .filter(|(_, pvt)| pvt_position_is_displayable(pvt))
         .map(|(index, pvt)| (index, pvt.latitude_deg, pvt.longitude_deg))
         .collect::<Vec<_>>();
     let points = lla
@@ -2170,6 +2113,49 @@ fn velocity_plot(
     )
 }
 
+fn altitude_plot(
+    epochs: &[GuiPvtViewModel],
+    selected_epoch: Option<usize>,
+    palette: Palette,
+) -> impl IntoElement {
+    let points = epochs
+        .iter()
+        .enumerate()
+        .filter(|(_, pvt)| pvt_position_is_displayable(pvt))
+        .map(|(index, pvt)| (index as f64, pvt.altitude_m))
+        .collect::<Vec<_>>();
+    line_plot(
+        points,
+        palette.accent,
+        palette,
+        selected_epoch.map(|index| index as f64),
+    )
+}
+
+fn altitude_statistics(epochs: &[GuiPvtViewModel]) -> String {
+    let values = epochs
+        .iter()
+        .filter(|pvt| pvt_position_is_displayable(pvt))
+        .map(|pvt| pvt.altitude_m)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return "等待有效高度".to_string();
+    }
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let standard_deviation = (values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / values.len() as f64)
+        .sqrt();
+    let minimum = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let maximum = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    format!(
+        "均值 {:.1} m · σ {:.1} m · {:.1}–{:.1} m",
+        mean, standard_deviation, minimum, maximum
+    )
+}
+
 fn line_plot(
     points: Vec<(f64, f64)>,
     color: Hsla,
@@ -2263,6 +2249,26 @@ mod sky_plot_tests {
         assert!((zenith.0 - 0.5).abs() < 1e-6);
         assert!((zenith.1 - 0.5).abs() < 1e-6);
         assert!(sky_plot_position(0.0, -0.1).is_none());
+    }
+}
+
+#[cfg(test)]
+mod position_quality_tests {
+    use super::{altitude_statistics, pvt_position_is_displayable};
+
+    #[test]
+    fn legacy_implausible_altitude_is_excluded_from_position_and_statistics() {
+        let mut valid = crate::sample_pvt_view_model();
+        valid.altitude_m = 70.0;
+        let mut implausible = valid.clone();
+        implausible.altitude_m = 1_123_486.0;
+
+        assert!(pvt_position_is_displayable(&valid));
+        assert!(!pvt_position_is_displayable(&implausible));
+        assert_eq!(
+            altitude_statistics(&[valid, implausible]),
+            "均值 70.0 m · σ 0.0 m · 70.0–70.0 m"
+        );
     }
 }
 

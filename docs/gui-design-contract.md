@@ -40,6 +40,8 @@ Streaming PVT epoch identity is monotonic across successive single-epoch solves.
 
 The sky plot consumes the selected position solution's final WLS satellite diagnostics. Azimuth/elevation, residual, standardized residual, uncertainty, and solution-use flags are converted into the GUI view model and persisted with each epoch. The display uses zenith at center, horizon at the outer ring, north up, and east right. Markers are joined to the same epoch's channel snapshot by PRN and use semantic lock/solution colors. Satellites excluded before the final WLS diagnostics are not assigned fabricated geometry. Epoch rows written by versions before satellite persistence deserialize with an empty geometry list and require IQ reprocessing to populate the plot.
 
+Continuous PVT applies a terrestrial position-quality gate before a mathematically converged WLS candidate can enter velocity, Hatch, Kalman, persistence, or the visible position series. This is required for exactly determined four-satellite epochs: one millisecond-class pseudorange error can be fitted with nearly zero residual while producing a receiver altitude above one million metres. The default profile accepts altitudes from `-2 km` to `100 km` and constrains inter-epoch displacement using a `12 km/s` maximum implied speed plus a `1 km` jump margin. The limits are configuration, not a static-position clamp. Historical rows written before this gate are defensively excluded from position, sky, and altitude views when they violate the same altitude range.
+
 This vertical slice is usable but does not yet satisfy the complete interaction contract. Remaining work is explicit:
 
 - persist Raw, Smoothed, and Kalman candidates instead of only the selected solution;
@@ -82,7 +84,7 @@ GNSScope opens directly into the receiver workspace, not a landing page.
 - Quality pane: satellites used/excluded, residual RMS, standardized residual RMS, HDOP/GDOP, horizontal/vertical sigma.
 - Lower diagnostics: per-channel C/N0, Doppler, lock state, and residual chart.
 
-The main workspace is a single scrollable overview rather than top-level `Overview`, `Signals`, or `PVT` tabs. Its stable order is: task command bar, processing status/progress, sky plot plus ENU position view, full-width channel/C/N0 diagnostics, velocity and selected-epoch PVT details, then the shared epoch timeline. Core correlations remain visible in one navigation context.
+The main workspace is a single scrollable overview rather than top-level `Overview`, `Signals`, or `PVT` tabs. Its stable order is: task command bar, processing status/progress, sky plot plus ENU position view, full-width channel/C/N0 diagnostics, velocity and altitude histories, selected-epoch PVT details, then the shared epoch timeline. Height history reports mean, population standard deviation, and valid range. Receiver-event history remains persisted for diagnostics but is not shown in the primary workspace. Core correlations remain visible in one navigation context.
 
 Major plots expose a focus command that temporarily expands one visualization to the work area and restores the overview without losing the selected run, epoch, PRN, or live-follow state. Segmented controls inside a plot may change its analytical mode; they do not replace top-level navigation.
 

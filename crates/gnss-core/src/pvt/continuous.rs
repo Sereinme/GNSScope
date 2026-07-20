@@ -96,6 +96,29 @@ pub struct VelocityQualityConfig {
     pub rejected_velocity_fallback_sigma_mps: Option<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PositionQualityConfig {
+    /// Minimum plausible receiver altitude for the terrestrial receiver profile [m].
+    pub min_altitude_m: f64,
+    /// Maximum plausible receiver altitude for the terrestrial receiver profile [m].
+    pub max_altitude_m: f64,
+    /// Maximum implied receiver speed between accepted epochs [m/s].
+    pub max_implied_speed_mps: f64,
+    /// Fixed position-jump allowance for measurement noise and reacquisition [m].
+    pub jump_margin_m: f64,
+}
+
+impl Default for PositionQualityConfig {
+    fn default() -> Self {
+        Self {
+            min_altitude_m: -2_000.0,
+            max_altitude_m: 100_000.0,
+            max_implied_speed_mps: 12_000.0,
+            jump_margin_m: 1_000.0,
+        }
+    }
+}
+
 impl Default for VelocityQualityConfig {
     fn default() -> Self {
         Self {
@@ -114,6 +137,7 @@ pub struct ContinuousPvtConfig {
     pub ephemeris_selection: EphemerisSelectionConfig,
     pub kalman: Option<KalmanConfig>,
     pub velocity_quality: VelocityQualityConfig,
+    pub position_quality: PositionQualityConfig,
     pub wls: WlsConfig,
     /// Approximate full GPS week used to expand a broadcast 10-bit week number.
     pub gps_week_rollover_reference: Option<u16>,
@@ -454,6 +478,13 @@ pub struct ContinuousPvtRunner {
     config: ContinuousPvtConfig,
     hatch: Option<HatchSmoother>,
     kalman: Option<PositionVelocityKalman>,
+    last_accepted_position: Option<AcceptedPosition>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AcceptedPosition {
+    ecef: Ecef,
+    receive_time_sow: f64,
 }
 
 impl ContinuousPvtRunner {
@@ -464,6 +495,7 @@ impl ContinuousPvtRunner {
             config,
             hatch,
             kalman,
+            last_accepted_position: None,
         }
     }
 
@@ -635,7 +667,9 @@ impl ContinuousPvtRunner {
         P: FnMut(&[Pseudorange], &EphemerisMap) -> Vec<Pseudorange>,
         V: FnMut(&[Pseudorange], &PvtSolution, &EphemerisMap) -> Option<VelocitySolution>,
     {
-        epochs
+        let position_quality = self.config.position_quality.clone();
+        let mut last_accepted_position = self.last_accepted_position;
+        let results = epochs
             .iter()
             .enumerate()
             .map(|(epoch_index, epoch)| {
@@ -646,7 +680,22 @@ impl ContinuousPvtRunner {
                 let raw_pseudoranges = preprocess(&epoch.pseudoranges, &ephemerides);
                 let mut solve_raw =
                     |pseudoranges: &[Pseudorange]| solve(pseudoranges, &ephemerides);
-                let raw_solution = solve_if_enough_satellites(&raw_pseudoranges, &mut solve_raw);
+                let mut raw_solution =
+                    solve_if_enough_satellites(&raw_pseudoranges, &mut solve_raw);
+                let receive_time_sow = mean_receive_time_sow(&raw_pseudoranges);
+                if !position_solution_is_acceptable(
+                    &raw_solution,
+                    receive_time_sow,
+                    last_accepted_position,
+                    &position_quality,
+                ) {
+                    raw_solution.converged = false;
+                } else if let Some(receive_time_sow) = receive_time_sow {
+                    last_accepted_position = Some(AcceptedPosition {
+                        ecef: raw_solution.ecef,
+                        receive_time_sow,
+                    });
+                }
                 let raw_velocity = velocity_if_position_converged(
                     &raw_pseudoranges,
                     &raw_solution,
@@ -719,7 +768,9 @@ impl ContinuousPvtRunner {
                     kalman_solution,
                 }
             })
-            .collect()
+            .collect();
+        self.last_accepted_position = last_accepted_position;
+        results
     }
 }
 
@@ -850,6 +901,45 @@ where
         kalman: config
             .rejected_velocity_fallback_sigma_mps
             .map(zero_velocity_fallback),
+    }
+}
+
+fn position_solution_is_acceptable(
+    solution: &PvtSolution,
+    receive_time_sow: Option<f64>,
+    previous: Option<AcceptedPosition>,
+    config: &PositionQualityConfig,
+) -> bool {
+    if !solution.converged
+        || solution.ecef.iter().any(|value| !value.is_finite())
+        || solution.lla.iter().any(|value| !value.is_finite())
+        || !(config.min_altitude_m..=config.max_altitude_m).contains(&solution.lla[2])
+    {
+        return false;
+    }
+    let Some((receive_time_sow, previous)) = receive_time_sow.zip(previous) else {
+        return true;
+    };
+    let delta_time_s = wrapped_gps_time_delta_s(receive_time_sow, previous.receive_time_sow);
+    if delta_time_s <= 0.0 {
+        return true;
+    }
+    let delta_position_m = norm3([
+        solution.ecef[0] - previous.ecef[0],
+        solution.ecef[1] - previous.ecef[1],
+        solution.ecef[2] - previous.ecef[2],
+    ]);
+    let maximum_jump_m =
+        config.jump_margin_m.max(0.0) + config.max_implied_speed_mps.max(0.0) * delta_time_s;
+    delta_position_m <= maximum_jump_m
+}
+
+fn wrapped_gps_time_delta_s(current_sow: f64, previous_sow: f64) -> f64 {
+    let delta = (current_sow - previous_sow).rem_euclid(604_800.0);
+    if delta > 302_400.0 {
+        delta - 604_800.0
+    } else {
+        delta
     }
 }
 
@@ -1259,6 +1349,56 @@ mod tests {
 
         assert!(results[0].raw_solution.converged);
         assert!(results[0].raw_velocity_solution.is_none());
+    }
+
+    #[test]
+    fn test_continuous_runner_rejects_physically_implausible_position_jump() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig::default());
+        let epochs = vec![
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_000.0, 100.0),
+            },
+            PseudorangeEpoch {
+                pseudoranges: four_prns(20_000_000.0, 100.1),
+            },
+        ];
+        let valid_ecef = lla_to_ecef([41.2748_f64.to_radians(), 1.9876_f64.to_radians(), 70.0]);
+        let bad_lla = [
+            39.5597_f64.to_radians(),
+            -0.2507_f64.to_radians(),
+            1_123_486.0,
+        ];
+        let bad_ecef = lla_to_ecef(bad_lla);
+        let mut solve_calls = 0;
+
+        let results = runner.solve_epochs_with(&epochs, |_| {
+            solve_calls += 1;
+            if solve_calls == 1 {
+                PvtSolution {
+                    ecef: valid_ecef,
+                    lla: [41.2748_f64.to_radians(), 1.9876_f64.to_radians(), 70.0],
+                    n_sats: 4,
+                    converged: true,
+                    ..Default::default()
+                }
+            } else {
+                PvtSolution {
+                    ecef: bad_ecef,
+                    lla: bad_lla,
+                    n_sats: 4,
+                    residual_rms_m: 1e-8,
+                    converged: true,
+                    ..Default::default()
+                }
+            }
+        });
+
+        assert!(results[0].raw_solution.converged);
+        assert!(!results[1].raw_solution.converged);
+        assert_eq!(
+            results[1].to_output().solution_kind,
+            PvtEpochSolutionKind::Unconverged
+        );
     }
 
     #[test]

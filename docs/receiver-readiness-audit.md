@@ -42,6 +42,10 @@ The current worker owns `StreamingPvtRunner`, supports cooperative cancellation,
 - Peak working set/private bytes for the current bounded streaming implementation.
 - Position, velocity, clock drift, and time accuracy across front ends and datasets other than CTTC.
 
+## Position Outlier Gate
+
+The 100 s CTTC GUI history exposed 201 mathematically converged four-satellite WLS epochs with physically impossible altitude, including epochs around `1.12-2.10 Mm`. Their post-fit residuals were near zero because four pseudoranges exactly determine the four WLS unknowns, so residual-only RAIM cannot identify the bad measurement without redundancy. `ContinuousPvtRunner` now rejects candidates outside the configured terrestrial altitude profile or beyond the configured inter-epoch motion envelope before velocity and filtering. A 100 s release streaming regression passes with no converged output outside the altitude gate. The GUI also applies the altitude gate when reading legacy SQLite rows so old outliers no longer distort ENU or altitude history.
+
 ## Runtime Optimization Candidates
 
 ### Priority 1: profile and optimize tracking correlation

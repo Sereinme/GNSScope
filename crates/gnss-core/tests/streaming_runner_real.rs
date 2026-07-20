@@ -3,7 +3,10 @@
 //! The default smoke duration is short. `GNSSCOPE_STREAMING_TEST_MS` extends it
 //! into a production-path throughput and navigation/PVT regression run.
 
-use gnss_core::receiver::{ReceiverChannelState, StreamingPvtConfig, StreamingPvtRunner};
+use gnss_core::pvt::PositionQualityConfig;
+use gnss_core::receiver::{
+    ReceiverChannelState, StreamingPvtConfig, StreamingPvtEvent, StreamingPvtRunner,
+};
 use std::path::Path;
 use std::time::Instant;
 
@@ -42,8 +45,20 @@ fn test_streaming_runner_real_data_smoke() {
     );
 
     let started = Instant::now();
+    let position_quality = PositionQualityConfig::default();
+    let mut implausible_position_epochs = Vec::new();
     let summary = runner
-        .stream_iq_file_until_ms(max_ms, |_| {})
+        .stream_iq_file_until_ms(max_ms, |step| {
+            implausible_position_epochs.extend(step.events.iter().filter_map(|event| {
+                let StreamingPvtEvent::PvtOutput(output) = event else {
+                    return None;
+                };
+                (output.quality.converged
+                    && !(position_quality.min_altitude_m..=position_quality.max_altitude_m)
+                        .contains(&output.lla_rad[2]))
+                .then_some((output.epoch_index, output.lla_rad[2]))
+            }));
+        })
         .expect("stream real CTTC IQ");
     let elapsed = started.elapsed();
     eprintln!(
@@ -69,6 +84,10 @@ fn test_streaming_runner_real_data_smoke() {
     assert!(
         summary.event_counts.tracking_updates >= summary.event_counts.acquisition_detections,
         "tracking should advance for acquired channels"
+    );
+    assert!(
+        implausible_position_epochs.is_empty(),
+        "converged PVT outputs outside the terrestrial altitude gate: {implausible_position_epochs:?}"
     );
 
     let final_state = summary.final_state.expect("streaming final state");
