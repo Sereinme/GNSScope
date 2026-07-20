@@ -17,14 +17,108 @@ use gpui_component::{
     slider::{Slider, SliderEvent, SliderState},
     ActiveTheme, Disableable, IconName, TitleBar,
 };
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 use uuid::Uuid;
 
+const EDITABLE_SETTING_FIELDS: &[&str] = &[
+    "sample_rate_hz",
+    "intermediate_frequency_hz",
+    "rinex_nav_path",
+    "initial_position_lla_deg_m",
+    "chunk_ms",
+    "pvt_output_rate_ms",
+    "acquisition_window_ms",
+    "acquisition_noncoherent_integrations",
+    "acquisition_threshold",
+    "cold_acquisition_interval_ms",
+    "acquisition_doppler_max_hz",
+    "acquisition_doppler_step_hz",
+    "reacquisition_interval_ms",
+    "max_acquisition_prns_per_scan",
+    "dll_bandwidth_hz",
+    "pll_bandwidth_hz",
+    "early_late_spacing_chips",
+    "cn0_samples",
+    "cn0_smoother_alpha",
+    "minimum_pll_lock_metric",
+    "minimum_cn0_db_hz",
+    "probation_good_epochs",
+    "fixed_prns",
+];
+
 fn color(value: u32) -> Hsla {
     rgb(value).into()
+}
+
+fn setting_text_value(settings: &GuiProcessingSettings, field: &str) -> String {
+    match field {
+        "sample_rate_hz" => format!("{:.6}", settings.sample_rate_hz / 1e6),
+        "intermediate_frequency_hz" => format!("{:.6}", settings.intermediate_frequency_hz / 1e6),
+        "rinex_nav_path" => settings
+            .rinex_nav_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        "initial_position_lla_deg_m" => settings
+            .initial_position_lla_deg_m
+            .map(|[lat, lon, alt]| format!("{lat:.7}, {lon:.7}, {alt:.3}"))
+            .unwrap_or_default(),
+        "fixed_prns" => settings
+            .fixed_prns
+            .as_ref()
+            .map(|prns| prns.iter().map(u8::to_string).collect::<Vec<_>>().join(","))
+            .unwrap_or_default(),
+        "chunk_ms" => settings.chunk_ms.to_string(),
+        "pvt_output_rate_ms" => settings.pvt_output_rate_ms.to_string(),
+        "acquisition_window_ms" => settings.acquisition_window_ms.to_string(),
+        "acquisition_noncoherent_integrations" => {
+            settings.acquisition_noncoherent_integrations.to_string()
+        }
+        "acquisition_threshold" => settings.acquisition_threshold.to_string(),
+        "cold_acquisition_interval_ms" => settings.cold_acquisition_interval_ms.to_string(),
+        "acquisition_doppler_max_hz" => settings.acquisition_doppler_max_hz.to_string(),
+        "acquisition_doppler_step_hz" => settings.acquisition_doppler_step_hz.to_string(),
+        "reacquisition_interval_ms" => settings.reacquisition_interval_ms.to_string(),
+        "max_acquisition_prns_per_scan" => settings.max_acquisition_prns_per_scan.to_string(),
+        "dll_bandwidth_hz" => settings.dll_bandwidth_hz.to_string(),
+        "pll_bandwidth_hz" => settings.pll_bandwidth_hz.to_string(),
+        "early_late_spacing_chips" => settings.early_late_spacing_chips.to_string(),
+        "cn0_samples" => settings.cn0_samples.to_string(),
+        "cn0_smoother_alpha" => settings.cn0_smoother_alpha.to_string(),
+        "minimum_pll_lock_metric" => settings.minimum_pll_lock_metric.to_string(),
+        "minimum_cn0_db_hz" => settings.minimum_cn0_db_hz.to_string(),
+        "probation_good_epochs" => settings.probation_good_epochs.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn parse_fixed_prns(value: &str) -> Result<Option<Vec<u8>>, ()> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    value
+        .split(|character: char| character == ',' || character == ';' || character.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<u8>().map_err(|_| ()))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn parse_initial_lla(value: &str) -> Result<Option<[f64; 3]>, ()> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    let values = value
+        .split(|character: char| character == ',' || character == ';')
+        .map(|part| part.trim().parse::<f64>().map_err(|_| ()))
+        .collect::<Result<Vec<_>, _>>()?;
+    (values.len() == 3)
+        .then(|| [values[0], values[1], values[2]])
+        .ok_or(())
+        .map(Some)
 }
 
 #[derive(Clone, Copy)]
@@ -183,6 +277,8 @@ pub struct GnsscopeApp {
     selected_epoch: Option<usize>,
     timeline: Entity<SliderState>,
     history_search: Entity<InputState>,
+    setting_inputs: BTreeMap<&'static str, Entity<InputState>>,
+    setting_parse_errors: BTreeMap<&'static str, &'static str>,
     history_filter: HistoryFilter,
     hovered_prn: Option<u8>,
     pinned_prn: Option<u8>,
@@ -253,10 +349,30 @@ impl GnsscopeApp {
             }
         })
         .detach();
-        let initial_run_id = history
-            .iter()
-            .find(|run| run.status != RunStatus::Queued)
-            .map(|run| run.id);
+        let mut setting_inputs = BTreeMap::new();
+        for &field in EDITABLE_SETTING_FIELDS {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx).default_value(setting_text_value(&settings, field))
+            });
+            cx.subscribe(&input, move |this, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    this.apply_setting_text(field, &value);
+                    cx.notify();
+                }
+            })
+            .detach();
+            setting_inputs.insert(field, input);
+        }
+        let initial_run_id = std::env::var_os("GNSSCOPE_START_DRAFT")
+            .is_none()
+            .then(|| {
+                history
+                    .iter()
+                    .find(|run| run.status != RunStatus::Queued)
+                    .map(|run| run.id)
+            })
+            .flatten();
         let initial_stored_epochs = initial_run_id
             .and_then(|id| library.as_ref().and_then(|library| library.epochs(id).ok()))
             .unwrap_or_default();
@@ -295,6 +411,8 @@ impl GnsscopeApp {
             selected_epoch,
             timeline,
             history_search,
+            setting_inputs,
+            setting_parse_errors: BTreeMap::new(),
             history_filter: HistoryFilter::All,
             hovered_prn: None,
             pinned_prn: None,
@@ -390,68 +508,120 @@ impl GnsscopeApp {
         .detach();
     }
 
-    fn apply_cttc_preset(&mut self) {
+    fn apply_cttc_preset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.settings.iq_file_path.clone() else {
             self.status_message = "请先选择 CTTC IQ 文件".to_string();
             return;
         };
         self.settings = GuiProcessingSettings::cttc_spain(path);
+        self.sync_setting_inputs(window, cx);
         self.status_message = "已应用 CTTC Spain 4 Msps / Int16 预设".to_string();
     }
 
-    fn adjust_setting(&mut self, field: &'static str, direction: i32) {
+    fn apply_setting_text(&mut self, field: &'static str, value: &str) {
+        let value = value.trim();
+        macro_rules! assign {
+            ($type:ty, $name:ident) => {{
+                if let Ok(parsed) = value.parse::<$type>() {
+                    self.settings.$name = parsed;
+                    true
+                } else {
+                    false
+                }
+            }};
+        }
+        let parsed = match field {
+            "sample_rate_hz" => match value.parse::<f64>() {
+                Ok(parsed) => {
+                    self.settings.sample_rate_hz = parsed * 1e6;
+                    true
+                }
+                Err(_) => false,
+            },
+            "intermediate_frequency_hz" => match value.parse::<f64>() {
+                Ok(parsed) => {
+                    self.settings.intermediate_frequency_hz = parsed * 1e6;
+                    true
+                }
+                Err(_) => false,
+            },
+            "chunk_ms" => assign!(usize, chunk_ms),
+            "pvt_output_rate_ms" => assign!(u64, pvt_output_rate_ms),
+            "acquisition_window_ms" => assign!(usize, acquisition_window_ms),
+            "acquisition_noncoherent_integrations" => {
+                assign!(usize, acquisition_noncoherent_integrations)
+            }
+            "acquisition_threshold" => assign!(f64, acquisition_threshold),
+            "cold_acquisition_interval_ms" => assign!(u64, cold_acquisition_interval_ms),
+            "acquisition_doppler_max_hz" => assign!(f64, acquisition_doppler_max_hz),
+            "acquisition_doppler_step_hz" => assign!(f64, acquisition_doppler_step_hz),
+            "reacquisition_interval_ms" => assign!(u64, reacquisition_interval_ms),
+            "max_acquisition_prns_per_scan" => assign!(usize, max_acquisition_prns_per_scan),
+            "dll_bandwidth_hz" => assign!(f64, dll_bandwidth_hz),
+            "pll_bandwidth_hz" => assign!(f64, pll_bandwidth_hz),
+            "early_late_spacing_chips" => assign!(f64, early_late_spacing_chips),
+            "cn0_samples" => assign!(usize, cn0_samples),
+            "cn0_smoother_alpha" => assign!(f64, cn0_smoother_alpha),
+            "minimum_pll_lock_metric" => assign!(f64, minimum_pll_lock_metric),
+            "minimum_cn0_db_hz" => assign!(f64, minimum_cn0_db_hz),
+            "probation_good_epochs" => assign!(usize, probation_good_epochs),
+            "rinex_nav_path" => {
+                self.settings.rinex_nav_path = (!value.is_empty()).then(|| PathBuf::from(value));
+                true
+            }
+            "fixed_prns" => parse_fixed_prns(value)
+                .map(|parsed| self.settings.fixed_prns = parsed)
+                .is_ok(),
+            "initial_position_lla_deg_m" => parse_initial_lla(value)
+                .map(|parsed| self.settings.initial_position_lla_deg_m = parsed)
+                .is_ok(),
+            _ => return,
+        };
+        if parsed {
+            self.setting_parse_errors.remove(field);
+        } else {
+            self.setting_parse_errors
+                .insert(field, "请输入有效数值或规定格式");
+        }
+    }
+
+    fn sync_setting_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.setting_parse_errors.clear();
+        let updates = self
+            .setting_inputs
+            .iter()
+            .map(|(&field, input)| {
+                (
+                    input.clone(),
+                    SharedString::from(setting_text_value(&self.settings, field)),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (input, value) in updates {
+            input.update(cx, |input, cx| input.set_value(value, window, cx));
+        }
+    }
+
+    fn edit_selected_configuration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(settings) = self.selected_run().map(|run| run.settings.clone()) else {
+            return;
+        };
+        self.settings = settings;
+        self.selected_run_id = None;
+        self.selected_epoch = None;
+        self.follow_live = false;
+        self.sync_setting_inputs(window, cx);
+        self.status_message = "历史配置已复制为可编辑草稿".to_string();
+    }
+
+    fn cycle_iq_format(&mut self) {
         if self.selected_run_id.is_some() || self.active_run.is_some() {
             return;
         }
-        let settings = &mut self.settings;
-        match field {
-            "chunk_ms" => {
-                settings.chunk_ms = (settings.chunk_ms as i32 + direction).clamp(1, 100) as usize
-            }
-            "pvt_output_rate_ms" => {
-                settings.pvt_output_rate_ms =
-                    (settings.pvt_output_rate_ms as i32 + direction * 100).clamp(100, 10_000) as u64
-            }
-            "acquisition_window_ms" => {
-                settings.acquisition_window_ms =
-                    (settings.acquisition_window_ms as i32 + direction).clamp(1, 100) as usize
-            }
-            "acquisition_noncoherent_integrations" => {
-                settings.acquisition_noncoherent_integrations =
-                    (settings.acquisition_noncoherent_integrations as i32 + direction).clamp(1, 50)
-                        as usize
-            }
-            "acquisition_threshold" => {
-                settings.acquisition_threshold =
-                    (settings.acquisition_threshold + direction as f64 * 0.1).clamp(1.0, 20.0)
-            }
-            "reacquisition_interval_ms" => {
-                settings.reacquisition_interval_ms = (settings.reacquisition_interval_ms as i32
-                    + direction * 100)
-                    .clamp(100, 60_000) as u64
-            }
-            "dll_bandwidth_hz" => {
-                settings.dll_bandwidth_hz =
-                    (settings.dll_bandwidth_hz + direction as f64 * 0.5).clamp(0.1, 20.0)
-            }
-            "pll_bandwidth_hz" => {
-                settings.pll_bandwidth_hz =
-                    (settings.pll_bandwidth_hz + direction as f64).clamp(1.0, 200.0)
-            }
-            "minimum_pll_lock_metric" => {
-                settings.minimum_pll_lock_metric =
-                    (settings.minimum_pll_lock_metric + direction as f64 * 0.05).clamp(0.0, 1.0)
-            }
-            "minimum_cn0_db_hz" => {
-                settings.minimum_cn0_db_hz =
-                    (settings.minimum_cn0_db_hz + direction as f64).clamp(0.0, 60.0)
-            }
-            "cn0_samples" => {
-                settings.cn0_samples =
-                    (settings.cn0_samples as i32 + direction).clamp(1, 200) as usize
-            }
-            _ => {}
-        }
+        self.settings.iq_format = match self.settings.iq_format {
+            crate::GuiIqFormat::Int8Interleaved => crate::GuiIqFormat::Int16Interleaved,
+            crate::GuiIqFormat::Int16Interleaved => crate::GuiIqFormat::Int8Interleaved,
+        };
     }
 
     fn toggle_setting(&mut self, field: &'static str) {
@@ -471,11 +641,30 @@ impl GnsscopeApp {
                 self.settings.parallel_tracking = !self.settings.parallel_tracking
             }
             "enable_raim" => self.settings.enable_raim = !self.settings.enable_raim,
+            "use_rinex_nav_environment" => {
+                self.settings.use_rinex_nav_environment = !self.settings.use_rinex_nav_environment
+            }
+            "auto_discover_colocated_nav" => {
+                self.settings.auto_discover_colocated_nav =
+                    !self.settings.auto_discover_colocated_nav
+            }
+            "enable_carrier_smoothing" => {
+                self.settings.enable_carrier_smoothing = !self.settings.enable_carrier_smoothing
+            }
+            "enable_kalman" => self.settings.enable_kalman = !self.settings.enable_kalman,
+            "enable_integer_ms_ambiguity_resolution" => {
+                self.settings.enable_integer_ms_ambiguity_resolution =
+                    !self.settings.enable_integer_ms_ambiguity_resolution
+            }
             _ => {}
         }
     }
 
     fn enqueue(&mut self) {
+        if let Some((field, message)) = self.setting_parse_errors.iter().next() {
+            self.status_message = format!("{field}: {message}");
+            return;
+        }
         self.settings = self.settings.normalized_for_processing();
         if let Some(issue) = crate::state::validate_settings(&self.settings).first() {
             self.status_message = format!("{}: {}", issue.field, issue.message);
@@ -504,6 +693,7 @@ impl GnsscopeApp {
     fn enqueue_selected_or_draft(&mut self) {
         if let Some(settings) = self.selected_run().map(|run| run.settings.clone()) {
             self.settings = settings;
+            self.setting_parse_errors.clear();
         }
         self.enqueue();
     }
@@ -873,7 +1063,9 @@ impl GnsscopeApp {
     }
 
     fn can_enqueue(&self) -> bool {
-        self.active_run.is_none() && self.settings_issues().is_empty()
+        self.active_run.is_none()
+            && self.setting_parse_errors.is_empty()
+            && self.settings_issues().is_empty()
     }
 
     fn file_label(&self) -> SharedString {
@@ -1314,6 +1506,7 @@ impl GnsscopeApp {
     fn render_header(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let is_active = self.active_run.is_some();
         let settings = self.display_settings();
+        let editable = self.selected_run_id.is_none() && self.active_run.is_none();
         div()
             .px(px(22.))
             .py(px(14.))
@@ -1355,7 +1548,63 @@ impl GnsscopeApp {
                                         settings.intermediate_frequency_hz / 1e6,
                                         settings.iq_format
                                     )),
-                            ),
+                            )
+                            .children(editable.then(|| {
+                                div()
+                                    .mt(px(9.))
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap(px(8.))
+                                    .child(self.render_primary_setting_input(
+                                        "采样率",
+                                        "sample_rate_hz",
+                                        "Msps",
+                                        palette,
+                                    ))
+                                    .child(self.render_primary_setting_input(
+                                        "中频",
+                                        "intermediate_frequency_hz",
+                                        "MHz",
+                                        palette,
+                                    ))
+                                    .child(
+                                        div()
+                                            .w(px(124.))
+                                            .child(
+                                                div()
+                                                    .text_size(px(9.))
+                                                    .text_color(palette.muted)
+                                                    .child("信号"),
+                                            )
+                                            .child(
+                                                Button::new("signal-type")
+                                                    .mt(px(3.))
+                                                    .w_full()
+                                                    .label("GPS L1 C/A")
+                                                    .disabled(true),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(150.))
+                                            .child(
+                                                div()
+                                                    .text_size(px(9.))
+                                                    .text_color(palette.muted)
+                                                    .child("IQ 格式"),
+                                            )
+                                            .child(
+                                                Button::new("iq-format")
+                                                    .mt(px(3.))
+                                                    .w_full()
+                                                    .label(format!("{:?}", self.settings.iq_format))
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.cycle_iq_format();
+                                                        cx.notify();
+                                                    })),
+                                            ),
+                                    )
+                            })),
                     )
                     .children((is_active && !self.follow_live).then(|| {
                         Button::new("return-live")
@@ -1422,19 +1671,8 @@ impl GnsscopeApp {
         let run = self.active_run.as_ref().or_else(|| {
             self.selected_run_id
                 .and_then(|id| self.history.iter().find(|run| run.id == id))
-                .or_else(|| self.history.first())
         });
-        let progress = run.map(|run| run.progress).unwrap_or_else(|| {
-            if self
-                .history
-                .first()
-                .is_some_and(|run| run.status == RunStatus::Completed)
-            {
-                1.0
-            } else {
-                0.0
-            }
-        });
+        let progress = run.map(|run| run.progress).unwrap_or(0.0);
         let elapsed = run
             .map(|run| run.processed_samples as f64 / run.settings.sample_rate_hz)
             .unwrap_or(0.0);
@@ -1500,6 +1738,76 @@ impl GnsscopeApp {
             )
     }
 
+    fn setting_issue_message(&self, field: &'static str) -> Option<&'static str> {
+        self.setting_parse_errors.get(field).copied().or_else(|| {
+            crate::state::validate_settings(&self.settings)
+                .into_iter()
+                .find(|issue| issue.field == field)
+                .map(|issue| issue.message)
+        })
+    }
+
+    fn render_primary_setting_input(
+        &self,
+        label: &'static str,
+        field: &'static str,
+        unit: &'static str,
+        palette: Palette,
+    ) -> impl IntoElement {
+        let input = self.setting_inputs.get(field).expect("setting input");
+        let invalid = self.setting_issue_message(field).is_some();
+        div()
+            .w(px(124.))
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .text_size(px(9.))
+                    .text_color(if invalid {
+                        palette.danger
+                    } else {
+                        palette.muted
+                    })
+                    .child(label)
+                    .child(unit),
+            )
+            .child(div().mt(px(3.)).h(px(32.)).child(Input::new(input)))
+    }
+
+    fn render_setting_input(
+        &self,
+        label: &'static str,
+        field: &'static str,
+        unit: &'static str,
+        palette: Palette,
+    ) -> impl IntoElement {
+        let input = self.setting_inputs.get(field).expect("setting input");
+        let issue = self.setting_issue_message(field);
+        div()
+            .mt(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .justify_between()
+                    .text_size(px(10.))
+                    .text_color(if issue.is_some() {
+                        palette.danger
+                    } else {
+                        palette.muted
+                    })
+                    .child(label)
+                    .child(unit),
+            )
+            .child(div().mt(px(4.)).h(px(34.)).child(Input::new(input)))
+            .children(issue.map(|message| {
+                div()
+                    .mt(px(3.))
+                    .text_size(px(9.))
+                    .text_color(palette.danger)
+                    .child(message)
+            }))
+    }
+
     fn render_config_drawer(
         &self,
         palette: Palette,
@@ -1509,6 +1817,7 @@ impl GnsscopeApp {
         let settings = self.display_settings();
         let issues = self.settings_issues();
         let editable = self.selected_run_id.is_none() && self.active_run.is_none();
+        let has_parse_errors = editable && !self.setting_parse_errors.is_empty();
         div()
             .w(if compact { px(340.) } else { px(470.) })
             .flex_shrink_0()
@@ -1558,12 +1867,22 @@ impl GnsscopeApp {
                 Button::new("cttc-preset")
                     .mt(px(14.))
                     .label("应用 CTTC Spain 预设")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.apply_cttc_preset();
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply_cttc_preset(window, cx);
                         cx.notify();
                     }))
             }))
-            .children((!issues.is_empty()).then(|| {
+            .children(self.selected_run_id.is_some().then(|| {
+                Button::new("edit-selected-settings")
+                    .mt(px(14.))
+                    .icon(IconName::Copy)
+                    .label("复制为可编辑草稿")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.edit_selected_configuration(window, cx);
+                        cx.notify();
+                    }))
+            }))
+            .children((!issues.is_empty() || has_parse_errors).then(|| {
                 div()
                     .mt(px(14.))
                     .p(px(10.))
@@ -1576,6 +1895,19 @@ impl GnsscopeApp {
                             .text_color(palette.danger)
                             .child(format!("{}: {}", issue.field, issue.message))
                     }))
+                    .children(
+                        editable
+                            .then(|| {
+                                self.setting_parse_errors.iter().map(|(field, message)| {
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(palette.danger)
+                                        .child(format!("{field}: {message}"))
+                                })
+                            })
+                            .into_iter()
+                            .flatten(),
+                    )
             }))
             .child(
                 div()
@@ -1662,6 +1994,7 @@ impl GnsscopeApp {
                     ),
                 ]
                 .into_iter()
+                .filter(move |_| !editable)
                 .map(|(label, value)| {
                     div()
                         .mt(px(16.))
@@ -1690,31 +2023,190 @@ impl GnsscopeApp {
                     .pt(px(14.))
                     .border_t_1()
                     .border_color(palette.border)
+                    .child(Self::config_group_title("输入格式", palette))
+                    .child(self.render_setting_input("读取 chunk", "chunk_ms", "ms", palette))
                     .child(
                         div()
-                            .text_size(px(12.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(palette.text)
-                            .child("可编辑运行参数"),
+                            .mt(px(10.))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(palette.muted)
+                                    .child("IQ 格式"),
+                            )
+                            .child(
+                                Button::new("drawer-iq-format")
+                                    .label(format!("{:?}", self.settings.iq_format))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.cycle_iq_format();
+                                        cx.notify();
+                                    })),
+                            ),
                     )
-                    .child(self.render_setting_stepper(
-                        "读取 chunk",
-                        format!("{} ms", self.settings.chunk_ms),
-                        "chunk_ms",
+                    .child(Self::config_group_title("导航与先验", palette))
+                    .child(self.render_setting_input(
+                        "外部 RINEX 导航文件",
+                        "rinex_nav_path",
+                        "路径；留空为无",
+                        palette,
+                    ))
+                    .child(self.render_setting_toggle(
+                        "允许环境变量导航文件",
+                        self.settings.use_rinex_nav_environment,
+                        "use_rinex_nav_environment",
                         palette,
                         cx,
                     ))
-                    .child(self.render_setting_stepper(
-                        "PVT 输出 epoch",
-                        format!("{} ms", self.settings.pvt_output_rate_ms),
-                        "pvt_output_rate_ms",
+                    .child(self.render_setting_toggle(
+                        "自动发现同目录导航文件",
+                        self.settings.auto_discover_colocated_nav,
+                        "auto_discover_colocated_nav",
                         palette,
                         cx,
+                    ))
+                    .child(self.render_setting_input(
+                        "初始位置",
+                        "initial_position_lla_deg_m",
+                        "纬度, 经度, 高程",
+                        palette,
+                    ))
+                    .child(Self::config_group_title("捕获与重捕获", palette))
+                    .child(self.render_setting_input(
+                        "捕获窗口",
+                        "acquisition_window_ms",
+                        "ms",
+                        palette,
+                    ))
+                    .child(self.render_setting_input(
+                        "非相干累加",
+                        "acquisition_noncoherent_integrations",
+                        "次",
+                        palette,
+                    ))
+                    .child(self.render_setting_input(
+                        "捕获阈值",
+                        "acquisition_threshold",
+                        "",
+                        palette,
+                    ))
+                    .child(self.render_setting_input(
+                        "冷启动扫描周期",
+                        "cold_acquisition_interval_ms",
+                        "ms",
+                        palette,
+                    ))
+                    .child(self.render_setting_input(
+                        "最大多普勒",
+                        "acquisition_doppler_max_hz",
+                        "Hz",
+                        palette,
+                    ))
+                    .child(self.render_setting_input(
+                        "多普勒步进",
+                        "acquisition_doppler_step_hz",
+                        "Hz",
+                        palette,
+                    ))
+                    .child(self.render_setting_input(
+                        "重捕获周期",
+                        "reacquisition_interval_ms",
+                        "ms",
+                        palette,
+                    ))
+                    .child(self.render_setting_input(
+                        "单次最大 PRN",
+                        "max_acquisition_prns_per_scan",
+                        "1-32",
+                        palette,
+                    ))
+                    .child(self.render_setting_input(
+                        "固定 PRN",
+                        "fixed_prns",
+                        "逗号分隔；留空为 1-32",
+                        palette,
+                    ))
+                    .child(Self::config_group_title("跟踪环", palette))
+                    .child(self.render_setting_input("DLL 带宽", "dll_bandwidth_hz", "Hz", palette))
+                    .child(self.render_setting_input("PLL 带宽", "pll_bandwidth_hz", "Hz", palette))
+                    .child(self.render_setting_input(
+                        "早迟间距",
+                        "early_late_spacing_chips",
+                        "chips",
+                        palette,
+                    ))
+                    .child(self.render_setting_toggle(
+                        "载波辅助码环",
+                        self.settings.carrier_aiding,
+                        "carrier_aiding",
+                        palette,
+                        cx,
+                    ))
+                    .child(Self::config_group_title("C/N0 与通道准入", palette))
+                    .child(self.render_setting_input(
+                        "C/N0 窗长",
+                        "cn0_samples",
+                        "samples",
+                        palette,
+                    ))
+                    .child(self.render_setting_input(
+                        "C/N0 平滑系数",
+                        "cn0_smoother_alpha",
+                        "0-1",
+                        palette,
+                    ))
+                    .child(self.render_setting_input(
+                        "PLL lock 阈值",
+                        "minimum_pll_lock_metric",
+                        "0-1",
+                        palette,
+                    ))
+                    .child(self.render_setting_input(
+                        "最低 C/N0",
+                        "minimum_cn0_db_hz",
+                        "dB-Hz",
+                        palette,
+                    ))
+                    .child(self.render_setting_input(
+                        "准入观察期",
+                        "probation_good_epochs",
+                        "epochs",
+                        palette,
+                    ))
+                    .child(Self::config_group_title("PVT 与滤波", palette))
+                    .child(self.render_setting_input(
+                        "PVT 输出 epoch",
+                        "pvt_output_rate_ms",
+                        "ms",
+                        palette,
                     ))
                     .child(self.render_setting_toggle(
                         "epoch 多普勒平均",
                         self.settings.average_doppler_over_pvt_epoch,
                         "average_doppler_over_pvt_epoch",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_toggle(
+                        "载波平滑",
+                        self.settings.enable_carrier_smoothing,
+                        "enable_carrier_smoothing",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_toggle(
+                        "Kalman",
+                        self.settings.enable_kalman,
+                        "enable_kalman",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_toggle(
+                        "整数毫秒模糊度解算",
+                        self.settings.enable_integer_ms_ambiguity_resolution,
+                        "enable_integer_ms_ambiguity_resolution",
                         palette,
                         cx,
                     ))
@@ -1725,76 +2217,7 @@ impl GnsscopeApp {
                         palette,
                         cx,
                     ))
-                    .child(self.render_setting_stepper(
-                        "捕获窗口",
-                        format!("{} ms", self.settings.acquisition_window_ms),
-                        "acquisition_window_ms",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_stepper(
-                        "捕获阈值",
-                        format!("{:.1}", self.settings.acquisition_threshold),
-                        "acquisition_threshold",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_stepper(
-                        "重捕获周期",
-                        format!("{} ms", self.settings.reacquisition_interval_ms),
-                        "reacquisition_interval_ms",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_stepper(
-                        "DLL 带宽",
-                        format!("{:.1} Hz", self.settings.dll_bandwidth_hz),
-                        "dll_bandwidth_hz",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_stepper(
-                        "PLL 带宽",
-                        format!("{:.1} Hz", self.settings.pll_bandwidth_hz),
-                        "pll_bandwidth_hz",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_stepper(
-                        "非相干累加",
-                        format!("{} 次", self.settings.acquisition_noncoherent_integrations),
-                        "acquisition_noncoherent_integrations",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_stepper(
-                        "最低 C/N0",
-                        format!("{:.1} dB-Hz", self.settings.minimum_cn0_db_hz),
-                        "minimum_cn0_db_hz",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_stepper(
-                        "PLL lock 阈值",
-                        format!("{:.2}", self.settings.minimum_pll_lock_metric),
-                        "minimum_pll_lock_metric",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_stepper(
-                        "C/N0 窗长",
-                        format!("{} samples", self.settings.cn0_samples),
-                        "cn0_samples",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_toggle(
-                        "载波辅助码环",
-                        self.settings.carrier_aiding,
-                        "carrier_aiding",
-                        palette,
-                        cx,
-                    ))
+                    .child(Self::config_group_title("性能", palette))
                     .child(self.render_setting_toggle(
                         "并行捕获",
                         self.settings.parallel_acquisition,
@@ -1812,74 +2235,16 @@ impl GnsscopeApp {
             }))
     }
 
-    fn render_setting_stepper(
-        &self,
-        label: &'static str,
-        value: String,
-        field: &'static str,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let issue = crate::state::validate_settings(&self.settings)
-            .into_iter()
-            .find(|issue| issue.field == field);
+    fn config_group_title(title: &'static str, palette: Palette) -> impl IntoElement {
         div()
-            .mt(px(10.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(if issue.is_some() {
-                                palette.danger
-                            } else {
-                                palette.muted
-                            })
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(5.))
-                            .child(
-                                Button::new(SharedString::from(format!("{field}-down")))
-                                    .ghost()
-                                    .label("-")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.adjust_setting(field, -1);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .w(px(100.))
-                                    .text_center()
-                                    .text_size(px(10.))
-                                    .text_color(palette.text)
-                                    .child(value),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("{field}-up")))
-                                    .ghost()
-                                    .label("+")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.adjust_setting(field, 1);
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
-            )
-            .children(issue.map(|issue| {
-                div()
-                    .mt(px(3.))
-                    .text_size(px(9.))
-                    .text_color(palette.danger)
-                    .child(issue.message)
-            }))
+            .mt(px(18.))
+            .pt(px(12.))
+            .border_t_1()
+            .border_color(palette.border)
+            .text_size(px(11.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(palette.text)
+            .child(title)
     }
 
     fn render_setting_toggle(
@@ -2890,6 +3255,32 @@ fn line_plot_with_secondary(
         },
     )
     .size_full()
+}
+
+#[cfg(test)]
+mod settings_editor_tests {
+    use super::{parse_fixed_prns, parse_initial_lla, setting_text_value};
+    use crate::GuiProcessingSettings;
+
+    #[test]
+    fn settings_editor_round_trips_structured_text_fields() {
+        let settings = GuiProcessingSettings {
+            sample_rate_hz: 4_092_000.0,
+            fixed_prns: Some(vec![1, 11, 32]),
+            initial_position_lla_deg_m: Some([41.25, 1.98, 72.5]),
+            ..Default::default()
+        };
+
+        assert_eq!(setting_text_value(&settings, "sample_rate_hz"), "4.092000");
+        assert_eq!(setting_text_value(&settings, "fixed_prns"), "1,11,32");
+        assert_eq!(parse_fixed_prns("1, 11; 32"), Ok(Some(vec![1, 11, 32])));
+        assert_eq!(
+            parse_initial_lla("41.25, 1.98, 72.5"),
+            Ok(Some([41.25, 1.98, 72.5]))
+        );
+        assert!(parse_fixed_prns("1,abc").is_err());
+        assert!(parse_initial_lla("41.25,1.98").is_err());
+    }
 }
 
 #[cfg(test)]

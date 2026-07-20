@@ -45,11 +45,13 @@ Continuous PVT applies a terrestrial position-quality gate before a mathematical
 This vertical slice is usable but does not yet satisfy the complete interaction contract. Remaining work is explicit:
 
 - expose the now-persisted Raw, Smoothed, and Kalman candidates in an expert comparison UI;
-- add editable expert controls for navigation policy and Kalman/Hatch internals; complete receiver-field validation is already enforced before queueing;
+- add deeper Kalman/Hatch algorithm parameters only after they become behaviorally active receiver configuration rather than hard-coded defaults;
 - implement historical search/filter/delete/reveal actions, queued-run reorder/cancel, plot focus, sky-marker hover details, and PRN linking/pinning;
 - extend visual regression beyond the implemented desktop, compact-drawer, and narrow screenshot matrix when additional panels are introduced.
 
 The first GUI exposes only configuration fields that are implemented and behaviorally active in the receiver. Signal type currently offers only GPS L1 C/A. It does not expose a nonfunctional FLL-assist toggle or invented NWPR coherent/noncoherent counts; current C/N0 controls map to the implemented prompt-window length and smoothing factor. Planned receiver capabilities remain in development documentation until their backend behavior and tests exist.
+
+All current `GuiProcessingSettings` fields are editable in a draft. The main command header directly edits sample rate in Msps and IF in MHz and selects IQ format; the detailed drawer exposes the remaining numeric, path, PRN-list, prior-position, policy, filter, and parallelism controls in domain groups. Numeric text is parsed into the field's concrete Rust type without implicit clamping. Malformed text and receiver-domain validation are reported separately and both disable queue creation. Historical snapshots are read-only until explicitly copied into a new draft, preserving run reproducibility.
 
 ## Processing Run Library
 

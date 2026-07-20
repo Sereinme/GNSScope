@@ -50,6 +50,7 @@ foreach ($layout in $layouts) {
     $processInfo.Environment["GNSSCOPE_WINDOW_WIDTH"] = $layout.Width.ToString()
     $processInfo.Environment["GNSSCOPE_WINDOW_HEIGHT"] = $layout.Height.ToString()
     $processInfo.Environment["GNSSCOPE_OPEN_SETTINGS"] = if ($layout.OpenSettings) { "1" } else { "0" }
+    $processInfo.Environment["GNSSCOPE_START_DRAFT"] = if ($layout.OpenSettings) { "1" } else { "0" }
     $process = [System.Diagnostics.Process]::Start($processInfo)
     try {
         Start-Sleep -Seconds 3
