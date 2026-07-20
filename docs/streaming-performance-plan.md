@@ -1,5 +1,7 @@
 # Streaming and Dynamic Receiver Plan
 
+The current implementation gaps, test gaps, and ranked runtime candidates are tracked in `docs/receiver-readiness-audit.md`.
+
 This plan captures the agreed optimization design before changing the receiver path. It is intentionally scoped to backend receiver architecture. GUI visual design remains paused.
 
 ## Goals
@@ -27,7 +29,7 @@ This plan captures the agreed optimization design before changing the receiver p
 
 - `pvt_e2e` reads 60 s at 4 MSPS into `Vec<Complex<f64>>`.
   - 240,000,000 complex samples times 16 bytes is about 3.84 GB before other buffers.
-- Acquisition and tracking are currently sequential at startup; per-epoch tracking is deterministic parallel.
+- Acquisition scans and active tracking are deterministic parallel by default; the serial tracking fallback remains available for comparison.
 - The test now uses 10 ms non-coherent PCPS acquisition Doppler instead of hard-coded GNSS-SDR reference Dopplers and the slow 2 s fine Doppler search.
 - Continuous PVT currently builds epochs at 1 Hz, while the GNSS-SDR CTTC config uses `PVT.output_rate_ms=100`.
 - Position is already close to the GNSS-SDR/NMEA reference. All 739 CTTC `$GPRMC` records report `0.00 kn`, but this is not a raw instantaneous-Doppler reference: the fixture configuration enables arithmetic PVT averaging (`PVT.flag_averaging=true`, `PVT.averaging_depth=10`), and it contains no observables dump or PVT Monitor output. The exact zero in every record therefore cannot validate the four-state Doppler solution or receiver clock drift.
@@ -135,7 +137,7 @@ Expected static CTTC behavior:
   - load optional nav - RINEX nav explicit/env/colocated discovery is wired into runner startup; missing nav keeps IQ-only mode.
   - stream samples - implemented for chunked IQ input into runner; reader now handles short reads, advances acquisition, 1 ms tracking, and PVT cadence internally.
   - acquire configured PRNs - PCPS scan execution implemented with deterministic PRN-ordered parallel acquisition.
-  - track - active tracking initialization and deterministic per-ms stepping implemented; tracking step results are separated from main-thread channel-state application for future worker/async execution.
+  - track - active tracking initialization and deterministic per-ms stepping implemented; channel-local tracking steps run on Rayon workers and are merged on the runner thread in PRN order.
   - decode nav - bit sync, 20 ms symbol emission, NavDecoder, and EphemerisCollector entry points implemented.
   - build observables - implemented for healthy channel snapshots with TOW history and tracking timestamp inputs.
   - solve continuous PVT - runner entry point implemented.
@@ -149,7 +151,7 @@ Real-data smoke coverage:
 
 ### Phase F: Dynamic Acquisition and Reacquisition
 
-- Status: backend primitives are implemented in `gnss_core::receiver`: deterministic channel state/admission, periodic acquisition scheduling, reacquisition priority, and a bounded acquisition ring buffer. The next step is wiring these primitives into the streaming runner/e2e processing loop.
+- Status: implemented in `gnss_core::receiver` and wired into `StreamingPvtRunner`: deterministic channel state/admission, periodic acquisition scheduling, reacquisition priority, bounded acquisition windows, and tracker reinitialization from a fresh `AcquisitionResult`.
 - Introduce:
   - `AcquisitionScheduler` - implemented.
   - `ChannelManager` - implemented.
@@ -159,6 +161,7 @@ Real-data smoke coverage:
 - Prioritize reacquisition before cold acquisition.
 - Use a short acquisition ring buffer for cold acquisition and reacquisition windows.
 - Keep the acquisition ring buffer separate from the temporary legacy fine Doppler window.
+- A scan is planned from `process_stream_samples` through `ingest_samples` whenever the configured interval is due. Lost channels are selected before cold/absent channels; failed reacquisition returns them to `Lost`, while a detection removes the old tracker and starts a fresh probation channel.
 
 Dynamic channel state:
 
@@ -180,7 +183,7 @@ AcquisitionResult
   -> TrackingProbation
 ```
 
-Reacquisition can use last-known Doppler to narrow the search, but the old lost PLL/DLL state should not be reused in the first implementation.
+Reacquisition currently searches the configured Doppler grid; last-known Doppler narrowing and a real-data forced-loss/recovery acceptance test remain future hardening work. The old lost PLL/DLL state is intentionally not reused.
 
 ### Phase G: GUI Worker and Async Later
 

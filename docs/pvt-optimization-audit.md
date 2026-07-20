@@ -1,6 +1,8 @@
 # PVT Optimization Audit
 
-Current status: positioning accuracy optimization is implemented and verified on the CTTC real-data e2e path. GUI visual design remains intentionally paused; only backend-facing GUI state contracts have been prepared.
+See `docs/receiver-readiness-audit.md` for the current production gaps and runtime optimization backlog.
+
+Current status: positioning, velocity, and absolute-time correctness are implemented and verified on CTTC real data. Streaming input, deterministic parallel acquisition/tracking, periodic reacquisition scheduling, and the GUI-facing state contracts are implemented; the real GUI worker adapter is not yet wired.
 
 ## User Checklist
 
@@ -18,7 +20,10 @@ Current status: positioning accuracy optimization is implemented and verified on
 | Carrier smoothing pseudorange | Done | `HatchSmoother` smooths by PRN and `ContinuousPvtRunner` validates smoothed WLS residual quality before accepting it. |
 | Doppler velocity output | Done | `solve_doppler_velocity` and `PvtVelocityOutput` expose ECEF/ENU velocity, speed, heading, clock drift, residual RMS, and used PRNs. The solver now uses all observations instead of truncating to the first 12. |
 | Kalman filter for continuous positioning | Done | `PositionVelocityKalman` runs from continuous PVT results and `PvtEpochOutput` prefers converged Kalman solutions. |
-| Time output | Done | `PvtTimeOutput` exposes receiver SOW, corrected GPS SOW, transmit SOW min/max, receiver clock bias, and clock drift. |
+| Time output | Done | `PvtTimeOutput` exposes receiver/corrected GPST, GPS week, structured UTC, Unix seconds, transmit SOW bounds, receiver clock bias, and clock drift; leap seconds and truncated broadcast-week expansion are tested. |
+| Streaming IQ input | Done | `StreamingPvtRunner` reads bounded chunks with reusable conversion buffers and advances acquisition, tracking, navigation, and PVT without full-file loading. |
+| Parallel acquisition/tracking | Done | Acquisition is PRN-parallel and active tracking uses Rayon with deterministic PRN-ordered merge; serial/parallel tracking equivalence is tested. |
+| Periodic reacquisition | Implemented, acceptance pending | `AcquisitionScheduler` prioritizes `Lost` PRNs at `reacq_interval_ms`; `StreamingPvtRunner` executes scans and reinitializes detected channels. A real forced-loss/recovery test is still missing. |
 | Parse full RINEX GPS navigation ephemerides | Done | `parse_rinex_ephemeris_catalog` parses GPS RINEX 2 `.n` records and GPS records in RINEX 3 nav files into `EphemerisCatalog`; `load_optional_rinex_nav_capabilities` resolves optional nav files while preserving IQ-only operation. |
 | Multi-ephemeris selection for long RINEX/captures | Done | `EphemerisCatalog` stores multiple ephemerides per PRN; `EphemerisSelectionConfig` selects healthy, non-stale records nearest TOE/TOC; `ContinuousPvtRunner::solve_epochs_with_catalog` applies selection per epoch. |
 | GUI pre-design module contract | Done | `gnss-gui` exposes settings, nav-source status, PVT view model, receiver state, event bridge, structured screen model, and deterministic snapshot renderer. `GuiNavSourceStatus` reports both ionosphere and ephemeris availability. |
@@ -28,10 +33,10 @@ Current status: positioning accuracy optimization is implemented and verified on
 Latest verification commands run through `rtk`:
 
 - `cargo fmt --check`: passed.
-- `cargo test -p gnss-core --lib`: passed, 86 tests.
-- `cargo test -p gnss-gui`: passed, 29 tests.
+- `cargo test --workspace`: passed, 177 tests with 1 ignored test.
 - `cargo clippy --workspace --tests -- -D warnings`: passed with no issues.
-- `cargo test -p gnss-core --test pvt_e2e test_pvt_e2e -- --nocapture`: passed on real CTTC data, about 246.70 s.
+- `cargo test --release -p gnss-core --test pvt_e2e -- --nocapture`: passed on real CTTC data.
+- `streaming_runner_real` passed the 60 s production stream: 5 acquisitions, 32 nav subframes, 410 PVT outputs, and UTC `2013-04-04 06:24:07.029`.
 
 The real-data e2e covers acquisition, tracking, bit sync, nav decode, optional RINEX ionosphere fallback, observables, WLS, Doppler velocity, continuous PVT, Hatch smoothing, Kalman output, and GUI-facing PVT output conversion. RINEX ephemeris parsing is covered by fixed-width field unit tests, including glued negative fields common in broadcast nav files.
 
@@ -39,9 +44,9 @@ The real-data e2e covers acquisition, tracking, bit sync, nav decode, optional R
 
 These are not blockers for the current optimization goal, but they are the next sensible production tasks:
 
-- Wire the optional RINEX ephemeris catalog into the end-to-end receiver worker once the worker path is separated from the current e2e test harness.
+- Wire `StreamingPvtRunner` into a real GUI worker that emits `GuiReceiverEvent` snapshots, handles cancellation, and reports completion/failure.
 - Calibrate the WLS sigma model with more datasets and receiver front-end settings.
-- Add full GPS week/UTC/leap-second productization; current output is GPS SOW oriented.
-- Wire a real receiver worker to emit `GuiReceiverEvent` snapshots; the state/event contracts are ready, but the GPUI visual layer is intentionally not started.
+- Add a forced-loss/reacquisition real-data regression and expose reacquisition counters/events to the GUI.
+- Expose streaming controls such as PVT epoch rate, chunk size, and parallel tracking in `GuiProcessingSettings`.
 - For segmented GUI processing, pass nonzero acquisition sample stamps when acquisition windows do not start at file sample 0.
 - Extend RINEX support beyond GPS `.n`/GPS RINEX 3 records if future datasets need multi-constellation navigation files.

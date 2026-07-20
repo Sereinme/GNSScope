@@ -1,6 +1,14 @@
 # GNSScope GUI Design Contract
 
+Receiver integration gates and performance work are tracked in `docs/receiver-readiness-audit.md`.
+
 This document defines the first GUI boundary before wiring gpui widgets. The GUI should consume structured state from `gnss-gui` instead of reading test-only logs.
+
+## Current Readiness
+
+The backend is ready for GUI integration: `StreamingPvtRunner` has bounded IQ streaming, deterministic parallel acquisition/tracking, periodic lost-channel reacquisition, navigation decoding, continuous PVT, and structured UTC output. The remaining integration boundary is a worker adapter that owns the runner, converts `StreamingPvtReadStep`/`StreamingPvtEvent` into `GuiReceiverEvent`, and provides cancellation and failure handling.
+
+The current GUI settings model does not yet expose `chunk_ms`, `pvt_output_rate_ms`, Doppler epoch averaging, or parallel acquisition/tracking. Those fields must be added before the GUI can claim full runtime configurability.
 
 ## First Screen
 
@@ -93,3 +101,5 @@ Current GUI-facing Rust modules:
 - `gnss_gui::render_workspace_snapshot`: deterministic text renderer used as a golden reference for first-screen information architecture before gpui rendering is wired.
 
 The snapshot renderer is not the final UI. It exists so the graphical renderer can be checked against a stable list of required sections: settings, position, ECEF, velocity, clock drift, time, quality, and channel diagnostics.
+
+Visual design can begin now; end-to-end GUI processing remains pending the worker adapter and streaming-control settings.
