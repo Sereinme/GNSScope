@@ -195,33 +195,35 @@ fn run_streaming_worker(
                         }));
                     }
                 }
-                StreamingPvtEvent::TrackingUpdated(update) => {
-                    let previous_state = channel_states.insert(update.prn, update.state);
-                    if previous_state != Some(update.state) {
-                        let _ = sender.send(WorkerEvent::Diagnostic(GuiDiagnosticEvent {
-                            now_ms: update.now_ms,
-                            sample_index: processed_samples,
-                            prn: Some(update.prn),
-                            kind: GuiDiagnosticEventKind::ChannelState,
-                            detail: format!("{:?} -> {:?}", previous_state, update.state),
-                        }));
+                StreamingPvtEvent::TrackingBatch(updates) => {
+                    for update in updates {
+                        let previous_state = channel_states.insert(update.prn, update.state);
+                        if previous_state != Some(update.state) {
+                            let _ = sender.send(WorkerEvent::Diagnostic(GuiDiagnosticEvent {
+                                now_ms: update.now_ms,
+                                sample_index: processed_samples,
+                                prn: Some(update.prn),
+                                kind: GuiDiagnosticEventKind::ChannelState,
+                                detail: format!("{:?} -> {:?}", previous_state, update.state),
+                            }));
+                        }
+                        let healthy = update.state == ReceiverChannelState::Healthy;
+                        channels.insert(
+                            update.prn,
+                            GuiChannelStatus {
+                                prn: update.prn,
+                                acquired: !matches!(
+                                    update.state,
+                                    ReceiverChannelState::Absent | ReceiverChannelState::Acquiring
+                                ),
+                                tracking_locked: healthy,
+                                nav_locked: healthy,
+                                cn0_db_hz: update.output.cn0_db_hz,
+                                doppler_hz: update.output.carrier_doppler_hz,
+                                residual_m: None,
+                            },
+                        );
                     }
-                    let healthy = update.state == ReceiverChannelState::Healthy;
-                    channels.insert(
-                        update.prn,
-                        GuiChannelStatus {
-                            prn: update.prn,
-                            acquired: !matches!(
-                                update.state,
-                                ReceiverChannelState::Absent | ReceiverChannelState::Acquiring
-                            ),
-                            tracking_locked: healthy,
-                            nav_locked: healthy,
-                            cn0_db_hz: update.output.cn0_db_hz,
-                            doppler_hz: update.output.carrier_doppler_hz,
-                            residual_m: None,
-                        },
-                    );
                 }
                 StreamingPvtEvent::NavSubframeDecoded(decoded) => {
                     nav_subframes += 1;

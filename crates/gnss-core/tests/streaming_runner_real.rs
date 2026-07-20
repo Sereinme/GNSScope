@@ -3,9 +3,11 @@
 //! The default smoke duration is short. `GNSSCOPE_STREAMING_TEST_MS` extends it
 //! into a production-path throughput and navigation/PVT regression run.
 
+use gnss_core::io::{IqFormat, IqReader};
 use gnss_core::pvt::PositionQualityConfig;
 use gnss_core::receiver::{
-    ReceiverChannelState, StreamingPvtConfig, StreamingPvtEvent, StreamingPvtRunner,
+    AcquisitionScanKind, ChannelHealthObservation, ReceiverChannelState, StreamingPvtConfig,
+    StreamingPvtEvent, StreamingPvtRunner,
 };
 use std::path::Path;
 use std::time::Instant;
@@ -189,4 +191,84 @@ fn test_streaming_runner_real_data_smoke() {
             );
         }
     }
+}
+
+#[test]
+fn test_streaming_runner_real_data_reacquires_forced_lost_channel() {
+    let data_path = Path::new(DATA_FILE);
+    if !data_path.exists() {
+        eprintln!("SKIP: real data not present");
+        return;
+    }
+
+    let mut config = StreamingPvtConfig::cttc_spain_real_data(DATA_FILE);
+    config.acquisition.reacq_interval_ms = 1;
+    config.channel_admission.probation_good_epochs = 1;
+    config.channel_admission.min_cn0_db_hz = 0.0;
+    config.channel_admission.min_pll_lock_metric = 0.0;
+    let mut runner = StreamingPvtRunner::new(config);
+    let mut reader = IqReader::open(data_path, IqFormat::Int16).expect("open real CTTC IQ");
+
+    runner
+        .stream_iq_reader_until_ms(&mut reader, 25, |_| {})
+        .expect("establish real-data tracking");
+    let prn = *runner
+        .active_tracking_prns()
+        .first()
+        .expect("at least one tracked real-data PRN");
+    for now_ms in 25..35 {
+        runner.observe_tracking(
+            prn,
+            ChannelHealthObservation {
+                pll_lock_metric: 0.0,
+                cn0_db_hz: 0.0,
+                dll_error_chips: 10.0,
+                pll_error_cycles: 1.0,
+                doppler_hz: 0.0,
+                nav_time_available: false,
+                ephemeris_available: false,
+            },
+            now_ms,
+        );
+    }
+    assert_eq!(runner.channels().state(prn), ReceiverChannelState::Lost);
+
+    let mut reacquisition_detected = false;
+    let mut tracking_restored = false;
+    runner
+        .stream_iq_reader_until_ms(&mut reader, 100, |step| {
+            for event in step.events {
+                match event {
+                    StreamingPvtEvent::AcquisitionScanCompleted(scan)
+                        if scan.scan.plan.kind == AcquisitionScanKind::Reacquisition =>
+                    {
+                        reacquisition_detected |= scan
+                            .results
+                            .iter()
+                            .any(|result| result.prn == prn && result.detected);
+                    }
+                    StreamingPvtEvent::TrackingBatch(updates) => {
+                        tracking_restored |= updates.iter().any(|update| {
+                            update.prn == prn
+                                && matches!(
+                                    update.state,
+                                    ReceiverChannelState::TrackingProbation
+                                        | ReceiverChannelState::Healthy
+                                )
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .expect("continue real-data stream after forced loss");
+
+    assert!(
+        reacquisition_detected,
+        "forced-lost PRN {prn} was not reacquired"
+    );
+    assert!(
+        tracking_restored,
+        "reacquired PRN {prn} did not resume tracking"
+    );
 }

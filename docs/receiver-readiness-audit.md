@@ -32,7 +32,7 @@ The current worker owns `StreamingPvtRunner`, supports cooperative cancellation,
 
 ## Implemented but Not Fully Tested
 
-- Forced loss followed by successful reacquisition on real IQ data, including return through `TrackingProbation` to `Healthy` and re-entry into PVT.
+- Re-entry into PVT after forced loss is not yet asserted, but real CTTC IQ now covers forced `Lost`, a detected `Reacquisition` scan, and restored tracking through `TrackingProbation`/`Healthy`.
 - Failed reacquisition repeated over multiple configured intervals on real data.
 - Dynamic cold acquisition and reacquisition across all 32 GPS L1 C/A PRNs on real data. CTTC validates a fixed five-PRN set.
 - Automated serial-versus-parallel equality for the complete real-data PVT stream. Tracking-step equality is tested, and manual 60 s runs produced matching event counts and final time.
@@ -66,11 +66,11 @@ The apparently large GUI sigma was therefore mainly a raw-versus-averaged compar
 
 ### Priority 1: profile and optimize tracking correlation
 
-`DllPllTracking::correlate` evaluates carrier sine/cosine, floating-point code phase, modulo, and three code lookups for every input sample and every active channel. Tracking is the dominant repeated computation by operation count.
+`DllPllTracking::correlate` now uses a complex carrier rotator recurrence with periodic normalization instead of per-sample sine/cosine. Floating-point code phase, modulo, and three code lookups remain the dominant repeated operations.
 
 Candidate changes:
 
-- Replace per-sample trigonometry with a complex carrier rotator recurrence and periodic normalization.
+- Replace per-sample trigonometry with a complex carrier rotator recurrence and periodic normalization. Implemented.
 - Advance code phase incrementally with conditional wrap instead of recomputing from the sample index and using floating-point modulo.
 - Benchmark explicit SIMD or batched correlator kernels only after recurrence changes.
 
@@ -90,7 +90,7 @@ Risk: medium. Absolute sample indices and acquisition-window ordering must remai
 
 ### Priority 3: decouple processing cadence from event cadence
 
-The runner currently creates a `TrackingUpdated` event and clones `TrackingOutput` for every channel every millisecond. The 60 s CTTC run creates 299,955 tracking updates, while a GUI generally needs 10-20 updates per second.
+The runner now emits one PRN-sorted `TrackingBatch` per millisecond and moves each `TrackingOutput` into that batch. Event summaries still count the contained channel updates. GUI telemetry is already reduced to the configured PVT epoch; further multi-millisecond tracking batches remain a higher-risk optimization.
 
 Candidate changes:
 

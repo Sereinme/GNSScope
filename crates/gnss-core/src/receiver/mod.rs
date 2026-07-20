@@ -763,7 +763,7 @@ pub struct StreamingNavDecode {
 pub enum StreamingPvtEvent {
     AcquisitionScanPlanned(StreamingAcquisitionScan),
     AcquisitionScanCompleted(StreamingAcquisitionScanResult),
-    TrackingUpdated(StreamingTrackingUpdate),
+    TrackingBatch(Vec<StreamingTrackingUpdate>),
     BitSyncUpdated(StreamingBitSyncUpdate),
     NavSymbolReady(StreamingNavSymbol),
     NavSubframeDecoded(Box<StreamingNavDecode>),
@@ -850,8 +850,8 @@ impl StreamingPvtEventCounts {
                     .filter(|result| result.detected)
                     .count();
             }
-            StreamingPvtEvent::TrackingUpdated(_) => {
-                self.tracking_updates += 1;
+            StreamingPvtEvent::TrackingBatch(updates) => {
+                self.tracking_updates += updates.len();
             }
             StreamingPvtEvent::BitSyncUpdated(_) => {
                 self.bit_sync_updates += 1;
@@ -959,6 +959,7 @@ pub struct StreamingPvtRunner {
     channels: ChannelManager,
     acquisition_scheduler: AcquisitionScheduler,
     acquisition_ring: AcquisitionRingBuffer,
+    acquisition_window_scratch: Vec<Complex<f64>>,
     active_tracking: BTreeMap<u8, ActiveTrackingChannel>,
     nav_state: StreamingNavState,
     continuous_pvt: ContinuousPvtRunner,
@@ -975,6 +976,7 @@ impl StreamingPvtRunner {
         let channels = ChannelManager::new(prns, config.channel_admission.clone());
         let acquisition_scheduler = AcquisitionScheduler::new(config.acquisition.clone());
         let acquisition_ring = AcquisitionRingBuffer::new(config.acquisition_ring_samples(), 0);
+        let acquisition_window_scratch = Vec::with_capacity(config.acquisition_window_samples());
         let continuous_pvt = ContinuousPvtRunner::new(config.continuous_pvt.clone());
         let next_pvt_output_ms = config.pvt_output_rate_ms.max(1);
         let mut runner = Self {
@@ -982,6 +984,7 @@ impl StreamingPvtRunner {
             channels,
             acquisition_scheduler,
             acquisition_ring,
+            acquisition_window_scratch,
             active_tracking: BTreeMap::new(),
             nav_state: StreamingNavState::default(),
             continuous_pvt,
@@ -1211,12 +1214,18 @@ impl StreamingPvtRunner {
         scan: &StreamingAcquisitionScan,
         now_ms: u64,
     ) -> Option<StreamingAcquisitionScanResult> {
-        let (sample_index, window) = self.acquisition_window_for_scan(scan)?;
+        let sample_index = self
+            .acquisition_ring
+            .copy_latest_window(scan.sample_count, &mut self.acquisition_window_scratch)?;
+        if sample_index != scan.sample_index {
+            return None;
+        }
+        let window = self.acquisition_window_scratch.as_slice();
         let results = if self.config.parallel_acquisition && scan.plan.prns.len() > 1 {
             acquire_prns_parallel(
                 self.pcps_config(),
                 &scan.plan.prns,
-                &window,
+                window,
                 sample_index,
                 scan.plan.noncoherent_integrations,
             )
@@ -1224,7 +1233,7 @@ impl StreamingPvtRunner {
             acquire_prns_sequential(
                 self.pcps_config(),
                 &scan.plan.prns,
-                &window,
+                window,
                 sample_index,
                 scan.plan.noncoherent_integrations,
             )
@@ -1339,6 +1348,8 @@ impl StreamingPvtRunner {
         };
         steps.sort_by_key(|step| step.prn);
         let mut events = Vec::with_capacity(steps.len());
+        let mut tracking_updates = Vec::with_capacity(steps.len());
+        let mut nav_events = Vec::new();
         let mut lost_prns = Vec::new();
 
         for step in steps {
@@ -1355,19 +1366,21 @@ impl StreamingPvtRunner {
             if state == ReceiverChannelState::Lost {
                 lost_prns.push(step.prn);
             }
-            events.push(StreamingPvtEvent::TrackingUpdated(
-                StreamingTrackingUpdate {
-                    prn: step.prn,
-                    now_ms,
-                    output: step.output.clone(),
-                    state,
-                },
-            ));
+            tracking_updates.push(StreamingTrackingUpdate {
+                prn: step.prn,
+                now_ms,
+                output: step.output,
+                state,
+            });
             for event in &step.nav_events {
                 self.record_nav_event(event);
             }
-            events.extend(step.nav_events);
+            nav_events.extend(step.nav_events);
         }
+        if !tracking_updates.is_empty() {
+            events.push(StreamingPvtEvent::TrackingBatch(tracking_updates));
+        }
+        events.extend(nav_events);
 
         for prn in lost_prns {
             self.active_tracking.remove(&prn);
@@ -1659,14 +1672,28 @@ impl AcquisitionRingBuffer {
     }
 
     pub fn push_samples(&mut self, samples: &[Complex<f64>]) {
-        for sample in samples {
-            if self.samples.len() == self.capacity_samples {
-                self.samples.pop_front();
-                self.start_sample_index += 1;
-            }
-            self.samples.push_back(*sample);
-            self.next_sample_index += 1;
+        self.next_sample_index += samples.len() as u64;
+        if self.capacity_samples == 0 {
+            self.samples.clear();
+            self.start_sample_index = self.next_sample_index;
+            return;
         }
+        if samples.len() >= self.capacity_samples {
+            self.samples.clear();
+            self.samples.extend(
+                samples[samples.len() - self.capacity_samples..]
+                    .iter()
+                    .copied(),
+            );
+            self.start_sample_index = self.next_sample_index - self.capacity_samples as u64;
+            return;
+        }
+        let overflow = (self.samples.len() + samples.len()).saturating_sub(self.capacity_samples);
+        if overflow > 0 {
+            self.samples.drain(..overflow);
+            self.start_sample_index += overflow as u64;
+        }
+        self.samples.extend(samples.iter().copied());
     }
 
     pub fn len(&self) -> usize {
@@ -1686,13 +1713,21 @@ impl AcquisitionRingBuffer {
     }
 
     pub fn latest_window(&self, count: usize) -> Option<(u64, Vec<Complex<f64>>)> {
+        let mut window = Vec::with_capacity(count);
+        let sample_index = self.copy_latest_window(count, &mut window)?;
+        Some((sample_index, window))
+    }
+
+    fn copy_latest_window(&self, count: usize, window: &mut Vec<Complex<f64>>) -> Option<u64> {
         if count > self.samples.len() {
             return None;
         }
         let start_offset = self.samples.len() - count;
         let sample_index = self.start_sample_index + start_offset as u64;
-        let window = self.samples.iter().skip(start_offset).copied().collect();
-        Some((sample_index, window))
+        window.clear();
+        window.reserve(count);
+        window.extend(self.samples.iter().skip(start_offset).copied());
+        Some(sample_index)
     }
 }
 
@@ -1717,9 +1752,9 @@ mod tests {
     fn tracking_updates(events: &[StreamingPvtEvent]) -> Vec<&StreamingTrackingUpdate> {
         events
             .iter()
-            .filter_map(|event| match event {
-                StreamingPvtEvent::TrackingUpdated(update) => Some(update),
-                _ => None,
+            .flat_map(|event| match event {
+                StreamingPvtEvent::TrackingBatch(updates) => updates.as_slice(),
+                _ => &[],
             })
             .collect()
     }
@@ -2140,7 +2175,7 @@ mod tests {
             .filter_map(|event| match event {
                 StreamingPvtEvent::AcquisitionScanPlanned(scan) => Some(scan),
                 StreamingPvtEvent::AcquisitionScanCompleted(_) => None,
-                StreamingPvtEvent::TrackingUpdated(_) => None,
+                StreamingPvtEvent::TrackingBatch(_) => None,
                 StreamingPvtEvent::BitSyncUpdated(_) => None,
                 StreamingPvtEvent::NavSymbolReady(_) => None,
                 StreamingPvtEvent::NavSubframeDecoded(_) => None,
@@ -2158,7 +2193,7 @@ mod tests {
             .filter_map(|event| match event {
                 StreamingPvtEvent::AcquisitionScanCompleted(result) => Some(result),
                 StreamingPvtEvent::AcquisitionScanPlanned(_)
-                | StreamingPvtEvent::TrackingUpdated(_)
+                | StreamingPvtEvent::TrackingBatch(_)
                 | StreamingPvtEvent::BitSyncUpdated(_)
                 | StreamingPvtEvent::NavSymbolReady(_)
                 | StreamingPvtEvent::NavSubframeDecoded(_)
@@ -2228,9 +2263,9 @@ mod tests {
                 StreamingPvtEvent::AcquisitionScanCompleted(result) => {
                     saw_acquisition |= result.results.iter().any(|result| result.detected);
                 }
-                StreamingPvtEvent::TrackingUpdated(update) => {
-                    assert_eq!(update.prn, prn);
-                    tracking_updates += 1;
+                StreamingPvtEvent::TrackingBatch(updates) => {
+                    assert!(updates.iter().all(|update| update.prn == prn));
+                    tracking_updates += updates.len();
                 }
                 StreamingPvtEvent::AcquisitionScanPlanned(_)
                 | StreamingPvtEvent::BitSyncUpdated(_)
@@ -2272,7 +2307,7 @@ mod tests {
             .find_map(|event| match event {
                 StreamingPvtEvent::AcquisitionScanCompleted(result) => Some(result),
                 StreamingPvtEvent::AcquisitionScanPlanned(_)
-                | StreamingPvtEvent::TrackingUpdated(_)
+                | StreamingPvtEvent::TrackingBatch(_)
                 | StreamingPvtEvent::BitSyncUpdated(_)
                 | StreamingPvtEvent::NavSymbolReady(_)
                 | StreamingPvtEvent::NavSubframeDecoded(_)
@@ -2404,9 +2439,10 @@ mod tests {
         let events = runner.process_tracking_ms(&samples, 2, |_| true, |_| true);
 
         assert_eq!(events.len(), 1);
-        let StreamingPvtEvent::TrackingUpdated(update) = &events[0] else {
-            panic!("expected tracking update");
+        let StreamingPvtEvent::TrackingBatch(updates) = &events[0] else {
+            panic!("expected tracking batch");
         };
+        let update = updates.first().expect("one tracking update");
         assert_eq!(update.prn, prn);
         assert_eq!(update.now_ms, 2);
         assert!(update.output.pll_lock_metric > 0.0);
@@ -2492,7 +2528,7 @@ mod tests {
 
         let tracking_idx = events
             .iter()
-            .position(|event| matches!(event, StreamingPvtEvent::TrackingUpdated(_)))
+            .position(|event| matches!(event, StreamingPvtEvent::TrackingBatch(_)))
             .expect("tracking update");
         let nav_idx = events
             .iter()

@@ -337,14 +337,15 @@ impl DllPllTracking {
     ) -> (Complex<f64>, Complex<f64>, Complex<f64>) {
         let fs = self.config.fs;
         let spc_chips = spc_s / fs * self.code_freq_chips_per_s;
+        let phase_step_rad = TAU * self.carrier_freq_hz / fs;
+        let (initial_sin, initial_cos) = (TAU * self.carrier_phase_rad).sin_cos();
+        let (step_sin, step_cos) = phase_step_rad.sin_cos();
+        let mut carrier = Complex::new(initial_cos, -initial_sin);
+        let carrier_step = Complex::new(step_cos, -step_sin);
         let mut e = Complex::new(0.0, 0.0);
         let mut p = Complex::new(0.0, 0.0);
         let mut l = Complex::new(0.0, 0.0);
         for (i, sample) in samples.iter().enumerate() {
-            let carrier = Complex::new(
-                (TAU * self.carrier_phase_rad).cos(),
-                -(TAU * self.carrier_phase_rad).sin(),
-            );
             let wiped = sample * carrier;
             let cp = (self.code_phase_chips + i as f64 * self.code_freq_chips_per_s / fs)
                 % CODE_LENGTH as f64;
@@ -354,9 +355,14 @@ impl DllPllTracking {
             p += wiped * Complex::new(self.code[ci] as f64, 0.0);
             let li = ((cp + spc_chips) as usize) % CODE_LENGTH;
             l += wiped * Complex::new(self.code[li] as f64, 0.0);
-            self.carrier_phase_rad += self.carrier_freq_hz / fs;
-            self.carrier_phase_rad -= self.carrier_phase_rad.floor();
+            carrier *= carrier_step;
+            if i % 256 == 255 {
+                carrier /= carrier.norm();
+            }
         }
+        self.carrier_phase_rad = (self.carrier_phase_rad
+            + samples.len() as f64 * self.carrier_freq_hz / fs)
+            .rem_euclid(1.0);
         (e, p, l)
     }
 

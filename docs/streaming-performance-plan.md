@@ -43,9 +43,9 @@ This plan captures the agreed optimization design before changing the receiver p
 ## Current Implementation Status (2026-07-20)
 
 - `StreamingPvtRunner` consumes chunked IQ input through its reader entry point. The generic default chunk is 1 ms, the CTTC preset batch-reads 20 ms, and tracking still receives exact 1 ms slices. Both the complex sample buffer and the raw byte conversion buffer are reused instead of loading the complete IQ file or allocating per read.
-- Each complete 1 ms epoch is ingested by the acquisition ring and then passed to active channels for tracking. Channel-state updates and emitted events remain ordered deterministically on the runner thread.
+- Each complete 1 ms epoch is ingested by a batch-written acquisition ring and then passed to active channels for tracking. The capture window is copied into a reusable scratch buffer only when a scan is due. Channel-state updates remain ordered deterministically on the runner thread.
 - Active channel tracking runs on Rayon's persistent worker pool by default. Each worker mutates only its channel state; returned steps are sorted by PRN before the runner applies health, loss, navigation state, and output events. A serial fallback remains available through `parallel_tracking=false`, and a deterministic regression verifies identical tracking outputs and PRN order.
-- On the same release build and 60 s CTTC input, production streaming took `37.98 s` with serial tracking and `14.39 s` with parallel tracking, a 62% elapsed-time reduction. The parallel run acquired all five PRNs and produced 299,955 tracking updates, 32 decoded subframes, and 410 PVT outputs. Processing throughput was about 4.17 times real time.
+- Carrier wipeoff now uses a complex NCO recurrence with periodic normalization, and per-channel millisecond updates are grouped into one PRN-sorted `TrackingBatch`. On the current release build, the 100 s CTTC regression improved from `20.804 s` to `13.060-13.849 s` while preserving 724 converged PVT outputs and identical altitude statistics.
 - The production path keeps memory bounded by the acquisition ring, 20 ms read buffers, per-channel state, and emitted events for the current callback step. It no longer uses the legacy 3.84 GB full-file `Vec<Complex<f64>>` design.
 
 ## Phases
@@ -183,7 +183,7 @@ AcquisitionResult
   -> TrackingProbation
 ```
 
-Reacquisition currently searches the configured Doppler grid; last-known Doppler narrowing and a real-data forced-loss/recovery acceptance test remain future hardening work. The old lost PLL/DLL state is intentionally not reused.
+Reacquisition currently searches the configured Doppler grid; last-known Doppler narrowing remains future hardening work. A real CTTC IQ regression now forces an active channel to `Lost`, requires a detected `Reacquisition` scan, and verifies that tracking resumes. The old lost PLL/DLL state is intentionally not reused.
 
 ### Phase G: GUI Worker and Async Later
 
