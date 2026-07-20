@@ -16,7 +16,7 @@ pub fn main() {
                 ..Default::default()
             },
             |window, cx| {
-                let app = cx.new(GnsscopeApp::new);
+                let app = cx.new(|cx| GnsscopeApp::new(window, cx));
                 cx.new(|cx| Root::new(app, window, cx))
             },
         )

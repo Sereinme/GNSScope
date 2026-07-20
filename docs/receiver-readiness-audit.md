@@ -16,7 +16,7 @@ This is a single-machine CTTC baseline, not a cross-platform benchmark. No CPU p
 ### Remaining GUI integration work
 
 - Field-level validation and expert controls for navigation policy, ambiguity resolution, Kalman/Hatch parameters, and maximum acquisition PRNs.
-- Historical search/filter/delete/reveal actions and queued-run reorder/cancel controls.
+- Historical search/filter/delete/reveal actions and queued-run reorder/cancel controls are implemented; queue UUID order is persisted in preferences across restarts.
 - Plot focus, sky-marker hover details, PRN linking/pinning, and automated GPUI screenshot coverage.
 - Candidate comparison UI is still pending; Raw, Smoothed, and Kalman candidates are now carried through `PvtEpochOutput`, the GUI view model, and backward-compatible epoch JSON persistence.
 

@@ -10,10 +10,11 @@ use gpui::{
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
+    input::{Input, InputEvent, InputState},
     progress::Progress,
     scroll::ScrollableElement,
     slider::{Slider, SliderEvent, SliderState},
-    ActiveTheme, IconName, TitleBar,
+    ActiveTheme, Disableable, IconName, TitleBar,
 };
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -30,6 +31,31 @@ enum ThemePreference {
     System,
     Light,
     Dark,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HistoryFilter {
+    All,
+    Completed,
+    NeedsAttention,
+}
+
+impl HistoryFilter {
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Completed,
+            Self::Completed => Self::NeedsAttention,
+            Self::NeedsAttention => Self::All,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "全部",
+            Self::Completed => "已完成",
+            Self::NeedsAttention => "需处理",
+        }
+    }
 }
 
 impl ThemePreference {
@@ -134,6 +160,8 @@ pub struct GnsscopeApp {
     historical_diagnostic_events: Vec<GuiDiagnosticEvent>,
     selected_epoch: Option<usize>,
     timeline: Entity<SliderState>,
+    history_search: Entity<InputState>,
+    history_filter: HistoryFilter,
     follow_live: bool,
     theme_preference: ThemePreference,
     system_dark: bool,
@@ -143,17 +171,18 @@ pub struct GnsscopeApp {
 }
 
 impl GnsscopeApp {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let library = RunLibrary::open_default().ok();
         let history = library
             .as_ref()
             .and_then(|library| library.list_runs().ok())
             .unwrap_or_default();
-        let queue = history
-            .iter()
-            .filter(|run| run.status == RunStatus::Queued)
-            .cloned()
-            .collect();
+        let queue_order = library
+            .as_ref()
+            .and_then(|library| library.preference("queue_order").ok().flatten())
+            .and_then(|value| serde_json::from_str::<Vec<Uuid>>(&value).ok())
+            .unwrap_or_default();
+        let queue = ordered_queue(&history, &queue_order);
         let stored_theme = library
             .as_ref()
             .and_then(|library| library.preference("theme").ok().flatten());
@@ -186,6 +215,17 @@ impl GnsscopeApp {
             let SliderEvent::Change(value) = event;
             this.select_epoch_percent(value.end());
             cx.notify();
+        })
+        .detach();
+        let history_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("搜索文件名或路径")
+                .clean_on_escape()
+        });
+        cx.subscribe(&history_search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
         })
         .detach();
         let initial_run_id = history
@@ -229,6 +269,8 @@ impl GnsscopeApp {
             historical_diagnostic_events,
             selected_epoch,
             timeline,
+            history_search,
+            history_filter: HistoryFilter::All,
             follow_live: true,
             theme_preference,
             system_dark: cx.theme().mode.is_dark(),
@@ -420,6 +462,7 @@ impl GnsscopeApp {
                 self.selected_run_id = Some(run.id);
                 if self.active_run.is_some() {
                     self.queue.push_back(run);
+                    self.persist_queue_order();
                     self.status_message = "任务已加入等待队列".to_string();
                 } else {
                     self.start_run(run);
@@ -473,6 +516,7 @@ impl GnsscopeApp {
             return;
         };
         let run = self.queue.remove(index).expect("queued run index");
+        self.persist_queue_order();
         if let Some(library) = &self.library {
             let _ = library.update_progress(id, RunStatus::Cancelled, 0, 0, 0, "排队任务已取消");
             self.history = library.list_runs().unwrap_or_default();
@@ -489,6 +533,50 @@ impl GnsscopeApp {
         );
     }
 
+    fn move_queued(&mut self, id: Uuid, direction: i32) {
+        let Some(index) = self.queue.iter().position(|run| run.id == id) else {
+            return;
+        };
+        if move_queue_item(&mut self.queue, index, direction) {
+            self.persist_queue_order();
+            self.status_message = "已更新任务队列顺序".to_string();
+        }
+    }
+
+    fn persist_queue_order(&self) {
+        let Some(library) = &self.library else {
+            return;
+        };
+        let order = self.queue.iter().map(|run| run.id).collect::<Vec<_>>();
+        if let Ok(value) = serde_json::to_string(&order) {
+            let _ = library.set_preference("queue_order", &value);
+        }
+    }
+
+    fn reveal_source_file(&mut self, id: Uuid) {
+        let Some(run) = self.history.iter().find(|run| run.id == id) else {
+            return;
+        };
+        let path = run.source_path.clone();
+        if !path.exists() {
+            self.status_message = "源 IQ 文件已移动或删除".to_string();
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        let result = std::process::Command::new("explorer.exe")
+            .arg(format!("/select,{}", path.display()))
+            .spawn();
+        #[cfg(not(target_os = "windows"))]
+        let result = std::process::Command::new("xdg-open")
+            .arg(path.parent().unwrap_or(std::path::Path::new(".")))
+            .spawn();
+        self.status_message = if result.is_ok() {
+            "已在文件管理器中定位源文件".to_string()
+        } else {
+            "无法打开文件管理器".to_string()
+        };
+    }
+
     fn delete_historical_run(&mut self, id: Uuid) {
         if self.active_run.as_ref().is_some_and(|run| run.id == id) {
             return;
@@ -502,6 +590,7 @@ impl GnsscopeApp {
         }
         self.history = library.list_runs().unwrap_or_default();
         self.queue.retain(|run| run.id != id);
+        self.persist_queue_order();
         if self.selected_run_id == Some(id) {
             self.selected_run_id = None;
             self.historical_epochs.clear();
@@ -650,6 +739,7 @@ impl GnsscopeApp {
         self.worker_receiver = None;
         self.active_run = None;
         if let Some(next) = self.queue.pop_front() {
+            self.persist_queue_order();
             self.start_run(next);
         }
         if let Some(library) = &self.library {
@@ -851,6 +941,7 @@ impl GnsscopeApp {
     }
 
     fn render_sidebar(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let history_query = self.history_search.read(cx).value().to_string();
         let active = self.active_run.as_ref().map(|run| {
             div()
                 .p(px(10.))
@@ -966,7 +1057,7 @@ impl GnsscopeApp {
                             .mb(px(7.))
                             .child(format!("等待队列  {}", self.queue.len())),
                     )
-                    .children(self.queue.iter().map(|run| {
+                    .children(self.queue.iter().enumerate().map(|(index, run)| {
                         let id = run.id;
                         div()
                             .mb(px(5.))
@@ -992,23 +1083,77 @@ impl GnsscopeApp {
                                     ),
                             )
                             .child(
-                                Button::new(SharedString::from(format!("cancel-queued-{id}")))
-                                    .ghost()
-                                    .icon(IconName::CircleX)
-                                    .tooltip("取消排队")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.cancel_queued(id);
-                                        cx.notify();
-                                    })),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .child(
+                                        Button::new(SharedString::from(format!("queue-up-{id}")))
+                                            .ghost()
+                                            .icon(IconName::ChevronUp)
+                                            .tooltip("上移")
+                                            .disabled(index == 0)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.move_queued(id, -1);
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!("queue-down-{id}")))
+                                            .ghost()
+                                            .icon(IconName::ChevronDown)
+                                            .tooltip("下移")
+                                            .disabled(index + 1 == self.queue.len())
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.move_queued(id, 1);
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "cancel-queued-{id}"
+                                        )))
+                                        .ghost()
+                                        .icon(IconName::CircleX)
+                                        .tooltip("取消排队")
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.cancel_queued(id);
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    ),
                             )
                     }))
                     .child(
                         div()
                             .mt(px(18.))
-                            .text_size(px(10.))
-                            .text_color(palette.muted)
                             .mb(px(7.))
-                            .child("历史记录"),
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(palette.muted)
+                                    .child("历史记录"),
+                            )
+                            .child(
+                                Button::new("history-filter")
+                                    .ghost()
+                                    .icon(IconName::SortDescending)
+                                    .label(self.history_filter.label())
+                                    .tooltip("切换历史状态过滤")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.history_filter = this.history_filter.next();
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mb(px(8.))
+                            .h(px(32.))
+                            .child(Input::new(&self.history_search).prefix(IconName::Search)),
                     )
                     .children(
                         self.history
@@ -1017,6 +1162,7 @@ impl GnsscopeApp {
                                 run.status != RunStatus::Queued
                                     && Some(run.id)
                                         != self.active_run.as_ref().map(|active| active.id)
+                                    && history_run_matches(run, &history_query, self.history_filter)
                             })
                             .take(30)
                             .map(|run| {
@@ -1086,15 +1232,35 @@ impl GnsscopeApp {
                                             )),
                                     )
                                     .child(
-                                        Button::new(SharedString::from(format!("delete-run-{id}")))
-                                            .ghost()
-                                            .text_color(palette.muted)
-                                            .icon(IconName::Delete)
-                                            .tooltip("删除历史记录")
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.delete_historical_run(id);
-                                                cx.notify();
-                                            })),
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .child(
+                                                Button::new(SharedString::from(format!(
+                                                    "reveal-run-{id}"
+                                                )))
+                                                .ghost()
+                                                .text_color(palette.muted)
+                                                .icon(IconName::FolderOpen)
+                                                .tooltip("在文件管理器中定位")
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.reveal_source_file(id);
+                                                    cx.notify();
+                                                })),
+                                            )
+                                            .child(
+                                                Button::new(SharedString::from(format!(
+                                                    "delete-run-{id}"
+                                                )))
+                                                .ghost()
+                                                .text_color(palette.muted)
+                                                .icon(IconName::Delete)
+                                                .tooltip("删除历史记录")
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.delete_historical_run(id);
+                                                    cx.notify();
+                                                })),
+                                            ),
                                     )
                             }),
                     ),
@@ -2503,6 +2669,114 @@ mod position_quality_tests {
 
 fn epoch_index_for_percent(count: usize, percent: f32) -> Option<usize> {
     (count > 0).then(|| ((percent.clamp(0.0, 100.0) / 100.0) * (count - 1) as f32).round() as usize)
+}
+
+fn ordered_queue(history: &[ProcessingRun], order: &[Uuid]) -> VecDeque<ProcessingRun> {
+    let mut queued = history
+        .iter()
+        .filter(|run| run.status == RunStatus::Queued)
+        .cloned()
+        .collect::<Vec<_>>();
+    queued.sort_by_key(|run| {
+        order
+            .iter()
+            .position(|id| *id == run.id)
+            .unwrap_or(usize::MAX)
+    });
+    queued.into()
+}
+
+fn move_queue_item<T>(queue: &mut VecDeque<T>, index: usize, direction: i32) -> bool {
+    let target = if direction < 0 {
+        index.checked_sub(1)
+    } else if direction > 0 && index + 1 < queue.len() {
+        Some(index + 1)
+    } else {
+        None
+    };
+    let Some(target) = target else {
+        return false;
+    };
+    queue.swap(index, target);
+    true
+}
+
+fn history_run_matches(run: &ProcessingRun, query: &str, filter: HistoryFilter) -> bool {
+    let status_matches = match filter {
+        HistoryFilter::All => true,
+        HistoryFilter::Completed => run.status == RunStatus::Completed,
+        HistoryFilter::NeedsAttention => matches!(
+            run.status,
+            RunStatus::Failed | RunStatus::Cancelled | RunStatus::Interrupted
+        ),
+    };
+    if !status_matches {
+        return false;
+    }
+    let query = query.trim().to_lowercase();
+    query.is_empty()
+        || run
+            .source_path
+            .to_string_lossy()
+            .to_lowercase()
+            .contains(&query)
+        || format!("{:?}", run.status).to_lowercase().contains(&query)
+}
+
+#[cfg(test)]
+mod history_queue_tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn run(name: &str, status: RunStatus) -> ProcessingRun {
+        ProcessingRun {
+            id: Uuid::new_v4(),
+            created_at: Utc::now(),
+            source_path: PathBuf::from(name),
+            status,
+            progress: 0.0,
+            processed_samples: 0,
+            total_samples: 0,
+            pvt_epoch_count: 0,
+            message: String::new(),
+            settings: GuiProcessingSettings::default(),
+        }
+    }
+
+    #[test]
+    fn queue_order_and_move_are_deterministic() {
+        let first = run("first.dat", RunStatus::Queued);
+        let second = run("second.dat", RunStatus::Queued);
+        let history = vec![first.clone(), second.clone()];
+        let mut queue = ordered_queue(&history, &[second.id, first.id]);
+
+        assert_eq!(queue[0].id, second.id);
+        assert!(move_queue_item(&mut queue, 1, -1));
+        assert_eq!(queue[0].id, first.id);
+        assert!(!move_queue_item(&mut queue, 0, -1));
+    }
+
+    #[test]
+    fn history_search_combines_path_and_status_filter() {
+        let completed = run("captures/CTTC_SPAIN.dat", RunStatus::Completed);
+        let failed = run("captures/field.dat", RunStatus::Failed);
+
+        assert!(history_run_matches(
+            &completed,
+            "cttc",
+            HistoryFilter::Completed
+        ));
+        assert!(!history_run_matches(
+            &failed,
+            "field",
+            HistoryFilter::Completed
+        ));
+        assert!(history_run_matches(
+            &failed,
+            "field",
+            HistoryFilter::NeedsAttention
+        ));
+    }
 }
 
 #[cfg(test)]

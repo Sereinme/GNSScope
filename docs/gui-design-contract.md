@@ -57,6 +57,8 @@ The left sidebar represents a persistent local processing run library, not an in
 
 Completed runs remain inspectable after application restart. The library stores derived results and source-file metadata, but does not copy the original IQ file. A missing or moved IQ source must not prevent viewing results that were already persisted.
 
+The history rail supports filename/path search, status filtering, deletion, and source-file reveal. Queued runs expose move-up, move-down, and cancel controls, with UUID order persisted in preferences across restarts.
+
 The library uses a versioned SQLite database in the user's application-data directory, as recorded by ADR-0003. Runs and derived observations are written incrementally so an interrupted process can recover an accurate terminal or resumable status without rebuilding a history index from loose files.
 
 Each persisted PVT output epoch owns the channel-diagnostic snapshot for that same epoch: active PRNs, C/N0, Doppler, acquisition/tracking/navigation state, and available residuals. Changing `pvt_output_rate_ms` therefore changes both the persisted PVT cadence and diagnostic-chart cadence. Discrete acquisition, loss, reacquisition, navigation-lock, failure, and completion events are persisted immediately between epochs.
