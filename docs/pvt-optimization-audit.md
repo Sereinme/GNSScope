@@ -43,4 +43,4 @@ The real-data e2e covers acquisition, tracking, bit sync, nav decode, optional R
 
 ## Current Follow-up
 
-Do not use this historical checklist as a second backlog. The next receiver-hardening task is a real-IQ regression that interrupts PVT by losing enough simultaneous channels and proves output resumes after reacquisition. Performance priorities are maintained in `docs/receiver-readiness-audit.md`.
+Do not use this historical checklist as a second backlog. Product sequencing, including GUI polish and the forced-loss/reacquisition regression, is maintained in `docs/roadmap.md`.

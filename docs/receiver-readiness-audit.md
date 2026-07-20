@@ -9,7 +9,7 @@ Date: 2026-07-20
 - The final time is GPS week 1734, SOW 368663.029, or 2013-04-04 06:24:07.029 UTC.
 - The current targeted baseline passes 128 `gnss-core` library tests and 52 `gnss-gui` library tests. The complete CTTC GUI run persisted 810 epochs and 113 discrete acquisition, channel-state, and navigation events.
 
-This is a single-machine CTTC baseline, not a cross-platform benchmark. No CPU profiler or current peak-memory capture has been recorded, so the optimization list below is ranked from code inspection and must be measured before implementation.
+This is a single-machine CTTC baseline, not a cross-platform benchmark. No CPU profiler or current peak-memory capture has been recorded, so the optimization list below is ranked from code inspection and must be measured before implementation. Product sequencing is maintained in `docs/roadmap.md`.
 
 ## Current Product Status
 
@@ -152,10 +152,7 @@ Risk: low to medium. Expected gain is smaller than tracking and ring-buffer work
 
 ## Recommended Next Work
 
-1. Add a real-IQ stress regression that loses enough simultaneous channels to interrupt PVT and proves PVT resumes after reacquisition.
-2. Broaden accuracy coverage with real `Int8`, dynamic/high-rate, and independent position/velocity/time datasets.
-3. Capture CPU profiles, phase timings, and peak memory for serial and parallel CTTC runs.
-4. Optimize incremental code phase, the acquisition circular buffer, acquisition caches, and multi-millisecond dispatch in measured order, re-running deterministic real-data regressions after each change.
+See `docs/roadmap.md` for the authoritative priority order. The current first priority combines GUI visual polish with the real-IQ forced-loss/reacquisition PVT recovery regression.
 
 ## GUI Gate
 
