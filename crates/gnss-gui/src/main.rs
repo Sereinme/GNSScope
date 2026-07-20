@@ -1,9 +1,10 @@
 use gnss_gui::GnsscopeApp;
 use gpui::{point, px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
-use gpui_component::Root;
+use gpui_component::{Root, TitleBar};
+use gpui_component_assets::Assets;
 
 pub fn main() {
-    Application::new().run(|cx: &mut App| {
+    Application::new().with_assets(Assets).run(|cx: &mut App| {
         gpui_component::init(cx);
         cx.open_window(
             WindowOptions {
@@ -11,7 +12,7 @@ pub fn main() {
                     origin: point(px(80.), px(60.)),
                     size: size(px(1440.), px(900.)),
                 })),
-                titlebar: None,
+                titlebar: Some(TitleBar::title_bar_options()),
                 ..Default::default()
             },
             |window, cx| {

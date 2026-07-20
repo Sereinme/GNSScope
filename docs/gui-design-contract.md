@@ -26,7 +26,7 @@ Visible strings are addressed through stable message keys so English can be adde
 
 ## UI Technology Boundary
 
-As recorded by ADR-0004, `gpui-component` owns standard desktop controls, themes, forms, menus, progress, drawers, virtualized lists/tables, and focus/keyboard behavior. Native GPUI drawing is reserved for GNSS domain plots: sky plot, ENU scatter/track, C/N0 bars and history, velocity/clock charts, and the shared epoch cursor. Standard buttons, inputs, menus, and dialogs must not be reimplemented as custom canvas elements.
+As recorded by ADR-0004, `gpui-component` owns standard desktop controls, themes, forms, menus, progress, drawers, virtualized lists/tables, title bar, and focus/keyboard behavior. `gpui-component-assets` supplies the embedded icon bundle. Familiar commands use icon buttons with concise hover tooltips; text remains on primary commands whose meaning or consequence is not obvious from an icon alone. Native GPUI drawing is reserved for GNSS domain plots: sky plot, ENU scatter/track, C/N0 bars and history, velocity/clock charts, and the shared epoch cursor. Standard buttons, inputs, menus, and dialogs must not be reimplemented as custom canvas elements.
 
 This document defines the first GUI boundary before wiring gpui widgets. The GUI should consume structured state from `gnss-gui` instead of reading test-only logs.
 
@@ -84,11 +84,11 @@ GNSScope opens directly into the receiver workspace, not a landing page.
 - Quality pane: satellites used/excluded, residual RMS, standardized residual RMS, HDOP/GDOP, horizontal/vertical sigma.
 - Lower diagnostics: per-channel C/N0, Doppler, lock state, and residual chart.
 
-The main workspace is a single scrollable overview rather than top-level `Overview`, `Signals`, or `PVT` tabs. Its stable order is: task command bar, processing status/progress, sky plot plus ENU position view, full-width channel/C/N0 diagnostics, velocity and altitude histories, selected-epoch PVT details, then the shared epoch timeline. Height history reports mean, population standard deviation, and valid range. Receiver-event history remains persisted for diagnostics but is not shown in the primary workspace. Core correlations remain visible in one navigation context.
+The main workspace is a single scrollable overview rather than top-level `Overview`, `Signals`, or `PVT` tabs. Its stable order is: task command bar, processing status/progress, sky plot plus ENU position view, full-width channel/C/N0 diagnostics, velocity and altitude histories, and selected-epoch PVT details. The shared epoch timeline is a fixed bottom bar outside the scroll container, so it remains operable at every vertical scroll position. A persistent interface preference and header icon can hide or restore it without changing processing-run configuration. Height history reports mean, population standard deviation, and valid range. Receiver-event history remains persisted for diagnostics but is not shown in the primary workspace. Core correlations remain visible in one navigation context.
 
 Major plots expose a focus command that temporarily expands one visualization to the work area and restores the overview without losing the selected run, epoch, PRN, or live-follow state. Segmented controls inside a plot may change its analytical mode; they do not replace top-level navigation.
 
-The recommended initial window is `1440 x 900` and the minimum usable desktop layout is approximately `1180 x 720`. Below the wide layout, the run sidebar collapses to a temporary drawer, sky/position plots stack vertically, metric grids reflow, and the secondary-settings drawer overlays rather than compresses charts. Typography does not shrink to force content into narrow widths; vertical scrolling and plot-focus mode preserve legibility. Mobile layout is outside the first release scope.
+The recommended initial window is `1440 x 900` and the minimum usable desktop layout is approximately `1180 x 720`. A client-decorated `gpui-component::TitleBar` provides the draggable region, double-click maximize/restore behavior, and native minimize, maximize/restore, and close controls. Below the wide layout, the run sidebar collapses to a temporary drawer, sky/position plots stack vertically, metric grids reflow, and the secondary-settings drawer overlays rather than compresses charts. Typography does not shrink to force content into narrow widths; vertical scrolling and plot-focus mode preserve legibility. Mobile layout is outside the first release scope.
 
 ## Processing Run Sidebar
 

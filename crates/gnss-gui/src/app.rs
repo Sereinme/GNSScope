@@ -13,7 +13,7 @@ use gpui_component::{
     progress::Progress,
     scroll::ScrollableElement,
     slider::{Slider, SliderEvent, SliderState},
-    ActiveTheme,
+    ActiveTheme, IconName, TitleBar,
 };
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -138,6 +138,7 @@ pub struct GnsscopeApp {
     theme_preference: ThemePreference,
     system_dark: bool,
     settings_open: bool,
+    timeline_visible: bool,
     status_message: String,
 }
 
@@ -161,6 +162,10 @@ impl GnsscopeApp {
             .as_deref()
             .map(|value| ThemePreference::parse(Some(value)))
             .unwrap_or_else(|| ThemePreference::parse(stored_theme.as_deref()));
+        let timeline_visible = library
+            .as_ref()
+            .and_then(|library| library.preference("timeline_visible").ok().flatten())
+            .is_none_or(|value| value != "false");
         let iq_path = std::env::var_os("GNSSCOPE_IQ_PATH").map(PathBuf::from);
         let settings = match (iq_path, std::env::var("GNSSCOPE_PRESET").ok().as_deref()) {
             (Some(path), Some("cttc")) => GuiProcessingSettings::cttc_spain(path),
@@ -228,6 +233,7 @@ impl GnsscopeApp {
             theme_preference,
             system_dark: cx.theme().mode.is_dark(),
             settings_open: false,
+            timeline_visible,
             status_message: "请选择 IQ 文件开始解算".to_string(),
         };
         if std::env::var_os("GNSSCOPE_AUTORUN").is_some() {
@@ -254,6 +260,20 @@ impl GnsscopeApp {
         self.theme_preference = self.theme_preference.next();
         if let Some(library) = &self.library {
             let _ = library.set_preference("theme", self.theme_preference.value());
+        }
+    }
+
+    fn toggle_timeline_visibility(&mut self) {
+        self.timeline_visible = !self.timeline_visible;
+        if let Some(library) = &self.library {
+            let _ = library.set_preference(
+                "timeline_visible",
+                if self.timeline_visible {
+                    "true"
+                } else {
+                    "false"
+                },
+            );
         }
     }
 
@@ -802,6 +822,33 @@ impl GnsscopeApp {
             )
     }
 
+    fn render_title_bar(&self, palette: Palette) -> impl IntoElement {
+        TitleBar::new()
+            .bg(palette.sidebar)
+            .border_color(palette.border)
+            .text_color(palette.text)
+            .child(
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(IconName::Map)
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("GNSScope"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(palette.muted)
+                            .child("GNSS signal processing workspace"),
+                    ),
+            )
+    }
+
     fn render_sidebar(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.active_run.as_ref().map(|run| {
             div()
@@ -880,7 +927,8 @@ impl GnsscopeApp {
                         Button::new("theme")
                             .ghost()
                             .text_color(palette.text)
-                            .label(self.theme_preference.label())
+                            .icon(IconName::Palette)
+                            .tooltip(format!("主题：{}", self.theme_preference.label()))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.cycle_theme();
                                 cx.notify();
@@ -945,7 +993,8 @@ impl GnsscopeApp {
                             .child(
                                 Button::new(SharedString::from(format!("cancel-queued-{id}")))
                                     .ghost()
-                                    .label("取消")
+                                    .icon(IconName::CircleX)
+                                    .tooltip("取消排队")
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.cancel_queued(id);
                                         cx.notify();
@@ -1039,7 +1088,8 @@ impl GnsscopeApp {
                                         Button::new(SharedString::from(format!("delete-run-{id}")))
                                             .ghost()
                                             .text_color(palette.muted)
-                                            .label("删除")
+                                            .icon(IconName::Delete)
+                                            .tooltip("删除历史记录")
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.delete_historical_run(id);
                                                 cx.notify();
@@ -1066,7 +1116,8 @@ impl GnsscopeApp {
                     .gap(px(10.))
                     .child(
                         Button::new("file")
-                            .label("选择文件")
+                            .icon(IconName::FolderOpen)
+                            .tooltip("选择 IQ 文件")
                             .on_click(cx.listener(|this, _, _, cx| this.select_file(cx))),
                     )
                     .child(
@@ -1099,17 +1150,38 @@ impl GnsscopeApp {
                         Button::new("return-live")
                             .ghost()
                             .text_color(palette.accent)
-                            .label("返回实时")
+                            .icon(IconName::Redo2)
+                            .tooltip("返回最新 epoch")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.return_to_live(window, cx);
                                 cx.notify();
                             }))
                     }))
                     .child(
+                        Button::new("timeline-visibility")
+                            .ghost()
+                            .text_color(palette.text)
+                            .icon(if self.timeline_visible {
+                                IconName::PanelBottom
+                            } else {
+                                IconName::PanelBottomOpen
+                            })
+                            .tooltip(if self.timeline_visible {
+                                "隐藏 epoch 时间轴"
+                            } else {
+                                "显示 epoch 时间轴"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_timeline_visibility();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Button::new("settings")
                             .ghost()
                             .text_color(palette.text)
-                            .label("详细配置")
+                            .icon(IconName::Settings2)
+                            .tooltip("接收机详细配置")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.settings_open = !this.settings_open;
                                 cx.notify();
@@ -1118,7 +1190,8 @@ impl GnsscopeApp {
                     .child(if is_active {
                         Button::new("cancel")
                             .danger()
-                            .label("取消")
+                            .icon(IconName::CircleX)
+                            .tooltip("取消当前解算")
                             .on_click(cx.listener(|this, _, _, _| this.cancel_active()))
                     } else {
                         Button::new("run")
@@ -1256,6 +1329,38 @@ impl GnsscopeApp {
                         cx.notify();
                     }))
             }))
+            .child(
+                div()
+                    .mt(px(14.))
+                    .h(px(34.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(palette.text)
+                            .child("底部 epoch 时间轴"),
+                    )
+                    .child(
+                        Button::new("timeline-visibility-drawer")
+                            .ghost()
+                            .icon(if self.timeline_visible {
+                                IconName::Eye
+                            } else {
+                                IconName::EyeOff
+                            })
+                            .tooltip(if self.timeline_visible {
+                                "隐藏 epoch 时间轴"
+                            } else {
+                                "显示 epoch 时间轴"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_timeline_visibility();
+                                cx.notify();
+                            })),
+                    ),
+            )
             .children(
                 [
                     (
@@ -1682,40 +1787,48 @@ impl GnsscopeApp {
                             .child(utc),
                     ),
             )
+    }
+
+    fn render_timeline_bar(&self, palette: Palette) -> impl IntoElement {
+        let epochs = self.display_epochs();
+        div()
+            .flex_shrink_0()
+            .h(px(52.))
+            .px(px(20.))
+            .bg(palette.surface)
+            .border_t_1()
+            .border_color(palette.border)
+            .flex()
+            .items_center()
             .child(
                 div()
-                    .mt(px(12.))
-                    .h(px(34.))
-                    .rounded(px(5.))
-                    .bg(palette.surface_alt)
-                    .border_1()
-                    .border_color(palette.border)
                     .flex()
                     .items_center()
-                    .px(px(10.))
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(palette.muted)
-                            .child("EPOCH"),
-                    )
-                    .child(
-                        div()
-                            .ml(px(10.))
-                            .flex_1()
-                            .child(Slider::new(&self.timeline).disabled(epochs.len() < 2)),
-                    )
-                    .child(
-                        div()
-                            .ml(px(10.))
-                            .text_size(px(10.))
-                            .text_color(palette.text)
-                            .child(format!(
-                                "{} / {}",
-                                self.selected_epoch.map(|i| i + 1).unwrap_or(0),
-                                epochs.len()
-                            )),
-                    ),
+                    .gap(px(7.))
+                    .text_size(px(10.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(palette.muted)
+                    .child(IconName::PanelBottom)
+                    .child("EPOCH"),
+            )
+            .child(
+                div()
+                    .ml(px(14.))
+                    .flex_1()
+                    .child(Slider::new(&self.timeline).disabled(epochs.len() < 2)),
+            )
+            .child(
+                div()
+                    .ml(px(14.))
+                    .min_w(px(72.))
+                    .text_right()
+                    .text_size(px(10.))
+                    .text_color(palette.text)
+                    .child(format!(
+                        "{} / {}",
+                        self.selected_epoch.map(|index| index + 1).unwrap_or(0),
+                        epochs.len()
+                    )),
             )
     }
 
@@ -1747,26 +1860,39 @@ impl Render for GnsscopeApp {
             .text_color(palette.text)
             .font_family("Segoe UI")
             .flex()
-            .child(self.render_sidebar(palette, cx))
+            .flex_col()
+            .child(self.render_title_bar(palette))
             .child(
                 div()
-                    .relative()
                     .flex_1()
-                    .min_w_0()
-                    .h_full()
+                    .min_h_0()
                     .flex()
-                    .flex_col()
-                    .child(self.render_header(palette, cx))
+                    .child(self.render_sidebar(palette, cx))
                     .child(
                         div()
+                            .relative()
                             .flex_1()
-                            .overflow_y_scrollbar()
-                            .child(self.render_progress(palette))
-                            .child(self.render_overview(palette)),
-                    )
-                    .children(
-                        self.settings_open
-                            .then(|| self.render_config_drawer(palette, cx)),
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .child(self.render_header(palette, cx))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scrollbar()
+                                    .child(self.render_progress(palette))
+                                    .child(self.render_overview(palette)),
+                            )
+                            .children(
+                                self.timeline_visible
+                                    .then(|| self.render_timeline_bar(palette)),
+                            )
+                            .children(
+                                self.settings_open
+                                    .then(|| self.render_config_drawer(palette, cx)),
+                            ),
                     ),
             )
     }
