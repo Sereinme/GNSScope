@@ -70,6 +70,7 @@ fn test_streaming_runner_real_data_smoke() {
     let mut converged_satellite_counts = Vec::new();
     let mut converged_altitudes_m = Vec::new();
     let mut first_converged_epoch_index = None;
+    let mut unconverged_after_first_solution = Vec::new();
     let summary = runner
         .stream_iq_file_until_ms(max_ms, |step| {
             implausible_position_epochs.extend(step.events.iter().filter_map(|event| {
@@ -80,6 +81,12 @@ fn test_streaming_runner_real_data_smoke() {
                     first_converged_epoch_index.get_or_insert(output.epoch_index);
                     converged_satellite_counts.push(output.quality.n_sats);
                     converged_altitudes_m.push(output.lla_rad[2]);
+                } else if first_converged_epoch_index.is_some() {
+                    unconverged_after_first_solution.push((
+                        output.epoch_index,
+                        output.quality.n_sats,
+                        output.time.receiver_time_sow,
+                    ));
                 }
                 (output.quality.converged
                     && !(position_quality.min_altitude_m..=position_quality.max_altitude_m)
@@ -140,6 +147,10 @@ fn test_streaming_runner_real_data_smoke() {
     if max_ms >= 60_000 {
         assert!(summary.event_counts.nav_subframes > 0);
         assert!(summary.event_counts.pvt_outputs > 0);
+        assert!(
+            unconverged_after_first_solution.is_empty(),
+            "PVT continuity gaps after first solution: {unconverged_after_first_solution:?}"
+        );
         let first_converged_epoch_index =
             first_converged_epoch_index.expect("at least one converged CTTC PVT output");
         eprintln!("first converged CTTC PVT epoch: {first_converged_epoch_index}");

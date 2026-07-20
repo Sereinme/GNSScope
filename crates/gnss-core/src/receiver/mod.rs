@@ -517,6 +517,7 @@ pub struct StreamingPvtConfig {
     pub continuous_pvt: ContinuousPvtConfig,
     pub acquisition_ring_ms: usize,
     pub bit_sync_start_ms: u64,
+    /// Optional front-end latency between a decoded navigation symbol and its tracking sample tag.
     pub nav_tow_tag_latency_ms: usize,
 }
 
@@ -541,7 +542,7 @@ impl Default for StreamingPvtConfig {
             tracking: TrackingConfig::default(),
             continuous_pvt: ContinuousPvtConfig::default(),
             bit_sync_start_ms: 2_000,
-            nav_tow_tag_latency_ms: 8 * 20,
+            nav_tow_tag_latency_ms: 0,
         }
     }
 }

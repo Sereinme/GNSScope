@@ -90,6 +90,9 @@ impl NavDecoder {
         self.sym_buf[self.sym_idx % 16] = symbol;
         self.sym_idx += 1;
         self.bit_counter += 1;
+        if self.tow_set {
+            self.tow_at_current_symbol_ms = (self.tow_at_current_symbol_ms + 20) % 604_800_000;
+        }
 
         if self.sym_idx < PREAMBLE_LEN {
             return false;
@@ -200,12 +203,6 @@ impl NavDecoder {
                 self.subframe_idx = 0;
             }
         }
-        // Per-symbol TOW increment (GNSS-SDR: += 20 ms each symbol once set).
-        // When a subframe decodes, the TOW is set above and we return early,
-        // so this increment only runs for non-decode symbols.
-        if self.tow_set {
-            self.tow_at_current_symbol_ms = (self.tow_at_current_symbol_ms + 20) % 604_800_000;
-        }
         false
     }
 
@@ -312,5 +309,18 @@ mod tests {
         }
         assert!(dec.synced);
         assert!(dec.inverted);
+    }
+
+    #[test]
+    fn test_tow_advances_while_searching_for_next_preamble() {
+        let mut dec = NavDecoder::new();
+        dec.tow_set = true;
+        dec.tow_at_current_symbol_ms = 600_000;
+
+        for symbol_index in 1..=8 {
+            assert!(!dec.feed_symbol(1.0));
+            assert_eq!(dec.tow_at_current_symbol_ms(), 600_000 + symbol_index * 20);
+        }
+        assert!(!dec.synced);
     }
 }
