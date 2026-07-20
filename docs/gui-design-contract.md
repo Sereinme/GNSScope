@@ -184,6 +184,8 @@ For navigation data, long captures or full RINEX files should keep multiple reco
 
 The main workspace renders only the final selected solution using the receiver preference `Kalman > Smoothed WLS > Raw WLS`, with an explicit solution-kind label. Default plots never overlay all candidate solutions. `PvtEpochOutput`, the GUI view model, and the persisted epoch record store every available Raw, Smoothed, and Kalman candidate plus the final selection so expert details can compare position, velocity, residual, and uncertainty without reprocessing the IQ source.
 
+Sky markers expose hover detail for PRN, C/N0, azimuth, elevation, residual, and PVT use. Clicking a sky marker or healthy C/N0 column pins the PRN and links its highlight across both panels. Every plot panel supports a full-width focus mode with an icon-only enter/exit control.
+
 ## Application State
 
 `gnss_gui::GuiReceiverWorkspaceState` is the UI state container for the first gpui screen.

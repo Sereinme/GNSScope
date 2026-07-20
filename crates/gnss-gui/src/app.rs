@@ -5,8 +5,9 @@ use crate::{
 };
 use gpui::prelude::*;
 use gpui::{
-    bounds, canvas, div, point, px, quad, rgb, size, Bounds, Context, Entity, Hsla, IntoElement,
-    ParentElement, PathBuilder, PathPromptOptions, Render, SharedString, Styled, Timer, Window,
+    bounds, canvas, div, point, px, quad, rgb, size, AnyElement, Bounds, Context, Entity, Hsla,
+    InteractiveElement, IntoElement, ParentElement, PathBuilder, PathPromptOptions, Render,
+    SharedString, Styled, Timer, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -38,6 +39,27 @@ enum HistoryFilter {
     All,
     Completed,
     NeedsAttention,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlotFocus {
+    Sky,
+    Position,
+    Cn0,
+    Velocity,
+    Altitude,
+}
+
+impl PlotFocus {
+    fn id(self) -> &'static str {
+        match self {
+            Self::Sky => "sky",
+            Self::Position => "position",
+            Self::Cn0 => "cn0",
+            Self::Velocity => "velocity",
+            Self::Altitude => "altitude",
+        }
+    }
 }
 
 impl HistoryFilter {
@@ -162,6 +184,9 @@ pub struct GnsscopeApp {
     timeline: Entity<SliderState>,
     history_search: Entity<InputState>,
     history_filter: HistoryFilter,
+    hovered_prn: Option<u8>,
+    pinned_prn: Option<u8>,
+    focused_plot: Option<PlotFocus>,
     follow_live: bool,
     theme_preference: ThemePreference,
     system_dark: bool,
@@ -271,6 +296,9 @@ impl GnsscopeApp {
             timeline,
             history_search,
             history_filter: HistoryFilter::All,
+            hovered_prn: None,
+            pinned_prn: None,
+            focused_plot: None,
             follow_live: true,
             theme_preference,
             system_dark: cx.theme().mode.is_dark(),
@@ -1835,11 +1863,57 @@ impl GnsscopeApp {
             )
     }
 
-    fn render_overview(&self, palette: Palette) -> impl IntoElement {
+    fn render_overview(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let epochs = self.display_epochs();
         let channels = self.display_channels();
         let pvt = self.current_pvt();
         let valid_pvt = pvt.filter(|pvt| pvt_position_is_displayable(pvt));
+        let satellites = valid_pvt
+            .map(|pvt| pvt.satellites.as_slice())
+            .unwrap_or(&[]);
+        if let Some(focus) = self.focused_plot {
+            let (title, subtitle, plot) = match focus {
+                PlotFocus::Sky => (
+                    "卫星天空图".to_string(),
+                    "真实方位/仰角".to_string(),
+                    sky_plot(
+                        satellites,
+                        channels,
+                        self.hovered_prn,
+                        self.pinned_prn,
+                        palette,
+                        cx,
+                    )
+                    .into_any_element(),
+                ),
+                PlotFocus::Position => (
+                    "ENU 位置".to_string(),
+                    "首个有效 epoch 为原点".to_string(),
+                    position_plot(epochs, self.selected_epoch, palette).into_any_element(),
+                ),
+                PlotFocus::Cn0 => (
+                    "稳定通道 C/N0".to_string(),
+                    "仅显示 Healthy PRN".to_string(),
+                    cn0_plot(channels, self.hovered_prn, self.pinned_prn, palette, cx)
+                        .into_any_element(),
+                ),
+                PlotFocus::Velocity => (
+                    "速度与钟漂".to_string(),
+                    "共享 epoch 时间轴".to_string(),
+                    velocity_plot(epochs, self.selected_epoch, palette).into_any_element(),
+                ),
+                PlotFocus::Altitude => (
+                    "高度历史".to_string(),
+                    altitude_statistics(epochs),
+                    altitude_plot(epochs, self.selected_epoch, palette).into_any_element(),
+                ),
+            };
+            return div()
+                .px(px(22.))
+                .pb(px(30.))
+                .child(self.plot_panel(title, subtitle, plot, palette, focus, true, cx))
+                .into_any_element();
+        }
         let latitude = valid_pvt
             .map(|p| format!("{:.7}", p.latitude_deg))
             .unwrap_or_else(|| "--".to_string());
@@ -1877,32 +1951,40 @@ impl GnsscopeApp {
                     .grid()
                     .grid_cols(2)
                     .gap(px(12.))
-                    .child(
-                        self.plot_panel(
-                            "卫星天空图",
-                            "真实方位/仰角",
-                            sky_plot(
-                                valid_pvt
-                                    .map(|pvt| pvt.satellites.as_slice())
-                                    .unwrap_or(&[]),
-                                channels,
-                                palette,
-                            ),
+                    .child(self.plot_panel(
+                        "卫星天空图",
+                        "真实方位/仰角",
+                        sky_plot(
+                            satellites,
+                            channels,
+                            self.hovered_prn,
+                            self.pinned_prn,
                             palette,
+                            cx,
                         ),
-                    )
+                        palette,
+                        PlotFocus::Sky,
+                        false,
+                        cx,
+                    ))
                     .child(self.plot_panel(
                         "ENU 位置",
                         "首个有效 epoch 为原点",
                         position_plot(epochs, self.selected_epoch, palette),
                         palette,
+                        PlotFocus::Position,
+                        false,
+                        cx,
                     )),
             )
             .child(div().mt(px(12.)).child(self.plot_panel(
                 "稳定通道 C/N0",
                 "仅显示 Healthy PRN",
-                cn0_plot(channels, palette),
+                cn0_plot(channels, self.hovered_prn, self.pinned_prn, palette, cx),
                 palette,
+                PlotFocus::Cn0,
+                false,
+                cx,
             )))
             .child(
                 div()
@@ -1915,12 +1997,18 @@ impl GnsscopeApp {
                         "共享 epoch 时间轴",
                         velocity_plot(epochs, self.selected_epoch, palette),
                         palette,
+                        PlotFocus::Velocity,
+                        false,
+                        cx,
                     ))
                     .child(self.plot_panel(
                         "高度历史",
                         altitude_statistics(epochs),
                         altitude_plot(epochs, self.selected_epoch, palette),
                         palette,
+                        PlotFocus::Altitude,
+                        false,
+                        cx,
                     )),
             )
             .child(
@@ -1970,6 +2058,7 @@ impl GnsscopeApp {
                             .child(utc),
                     ),
             )
+            .into_any_element()
     }
 
     fn render_timeline_bar(&self, palette: Palette) -> impl IntoElement {
@@ -2021,16 +2110,48 @@ impl GnsscopeApp {
         subtitle: impl Into<SharedString>,
         plot: impl IntoElement,
         palette: Palette,
+        focus: PlotFocus,
+        expanded: bool,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
-            .min_h(px(250.))
+            .min_h(if expanded { px(580.) } else { px(250.) })
             .rounded(px(6.))
             .bg(palette.surface)
             .border_1()
             .border_color(palette.border)
             .p(px(14.))
-            .child(Self::section_title(title, subtitle, palette))
-            .child(div().mt(px(12.)).h(px(200.)).child(plot))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .child(Self::section_title(title, subtitle, palette))
+                    .child(
+                        Button::new(SharedString::from(format!("plot-focus-{}", focus.id())))
+                            .ghost()
+                            .icon(if expanded {
+                                IconName::Minimize
+                            } else {
+                                IconName::Maximize
+                            })
+                            .tooltip(if expanded {
+                                "退出聚焦"
+                            } else {
+                                "聚焦图表"
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.focused_plot = if expanded { None } else { Some(focus) };
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(12.))
+                    .h(if expanded { px(510.) } else { px(200.) })
+                    .child(plot),
+            )
     }
 }
 
@@ -2072,7 +2193,7 @@ impl Render for GnsscopeApp {
                                             .min_h_0()
                                             .overflow_y_scrollbar()
                                             .child(self.render_progress(palette))
-                                            .child(self.render_overview(palette)),
+                                            .child(self.render_overview(palette, cx)),
                                     )
                                     .children(
                                         self.timeline_visible
@@ -2094,12 +2215,20 @@ struct SkyMarker {
     x: f32,
     y: f32,
     color: Hsla,
+    azimuth_deg: f64,
+    elevation_deg: f64,
+    residual_m: f64,
+    cn0_db_hz: Option<f64>,
+    used_in_solution: bool,
 }
 
 fn sky_plot(
     satellites: &[GuiSatelliteGeometry],
     channels: &[GuiChannelStatus],
+    hovered_prn: Option<u8>,
+    pinned_prn: Option<u8>,
     palette: Palette,
+    cx: &mut Context<GnsscopeApp>,
 ) -> impl IntoElement {
     let markers = satellites
         .iter()
@@ -2122,10 +2251,35 @@ fn sky_plot(
                 x,
                 y,
                 color: marker_color,
+                azimuth_deg: satellite.azimuth_deg,
+                elevation_deg: satellite.elevation_deg,
+                residual_m: satellite.residual_m,
+                cn0_db_hz: channel.map(|channel| channel.cn0_db_hz),
+                used_in_solution: satellite.used_in_solution,
             })
         })
         .collect::<Vec<_>>();
     let geometry_available = !markers.is_empty();
+    let active_prn = hovered_prn.or(pinned_prn);
+    let active_marker = active_prn.and_then(|prn| markers.iter().find(|marker| marker.prn == prn));
+    let detail = active_marker.map(|marker| {
+        format!(
+            "PRN {:02}  ·  C/N0 {}  ·  方位 {:.1}°  ·  仰角 {:.1}°  ·  残差 {:+.2} m{}",
+            marker.prn,
+            marker
+                .cn0_db_hz
+                .map(|value| format!("{value:.1} dB-Hz"))
+                .unwrap_or_else(|| "--".to_string()),
+            marker.azimuth_deg,
+            marker.elevation_deg,
+            marker.residual_m,
+            if marker.used_in_solution {
+                "  ·  PVT"
+            } else {
+                ""
+            },
+        )
+    });
 
     div()
         .size_full()
@@ -2189,24 +2343,48 @@ fn sky_plot(
                     .size_full(),
                 )
                 .children(markers.into_iter().map(move |marker| {
+                    let prn = marker.prn;
+                    let active = active_prn == Some(prn);
                     div()
+                        .id(SharedString::from(format!("sky-prn-{prn}")))
                         .absolute()
                         .left(gpui::relative(marker.x))
                         .top(gpui::relative(marker.y))
                         .ml(px(-11.))
                         .mt(px(-11.))
-                        .w(px(22.))
-                        .h(px(22.))
-                        .rounded(px(11.))
-                        .bg(palette.surface)
+                        .w(if active { px(26.) } else { px(22.) })
+                        .h(if active { px(26.) } else { px(22.) })
+                        .rounded(if active { px(13.) } else { px(11.) })
+                        .bg(if active {
+                            palette.accent
+                        } else {
+                            palette.surface
+                        })
                         .border_2()
-                        .border_color(marker.color)
+                        .border_color(if active { palette.accent } else { marker.color })
                         .flex()
                         .items_center()
                         .justify_center()
                         .text_size(px(8.))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(palette.text)
+                        .text_color(if active {
+                            palette.background
+                        } else {
+                            palette.text
+                        })
+                        .cursor_pointer()
+                        .on_hover(cx.listener(move |this, hovered, _, cx| {
+                            if *hovered {
+                                this.hovered_prn = Some(prn);
+                            } else if this.hovered_prn == Some(prn) {
+                                this.hovered_prn = None;
+                            }
+                            cx.notify();
+                        }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.pinned_prn = (this.pinned_prn != Some(prn)).then_some(prn);
+                            cx.notify();
+                        }))
                         .child(format!("{:02}", marker.prn))
                 }))
                 .child(cardinal_label("N", 0.5, 0.0, palette))
@@ -2223,6 +2401,17 @@ fn sky_plot(
                 .text_size(px(10.))
                 .text_color(palette.muted)
                 .child("当前 epoch 无卫星方位角/仰角")
+        }))
+        .children(detail.map(|detail| {
+            div()
+                .absolute()
+                .bottom(px(0.))
+                .left_0()
+                .right_0()
+                .text_center()
+                .text_size(px(9.))
+                .text_color(palette.text)
+                .child(detail)
         }))
 }
 
@@ -2262,7 +2451,13 @@ fn cardinal_label(label: &'static str, x: f32, y: f32, palette: Palette) -> impl
         .child(label)
 }
 
-fn cn0_plot(channels: &[GuiChannelStatus], palette: Palette) -> impl IntoElement {
+fn cn0_plot(
+    channels: &[GuiChannelStatus],
+    hovered_prn: Option<u8>,
+    pinned_prn: Option<u8>,
+    palette: Palette,
+    cx: &mut Context<GnsscopeApp>,
+) -> impl IntoElement {
     let healthy = channels
         .iter()
         .filter(|channel| channel.tracking_locked)
@@ -2281,20 +2476,39 @@ fn cn0_plot(channels: &[GuiChannelStatus], palette: Palette) -> impl IntoElement
                 .map(|(_, value)| *value)
                 .unwrap_or(0.0);
             let height = ((value - 20.0).max(0.0) / 35.0).clamp(0.0, 1.0) as f32;
+            let active = hovered_prn.or(pinned_prn) == Some(prn);
             div()
+                .id(SharedString::from(format!("cn0-prn-{prn}")))
                 .flex_1()
                 .h_full()
                 .flex()
                 .flex_col()
                 .justify_end()
                 .items_center()
+                .when(value > 0.0, |this| {
+                    this.cursor_pointer()
+                        .on_hover(cx.listener(move |app, hovered, _, cx| {
+                            if *hovered {
+                                app.hovered_prn = Some(prn);
+                            } else if app.hovered_prn == Some(prn) {
+                                app.hovered_prn = None;
+                            }
+                            cx.notify();
+                        }))
+                        .on_click(cx.listener(move |app, _, _, cx| {
+                            app.pinned_prn = (app.pinned_prn != Some(prn)).then_some(prn);
+                            cx.notify();
+                        }))
+                })
                 .child(
                     div()
                         .w_full()
                         .max_w(px(16.))
                         .h(gpui::relative(height))
                         .rounded_t(px(2.))
-                        .bg(if value >= 35.0 {
+                        .bg(if active {
+                            palette.accent
+                        } else if value >= 35.0 {
                             palette.healthy
                         } else {
                             palette.warning
@@ -2305,7 +2519,9 @@ fn cn0_plot(channels: &[GuiChannelStatus], palette: Palette) -> impl IntoElement
                         .h(px(20.))
                         .pt(px(4.))
                         .text_size(px(8.))
-                        .text_color(if value > 0.0 {
+                        .text_color(if active {
+                            palette.accent
+                        } else if value > 0.0 {
                             palette.text
                         } else {
                             palette.muted
