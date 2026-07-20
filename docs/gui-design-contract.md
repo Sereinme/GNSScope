@@ -40,11 +40,11 @@ Streaming PVT epoch identity is monotonic across successive single-epoch solves.
 
 The sky plot consumes the selected position solution's final WLS satellite diagnostics. Azimuth/elevation, residual, standardized residual, uncertainty, and solution-use flags are converted into the GUI view model and persisted with each epoch. The display uses zenith at center, horizon at the outer ring, north up, and east right. Markers are joined to the same epoch's channel snapshot by PRN and use semantic lock/solution colors. Satellites excluded before the final WLS diagnostics are not assigned fabricated geometry. Epoch rows written by versions before satellite persistence deserialize with an empty geometry list and require IQ reprocessing to populate the plot.
 
-Continuous PVT applies a terrestrial position-quality gate before a mathematically converged WLS candidate can enter velocity, Hatch, Kalman, persistence, or the visible position series. This is required for exactly determined four-satellite epochs: one millisecond-class pseudorange error can be fitted with nearly zero residual while producing a receiver altitude above one million metres. The default profile accepts altitudes from `-2 km` to `100 km` and constrains inter-epoch displacement using a `12 km/s` maximum implied speed plus a `1 km` jump margin. The limits are configuration, not a static-position clamp. Historical rows written before this gate are defensively excluded from position, sky, and altitude views when they violate the same altitude range.
+Continuous PVT applies a terrestrial position-quality gate before a mathematically converged WLS candidate can enter velocity, Hatch, Kalman, persistence, or the visible position series. This is required for exactly determined four-satellite epochs: one millisecond-class pseudorange error can be fitted with nearly zero residual while producing a receiver altitude above one million metres. The default profile accepts altitudes from `-2 km` to `20 km`, limits post-fit pseudorange residual RMS to `1 km`, and constrains inter-epoch displacement using a `12 km/s` maximum implied speed plus a `1 km` jump margin. The limits are configuration, not a static-position clamp. Historical rows written before this gate are defensively excluded from position, sky, and altitude views when they violate the same altitude range.
 
 This vertical slice is usable but does not yet satisfy the complete interaction contract. Remaining work is explicit:
 
-- persist Raw, Smoothed, and Kalman candidates instead of only the selected solution;
+- expose the now-persisted Raw, Smoothed, and Kalman candidates in an expert comparison UI;
 - add field-level validation and expert controls for the remaining receiver settings;
 - implement historical search/filter/delete/reveal actions, queued-run reorder/cancel, plot focus, sky-marker hover details, and PRN linking/pinning;
 - verify responsive sidebar collapse/plot stacking and add automated GPUI screenshot tests.
@@ -180,7 +180,7 @@ For navigation data, long captures or full RINEX files should keep multiple reco
 - Clock drift display uses ppm in the GUI model, with raw m/s available in velocity.
 - Quality display keeps PRN lists and DOP/sigma values numeric so charts can reuse them.
 
-The main workspace renders only the final selected solution using the receiver preference `Kalman > Smoothed WLS > Raw WLS`, with an explicit solution-kind label. Default plots never overlay all candidate solutions. The persisted epoch record nevertheless stores every available Raw, Smoothed, and Kalman candidate plus the final selection so expert details can compare position, velocity, residual, and uncertainty without reprocessing the IQ source. The current final-only `PvtEpochOutput` boundary must be extended for this persistence path.
+The main workspace renders only the final selected solution using the receiver preference `Kalman > Smoothed WLS > Raw WLS`, with an explicit solution-kind label. Default plots never overlay all candidate solutions. `PvtEpochOutput`, the GUI view model, and the persisted epoch record store every available Raw, Smoothed, and Kalman candidate plus the final selection so expert details can compare position, velocity, residual, and uncertainty without reprocessing the IQ source.
 
 ## Application State
 

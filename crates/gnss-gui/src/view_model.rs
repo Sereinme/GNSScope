@@ -1,4 +1,7 @@
-use gnss_core::pvt::{PvtEpochOutput, PvtEpochSolutionKind, UtcDateTime};
+use gnss_core::pvt::{
+    PvtCandidateOutput, PvtEpochOutput, PvtEpochSolutionKind, PvtQualityOutput, PvtSatelliteOutput,
+    PvtVelocityOutput, UtcDateTime,
+};
 
 #[derive(Debug, Clone)]
 pub struct GuiPvtViewModel {
@@ -9,6 +12,20 @@ pub struct GuiPvtViewModel {
     pub altitude_m: f64,
     pub ecef_m: [f64; 3],
     pub time: GuiPvtTime,
+    pub velocity: Option<GuiPvtVelocity>,
+    pub quality: GuiPvtQuality,
+    pub satellites: Vec<GuiSatelliteGeometry>,
+    pub candidates: Vec<GuiPvtCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuiPvtCandidate {
+    pub solution_kind: PvtEpochSolutionKind,
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
+    pub altitude_m: f64,
+    pub ecef_m: [f64; 3],
+    pub receiver_clock_bias_us: f64,
     pub velocity: Option<GuiPvtVelocity>,
     pub quality: GuiPvtQuality,
     pub satellites: Vec<GuiSatelliteGeometry>,
@@ -37,7 +54,7 @@ pub struct GuiPvtTime {
     pub receiver_clock_drift_ppm: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GuiPvtVelocity {
     pub east_mps: f64,
     pub north_mps: f64,
@@ -50,7 +67,7 @@ pub struct GuiPvtVelocity {
     pub residual_rms_mps: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GuiPvtQuality {
     pub converged: bool,
     pub n_sats: usize,
@@ -86,49 +103,92 @@ impl GuiPvtViewModel {
                     .receiver_clock_drift_sps
                     .map(|clock_drift_sps| clock_drift_sps * 1e6),
             },
-            velocity: output.velocity.as_ref().map(|velocity| GuiPvtVelocity {
-                east_mps: velocity.enu_velocity_mps[0],
-                north_mps: velocity.enu_velocity_mps[1],
-                up_mps: velocity.enu_velocity_mps[2],
-                speed_mps: velocity.speed_mps,
-                horizontal_speed_mps: velocity.horizontal_speed_mps,
-                vertical_speed_mps: velocity.vertical_speed_mps,
-                heading_deg: velocity.heading_rad.map(|heading| heading.to_degrees()),
-                clock_drift_mps: velocity.clock_drift_mps,
-                residual_rms_mps: velocity.residual_rms_mps,
-            }),
-            quality: GuiPvtQuality {
-                converged: output.quality.converged,
-                n_sats: output.quality.n_sats,
-                used_prns: output.quality.used_prns.clone(),
-                excluded_prns: output.quality.excluded_prns.clone(),
-                residual_rms_m: output.quality.residual_rms_m,
-                standardized_residual_rms: output.quality.standardized_residual_rms,
-                gdop: output.quality.gdop,
-                hdop: output.quality.hdop,
-                horizontal_sigma_m: output.quality.horizontal_sigma_m,
-                vertical_sigma_m: output.quality.vertical_sigma_m,
-                velocity_sigma_mps: output.quality.velocity_sigma_mps,
-            },
+            velocity: output.velocity.as_ref().map(GuiPvtVelocity::from_output),
+            quality: GuiPvtQuality::from_output(&output.quality),
             satellites: output
                 .satellites
                 .iter()
-                .map(|satellite| GuiSatelliteGeometry {
-                    prn: satellite.prn,
-                    azimuth_deg: satellite.azimuth_rad.to_degrees(),
-                    elevation_deg: satellite.elevation_rad.to_degrees(),
-                    residual_m: satellite.residual_m,
-                    standardized_residual: satellite.standardized_residual,
-                    pseudorange_sigma_m: satellite.pseudorange_sigma_m,
-                    used_in_solution: satellite.used_in_solution,
-                    raim_excluded: satellite.raim_excluded,
-                })
+                .map(GuiSatelliteGeometry::from_output)
+                .collect(),
+            candidates: output
+                .candidates
+                .iter()
+                .map(GuiPvtCandidate::from_output)
                 .collect(),
         }
     }
 
     pub fn from_epoch_outputs(outputs: &[PvtEpochOutput]) -> Vec<Self> {
         outputs.iter().map(Self::from_epoch_output).collect()
+    }
+}
+
+impl GuiPvtCandidate {
+    fn from_output(output: &PvtCandidateOutput) -> Self {
+        Self {
+            solution_kind: output.solution_kind,
+            latitude_deg: output.lla_rad[0].to_degrees(),
+            longitude_deg: output.lla_rad[1].to_degrees(),
+            altitude_m: output.lla_rad[2],
+            ecef_m: output.ecef,
+            receiver_clock_bias_us: output.receiver_clock_bias_s * 1e6,
+            velocity: output.velocity.as_ref().map(GuiPvtVelocity::from_output),
+            quality: GuiPvtQuality::from_output(&output.quality),
+            satellites: output
+                .satellites
+                .iter()
+                .map(GuiSatelliteGeometry::from_output)
+                .collect(),
+        }
+    }
+}
+
+impl GuiPvtVelocity {
+    fn from_output(output: &PvtVelocityOutput) -> Self {
+        Self {
+            east_mps: output.enu_velocity_mps[0],
+            north_mps: output.enu_velocity_mps[1],
+            up_mps: output.enu_velocity_mps[2],
+            speed_mps: output.speed_mps,
+            horizontal_speed_mps: output.horizontal_speed_mps,
+            vertical_speed_mps: output.vertical_speed_mps,
+            heading_deg: output.heading_rad.map(f64::to_degrees),
+            clock_drift_mps: output.clock_drift_mps,
+            residual_rms_mps: output.residual_rms_mps,
+        }
+    }
+}
+
+impl GuiPvtQuality {
+    fn from_output(output: &PvtQualityOutput) -> Self {
+        Self {
+            converged: output.converged,
+            n_sats: output.n_sats,
+            used_prns: output.used_prns.clone(),
+            excluded_prns: output.excluded_prns.clone(),
+            residual_rms_m: output.residual_rms_m,
+            standardized_residual_rms: output.standardized_residual_rms,
+            gdop: output.gdop,
+            hdop: output.hdop,
+            horizontal_sigma_m: output.horizontal_sigma_m,
+            vertical_sigma_m: output.vertical_sigma_m,
+            velocity_sigma_mps: output.velocity_sigma_mps,
+        }
+    }
+}
+
+impl GuiSatelliteGeometry {
+    fn from_output(output: &PvtSatelliteOutput) -> Self {
+        Self {
+            prn: output.prn,
+            azimuth_deg: output.azimuth_rad.to_degrees(),
+            elevation_deg: output.elevation_rad.to_degrees(),
+            residual_m: output.residual_m,
+            standardized_residual: output.standardized_residual,
+            pseudorange_sigma_m: output.pseudorange_sigma_m,
+            used_in_solution: output.used_in_solution,
+            raim_excluded: output.raim_excluded,
+        }
     }
 }
 
@@ -202,6 +262,7 @@ mod tests {
                 used_in_solution: true,
                 raim_excluded: false,
             }],
+            candidates: Vec::new(),
         };
 
         let view = GuiPvtViewModel::from_epoch_output(&output);

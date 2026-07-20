@@ -230,6 +230,17 @@ pub struct PvtSatelliteOutput {
 }
 
 #[derive(Debug, Clone)]
+pub struct PvtCandidateOutput {
+    pub solution_kind: PvtEpochSolutionKind,
+    pub ecef: Ecef,
+    pub lla_rad: [f64; 3],
+    pub receiver_clock_bias_s: f64,
+    pub velocity: Option<PvtVelocityOutput>,
+    pub quality: PvtQualityOutput,
+    pub satellites: Vec<PvtSatelliteOutput>,
+}
+
+#[derive(Debug, Clone)]
 pub struct PvtEpochOutput {
     pub epoch_index: usize,
     pub solution_kind: PvtEpochSolutionKind,
@@ -239,6 +250,7 @@ pub struct PvtEpochOutput {
     pub velocity: Option<PvtVelocityOutput>,
     pub quality: PvtQualityOutput,
     pub satellites: Vec<PvtSatelliteOutput>,
+    pub candidates: Vec<PvtCandidateOutput>,
 }
 
 impl ContinuousPvtEpochResult {
@@ -258,7 +270,55 @@ impl ContinuousPvtEpochResult {
             velocity: selection.velocity,
             quality: selection.quality,
             satellites: selection.satellites,
+            candidates: self.candidate_outputs(),
         }
+    }
+
+    fn candidate_outputs(&self) -> Vec<PvtCandidateOutput> {
+        let mut candidates = Vec::with_capacity(3);
+        candidates.push(PvtCandidateOutput {
+            solution_kind: PvtEpochSolutionKind::Raw,
+            ecef: self.raw_solution.ecef,
+            lla_rad: self.raw_solution.lla,
+            receiver_clock_bias_s: self.raw_solution.clock_bias_s,
+            velocity: self
+                .raw_velocity_solution
+                .as_ref()
+                .map(PvtVelocityOutput::from_velocity),
+            quality: quality_from_position(&self.raw_solution, None),
+            satellites: satellites_from_position(&self.raw_solution),
+        });
+        if let Some(smoothed) = self.smoothed_solution.as_ref() {
+            candidates.push(PvtCandidateOutput {
+                solution_kind: PvtEpochSolutionKind::Smoothed,
+                ecef: smoothed.ecef,
+                lla_rad: smoothed.lla,
+                receiver_clock_bias_s: smoothed.clock_bias_s,
+                velocity: self
+                    .smoothed_velocity_solution
+                    .as_ref()
+                    .map(PvtVelocityOutput::from_velocity),
+                quality: quality_from_position(smoothed, None),
+                satellites: satellites_from_position(smoothed),
+            });
+        }
+        if let Some(kalman) = self.kalman_solution.as_ref() {
+            let position = self
+                .smoothed_solution
+                .as_ref()
+                .filter(|solution| solution.converged)
+                .unwrap_or(&self.raw_solution);
+            candidates.push(PvtCandidateOutput {
+                solution_kind: PvtEpochSolutionKind::Kalman,
+                ecef: kalman.ecef,
+                lla_rad: kalman.lla,
+                receiver_clock_bias_s: kalman.clock_bias_s,
+                velocity: Some(PvtVelocityOutput::from_kalman(kalman)),
+                quality: quality_from_position_and_kalman(position, kalman),
+                satellites: satellites_from_position(position),
+            });
+        }
+        candidates
     }
 
     fn selected_solution(&self) -> SelectedEpochSolution {
@@ -1682,6 +1742,14 @@ mod tests {
         let output = results[0].to_output();
 
         assert_eq!(output.solution_kind, PvtEpochSolutionKind::Kalman);
+        assert_eq!(
+            output
+                .candidates
+                .iter()
+                .map(|candidate| candidate.solution_kind)
+                .collect::<Vec<_>>(),
+            vec![PvtEpochSolutionKind::Raw, PvtEpochSolutionKind::Kalman]
+        );
         assert_eq!(output.time.receiver_time_sow, Some(100.0));
         assert!((output.time.corrected_gps_time_sow.unwrap() - 99.999_998).abs() < 1e-12);
         assert_eq!(output.quality.n_sats, 4);

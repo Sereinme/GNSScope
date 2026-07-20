@@ -18,7 +18,7 @@ This is a single-machine CTTC baseline, not a cross-platform benchmark. No CPU p
 - Field-level validation and expert controls for navigation policy, ambiguity resolution, Kalman/Hatch parameters, and maximum acquisition PRNs.
 - Historical search/filter/delete/reveal actions and queued-run reorder/cancel controls.
 - Plot focus, sky-marker hover details, PRN linking/pinning, and automated GPUI screenshot coverage.
-- Persist Raw, Smoothed, and Kalman candidate solutions alongside the selected PVT output.
+- Candidate comparison UI is still pending; Raw, Smoothed, and Kalman candidates are now carried through `PvtEpochOutput`, the GUI view model, and backward-compatible epoch JSON persistence.
 
 The current worker owns `StreamingPvtRunner`, supports cooperative cancellation, maps discrete acquisition/reacquisition/channel-state/navigation events into GUI events, persists them without forwarding every millisecond tracking update, and exposes the main runtime settings through draft-only stepper/toggle controls.
 

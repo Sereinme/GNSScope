@@ -1,6 +1,7 @@
 use crate::{
     GuiChannelStatus, GuiDiagnosticEvent, GuiDiagnosticEventKind, GuiProcessingSettings,
-    GuiPvtQuality, GuiPvtTime, GuiPvtVelocity, GuiPvtViewModel, GuiSatelliteGeometry,
+    GuiPvtCandidate, GuiPvtQuality, GuiPvtTime, GuiPvtVelocity, GuiPvtViewModel,
+    GuiSatelliteGeometry,
 };
 use chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc};
 use directories::ProjectDirs;
@@ -82,6 +83,8 @@ pub struct StoredEpoch {
     pub channels: Vec<StoredChannel>,
     #[serde(default)]
     pub satellites: Vec<StoredSatellite>,
+    #[serde(default)]
+    pub candidates: Vec<StoredCandidate>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -154,6 +157,19 @@ pub struct StoredSatellite {
     pub pseudorange_sigma_m: f64,
     pub used_in_solution: bool,
     pub raim_excluded: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredCandidate {
+    pub solution_kind: String,
+    pub latitude_deg: f64,
+    pub longitude_deg: f64,
+    pub altitude_m: f64,
+    pub ecef_m: [f64; 3],
+    pub receiver_clock_bias_us: f64,
+    pub velocity: Option<StoredVelocity>,
+    pub quality: StoredQuality,
+    pub satellites: Vec<StoredSatellite>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,16 +266,12 @@ impl StoredEpoch {
             },
             channels: channels.iter().map(StoredChannel::from).collect(),
             satellites: value.satellites.iter().map(StoredSatellite::from).collect(),
+            candidates: value.candidates.iter().map(StoredCandidate::from).collect(),
         }
     }
 
     pub fn to_view_model(&self) -> GuiPvtViewModel {
-        let solution_kind = match self.solution_kind.as_str() {
-            "Raw" => PvtEpochSolutionKind::Raw,
-            "Smoothed" => PvtEpochSolutionKind::Smoothed,
-            "Kalman" => PvtEpochSolutionKind::Kalman,
-            _ => PvtEpochSolutionKind::Unconverged,
-        };
+        let solution_kind = parse_solution_kind(&self.solution_kind);
         let velocity = self
             .velocity
             .as_ref()
@@ -323,6 +335,7 @@ impl StoredEpoch {
                 .iter()
                 .map(GuiSatelliteGeometry::from)
                 .collect(),
+            candidates: self.candidates.iter().map(GuiPvtCandidate::from).collect(),
         }
     }
 
@@ -341,6 +354,15 @@ impl StoredEpoch {
             minute: utc.minute() as u8,
             second: utc.second() as f64 + utc.nanosecond() as f64 * 1e-9,
         })
+    }
+}
+
+fn parse_solution_kind(value: &str) -> PvtEpochSolutionKind {
+    match value {
+        "Raw" => PvtEpochSolutionKind::Raw,
+        "Smoothed" => PvtEpochSolutionKind::Smoothed,
+        "Kalman" => PvtEpochSolutionKind::Kalman,
+        _ => PvtEpochSolutionKind::Unconverged,
     }
 }
 
@@ -373,6 +395,22 @@ impl StoredVelocity {
     }
 }
 
+impl From<&GuiPvtVelocity> for StoredVelocity {
+    fn from(value: &GuiPvtVelocity) -> Self {
+        Self {
+            east_mps: value.east_mps,
+            north_mps: value.north_mps,
+            up_mps: value.up_mps,
+            speed_mps: value.speed_mps,
+            horizontal_speed_mps: value.horizontal_speed_mps,
+            vertical_speed_mps: value.vertical_speed_mps,
+            heading_deg: value.heading_deg,
+            clock_drift_mps: value.clock_drift_mps,
+            residual_rms_mps: value.residual_rms_mps,
+        }
+    }
+}
+
 impl StoredQuality {
     fn to_view_model(&self) -> GuiPvtQuality {
         GuiPvtQuality {
@@ -387,6 +425,60 @@ impl StoredQuality {
             horizontal_sigma_m: self.horizontal_sigma_m,
             vertical_sigma_m: self.vertical_sigma_m,
             velocity_sigma_mps: self.velocity_sigma_mps,
+        }
+    }
+}
+
+impl From<&GuiPvtQuality> for StoredQuality {
+    fn from(value: &GuiPvtQuality) -> Self {
+        Self {
+            converged: value.converged,
+            n_sats: value.n_sats,
+            used_prns: value.used_prns.clone(),
+            excluded_prns: value.excluded_prns.clone(),
+            residual_rms_m: value.residual_rms_m,
+            standardized_residual_rms: value.standardized_residual_rms,
+            gdop: value.gdop,
+            hdop: value.hdop,
+            horizontal_sigma_m: value.horizontal_sigma_m,
+            vertical_sigma_m: value.vertical_sigma_m,
+            velocity_sigma_mps: value.velocity_sigma_mps,
+        }
+    }
+}
+
+impl From<&GuiPvtCandidate> for StoredCandidate {
+    fn from(value: &GuiPvtCandidate) -> Self {
+        Self {
+            solution_kind: format!("{:?}", value.solution_kind),
+            latitude_deg: value.latitude_deg,
+            longitude_deg: value.longitude_deg,
+            altitude_m: value.altitude_m,
+            ecef_m: value.ecef_m,
+            receiver_clock_bias_us: value.receiver_clock_bias_us,
+            velocity: value.velocity.as_ref().map(StoredVelocity::from),
+            quality: StoredQuality::from(&value.quality),
+            satellites: value.satellites.iter().map(StoredSatellite::from).collect(),
+        }
+    }
+}
+
+impl From<&StoredCandidate> for GuiPvtCandidate {
+    fn from(value: &StoredCandidate) -> Self {
+        Self {
+            solution_kind: parse_solution_kind(&value.solution_kind),
+            latitude_deg: value.latitude_deg,
+            longitude_deg: value.longitude_deg,
+            altitude_m: value.altitude_m,
+            ecef_m: value.ecef_m,
+            receiver_clock_bias_us: value.receiver_clock_bias_us,
+            velocity: value.velocity.as_ref().map(StoredVelocity::to_view_model),
+            quality: value.quality.to_view_model(),
+            satellites: value
+                .satellites
+                .iter()
+                .map(GuiSatelliteGeometry::from)
+                .collect(),
         }
     }
 }
@@ -766,6 +858,15 @@ mod tests {
         assert_eq!(restored.time.utc, epoch.time.utc);
         assert_eq!(restored.quality.used_prns, epoch.quality.used_prns);
         assert_eq!(restored.satellites, epoch.satellites);
+        assert_eq!(restored.candidates.len(), epoch.candidates.len());
+        for (restored, expected) in restored.candidates.iter().zip(&epoch.candidates) {
+            assert_eq!(restored.solution_kind, expected.solution_kind);
+            assert!((restored.latitude_deg - expected.latitude_deg).abs() < 1e-12);
+            assert!((restored.longitude_deg - expected.longitude_deg).abs() < 1e-12);
+            assert_eq!(restored.altitude_m, expected.altitude_m);
+            assert_eq!(restored.velocity, expected.velocity);
+            assert_eq!(restored.quality, expected.quality);
+        }
         assert_eq!(
             restored
                 .velocity
@@ -857,6 +958,7 @@ mod tests {
         assert_eq!(restored.velocity.expect("legacy velocity").speed_mps, 0.04);
         assert!(stored.channels.is_empty());
         assert!(stored.satellites.is_empty());
+        assert!(stored.candidates.is_empty());
     }
 
     #[test]
