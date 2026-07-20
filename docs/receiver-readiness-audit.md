@@ -123,4 +123,4 @@ Risk: low to medium. Expected gain is smaller than tracking and ring-buffer work
 
 ## GUI Gate
 
-The first functional GUI vertical slice now includes the real streaming worker, chunk-boundary cancellation, SQLite run/PVT persistence, and PVT-epoch telemetry throttling, and it passed a complete 100 s CTTC release run. The overall GUI must not be called contract-complete until runtime settings are fully editable, channel/event history is persisted and replayed, satellite geometry is exposed for the sky plot, and a real forced-loss/reacquisition workflow is tested through the GUI worker.
+The first functional GUI vertical slice now includes the real streaming worker, chunk-boundary cancellation, SQLite run/PVT/channel persistence, PVT-epoch telemetry throttling, historical replay, and a shared epoch cursor, and it passed a complete 100 s CTTC release run plus restart replay. The overall GUI must not be called contract-complete until runtime settings are fully editable, discrete event history is persisted and replayed, satellite geometry is exposed for the sky plot, and a real forced-loss/reacquisition workflow is tested through the GUI worker.

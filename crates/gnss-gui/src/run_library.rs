@@ -1,6 +1,10 @@
-use crate::{GuiProcessingSettings, GuiPvtViewModel};
-use chrono::{DateTime, Utc};
+use crate::{
+    GuiChannelStatus, GuiProcessingSettings, GuiPvtQuality, GuiPvtTime, GuiPvtVelocity,
+    GuiPvtViewModel,
+};
+use chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc};
 use directories::ProjectDirs;
+use gnss_core::pvt::{PvtEpochSolutionKind, UtcDateTime};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -68,10 +72,78 @@ pub struct StoredEpoch {
     pub clock_drift_ppm: Option<f64>,
     pub satellites_used: usize,
     pub hdop: f64,
+    #[serde(default)]
+    pub time: StoredTime,
+    #[serde(default)]
+    pub velocity: Option<StoredVelocity>,
+    #[serde(default)]
+    pub quality: StoredQuality,
+    #[serde(default)]
+    pub channels: Vec<StoredChannel>,
 }
 
-impl From<&GuiPvtViewModel> for StoredEpoch {
-    fn from(value: &GuiPvtViewModel) -> Self {
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StoredTime {
+    pub gps_week: Option<u16>,
+    pub receiver_time_sow: Option<f64>,
+    pub corrected_gps_time_sow: Option<f64>,
+    pub utc_unix_seconds: Option<f64>,
+    pub utc: Option<StoredUtc>,
+    pub receiver_clock_bias_us: f64,
+    pub receiver_clock_drift_ppm: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct StoredUtc {
+    pub year: i32,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredVelocity {
+    pub east_mps: f64,
+    pub north_mps: f64,
+    pub up_mps: f64,
+    pub speed_mps: f64,
+    pub horizontal_speed_mps: f64,
+    pub vertical_speed_mps: f64,
+    pub heading_deg: Option<f64>,
+    pub clock_drift_mps: f64,
+    pub residual_rms_mps: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StoredQuality {
+    pub converged: bool,
+    pub n_sats: usize,
+    pub used_prns: Vec<u8>,
+    pub excluded_prns: Vec<u8>,
+    pub residual_rms_m: f64,
+    pub standardized_residual_rms: f64,
+    pub gdop: f64,
+    pub hdop: f64,
+    pub horizontal_sigma_m: f64,
+    pub vertical_sigma_m: f64,
+    pub velocity_sigma_mps: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredChannel {
+    pub prn: u8,
+    pub acquired: bool,
+    pub tracking_locked: bool,
+    pub nav_locked: bool,
+    pub cn0_db_hz: f64,
+    pub doppler_hz: f64,
+    pub residual_m: Option<f64>,
+}
+
+impl StoredEpoch {
+    pub fn from_view_model(value: &GuiPvtViewModel, channels: &[GuiChannelStatus]) -> Self {
         Self {
             epoch_index: value.epoch_index,
             solution_kind: format!("{:?}", value.solution_kind),
@@ -89,6 +161,207 @@ impl From<&GuiPvtViewModel> for StoredEpoch {
             clock_drift_ppm: value.time.receiver_clock_drift_ppm,
             satellites_used: value.quality.n_sats,
             hdop: value.quality.hdop,
+            time: StoredTime {
+                gps_week: value.time.gps_week,
+                receiver_time_sow: value.time.receiver_time_sow,
+                corrected_gps_time_sow: value.time.corrected_gps_time_sow,
+                utc_unix_seconds: value.time.utc_unix_seconds,
+                utc: value.time.utc.map(|utc| StoredUtc {
+                    year: utc.year,
+                    month: utc.month,
+                    day: utc.day,
+                    hour: utc.hour,
+                    minute: utc.minute,
+                    second: utc.second,
+                }),
+                receiver_clock_bias_us: value.time.receiver_clock_bias_us,
+                receiver_clock_drift_ppm: value.time.receiver_clock_drift_ppm,
+            },
+            velocity: value.velocity.as_ref().map(|velocity| StoredVelocity {
+                east_mps: velocity.east_mps,
+                north_mps: velocity.north_mps,
+                up_mps: velocity.up_mps,
+                speed_mps: velocity.speed_mps,
+                horizontal_speed_mps: velocity.horizontal_speed_mps,
+                vertical_speed_mps: velocity.vertical_speed_mps,
+                heading_deg: velocity.heading_deg,
+                clock_drift_mps: velocity.clock_drift_mps,
+                residual_rms_mps: velocity.residual_rms_mps,
+            }),
+            quality: StoredQuality {
+                converged: value.quality.converged,
+                n_sats: value.quality.n_sats,
+                used_prns: value.quality.used_prns.clone(),
+                excluded_prns: value.quality.excluded_prns.clone(),
+                residual_rms_m: value.quality.residual_rms_m,
+                standardized_residual_rms: value.quality.standardized_residual_rms,
+                gdop: value.quality.gdop,
+                hdop: value.quality.hdop,
+                horizontal_sigma_m: value.quality.horizontal_sigma_m,
+                vertical_sigma_m: value.quality.vertical_sigma_m,
+                velocity_sigma_mps: value.quality.velocity_sigma_mps,
+            },
+            channels: channels.iter().map(StoredChannel::from).collect(),
+        }
+    }
+
+    pub fn to_view_model(&self) -> GuiPvtViewModel {
+        let solution_kind = match self.solution_kind.as_str() {
+            "Raw" => PvtEpochSolutionKind::Raw,
+            "Smoothed" => PvtEpochSolutionKind::Smoothed,
+            "Kalman" => PvtEpochSolutionKind::Kalman,
+            _ => PvtEpochSolutionKind::Unconverged,
+        };
+        let velocity = self
+            .velocity
+            .as_ref()
+            .map(StoredVelocity::to_view_model)
+            .or_else(|| {
+                self.speed_3d_mps.map(|speed_mps| GuiPvtVelocity {
+                    east_mps: 0.0,
+                    north_mps: 0.0,
+                    up_mps: 0.0,
+                    speed_mps,
+                    horizontal_speed_mps: speed_mps,
+                    vertical_speed_mps: 0.0,
+                    heading_deg: None,
+                    clock_drift_mps: 0.0,
+                    residual_rms_mps: 0.0,
+                })
+            });
+        GuiPvtViewModel {
+            epoch_index: self.epoch_index,
+            solution_kind,
+            latitude_deg: self.latitude_deg,
+            longitude_deg: self.longitude_deg,
+            altitude_m: self.altitude_m,
+            ecef_m: self.ecef_m,
+            time: GuiPvtTime {
+                gps_week: self.time.gps_week,
+                receiver_time_sow: self.time.receiver_time_sow,
+                corrected_gps_time_sow: self.time.corrected_gps_time_sow,
+                utc_unix_seconds: self.time.utc_unix_seconds,
+                utc: self
+                    .time
+                    .utc
+                    .map(StoredUtc::to_utc)
+                    .or_else(|| self.legacy_utc()),
+                receiver_clock_bias_us: self.time.receiver_clock_bias_us,
+                receiver_clock_drift_ppm: self
+                    .time
+                    .receiver_clock_drift_ppm
+                    .or(self.clock_drift_ppm),
+            },
+            velocity,
+            quality: if self.quality.n_sats > 0 || self.quality.converged {
+                self.quality.to_view_model()
+            } else {
+                GuiPvtQuality {
+                    converged: self.solution_kind != "Unconverged",
+                    n_sats: self.satellites_used,
+                    used_prns: Vec::new(),
+                    excluded_prns: Vec::new(),
+                    residual_rms_m: 0.0,
+                    standardized_residual_rms: 0.0,
+                    gdop: 0.0,
+                    hdop: self.hdop,
+                    horizontal_sigma_m: 0.0,
+                    vertical_sigma_m: 0.0,
+                    velocity_sigma_mps: None,
+                }
+            },
+        }
+    }
+
+    pub fn channel_view_models(&self) -> Vec<GuiChannelStatus> {
+        self.channels.iter().map(GuiChannelStatus::from).collect()
+    }
+
+    fn legacy_utc(&self) -> Option<UtcDateTime> {
+        let value = self.utc.as_deref()?.strip_suffix(" UTC")?;
+        let utc = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f").ok()?;
+        Some(UtcDateTime {
+            year: utc.year(),
+            month: utc.month() as u8,
+            day: utc.day() as u8,
+            hour: utc.hour() as u8,
+            minute: utc.minute() as u8,
+            second: utc.second() as f64 + utc.nanosecond() as f64 * 1e-9,
+        })
+    }
+}
+
+impl StoredUtc {
+    fn to_utc(self) -> UtcDateTime {
+        UtcDateTime {
+            year: self.year,
+            month: self.month,
+            day: self.day,
+            hour: self.hour,
+            minute: self.minute,
+            second: self.second,
+        }
+    }
+}
+
+impl StoredVelocity {
+    fn to_view_model(&self) -> GuiPvtVelocity {
+        GuiPvtVelocity {
+            east_mps: self.east_mps,
+            north_mps: self.north_mps,
+            up_mps: self.up_mps,
+            speed_mps: self.speed_mps,
+            horizontal_speed_mps: self.horizontal_speed_mps,
+            vertical_speed_mps: self.vertical_speed_mps,
+            heading_deg: self.heading_deg,
+            clock_drift_mps: self.clock_drift_mps,
+            residual_rms_mps: self.residual_rms_mps,
+        }
+    }
+}
+
+impl StoredQuality {
+    fn to_view_model(&self) -> GuiPvtQuality {
+        GuiPvtQuality {
+            converged: self.converged,
+            n_sats: self.n_sats,
+            used_prns: self.used_prns.clone(),
+            excluded_prns: self.excluded_prns.clone(),
+            residual_rms_m: self.residual_rms_m,
+            standardized_residual_rms: self.standardized_residual_rms,
+            gdop: self.gdop,
+            hdop: self.hdop,
+            horizontal_sigma_m: self.horizontal_sigma_m,
+            vertical_sigma_m: self.vertical_sigma_m,
+            velocity_sigma_mps: self.velocity_sigma_mps,
+        }
+    }
+}
+
+impl From<&GuiChannelStatus> for StoredChannel {
+    fn from(value: &GuiChannelStatus) -> Self {
+        Self {
+            prn: value.prn,
+            acquired: value.acquired,
+            tracking_locked: value.tracking_locked,
+            nav_locked: value.nav_locked,
+            cn0_db_hz: value.cn0_db_hz,
+            doppler_hz: value.doppler_hz,
+            residual_m: value.residual_m,
+        }
+    }
+}
+
+impl From<&StoredChannel> for GuiChannelStatus {
+    fn from(value: &StoredChannel) -> Self {
+        Self {
+            prn: value.prn,
+            acquired: value.acquired,
+            tracking_locked: value.tracking_locked,
+            nav_locked: value.nav_locked,
+            cn0_db_hz: value.cn0_db_hz,
+            doppler_hz: value.doppler_hz,
+            residual_m: value.residual_m,
         }
     }
 }
@@ -187,8 +460,13 @@ impl RunLibrary {
         Ok(())
     }
 
-    pub fn append_epoch(&self, run_id: Uuid, epoch: &GuiPvtViewModel) -> rusqlite::Result<()> {
-        let snapshot = serde_json::to_string(&StoredEpoch::from(epoch))
+    pub fn append_epoch(
+        &self,
+        run_id: Uuid,
+        epoch: &GuiPvtViewModel,
+        channels: &[GuiChannelStatus],
+    ) -> rusqlite::Result<()> {
+        let snapshot = serde_json::to_string(&StoredEpoch::from_view_model(epoch, channels))
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         self.connection.execute(
             "INSERT OR REPLACE INTO epochs (run_id, epoch_index, snapshot_json) VALUES (?1, ?2, ?3)",
@@ -235,6 +513,21 @@ impl RunLibrary {
         ).optional()?;
         json.map(|json| serde_json::from_str(&json).map_err(|_| rusqlite::Error::InvalidQuery))
             .transpose()
+    }
+
+    pub fn epochs(&self, run_id: Uuid) -> rusqlite::Result<Vec<StoredEpoch>> {
+        let mut statement = self.connection.prepare(
+            "SELECT snapshot_json FROM epochs WHERE run_id = ?1 ORDER BY epoch_index ASC",
+        )?;
+        let epochs = statement
+            .query_map([run_id.to_string()], |row| row.get::<_, String>(0))?
+            .map(|json| {
+                json.and_then(|json| {
+                    serde_json::from_str(&json).map_err(|_| rusqlite::Error::InvalidQuery)
+                })
+            })
+            .collect();
+        epochs
     }
 
     pub fn preference(&self, key: &str) -> rusqlite::Result<Option<String>> {
@@ -301,5 +594,61 @@ mod tests {
         );
         drop(reopened);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn run_library_round_trips_epoch_and_channel_snapshot() {
+        let library = RunLibrary::open(":memory:").expect("open in-memory run library");
+        let settings = GuiProcessingSettings {
+            iq_file_path: Some(PathBuf::from("capture.dat")),
+            ..Default::default()
+        };
+        let run = library.create_run(&settings).expect("create run");
+        let epoch = crate::sample_pvt_view_model();
+        let channels = crate::state::sample_channel_statuses();
+
+        library
+            .append_epoch(run.id, &epoch, &channels)
+            .expect("append epoch");
+
+        let stored = library.epochs(run.id).expect("load epochs");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].channels.len(), channels.len());
+        let restored = stored[0].to_view_model();
+        assert_eq!(restored.epoch_index, epoch.epoch_index);
+        assert_eq!(restored.time.utc, epoch.time.utc);
+        assert_eq!(restored.quality.used_prns, epoch.quality.used_prns);
+        assert_eq!(
+            restored
+                .velocity
+                .as_ref()
+                .map(|velocity| velocity.speed_mps),
+            epoch.velocity.as_ref().map(|velocity| velocity.speed_mps)
+        );
+    }
+
+    #[test]
+    fn stored_epoch_reads_legacy_compact_snapshot() {
+        let json = r#"{
+            "epoch_index": 7,
+            "solution_kind": "Raw",
+            "latitude_deg": 41.0,
+            "longitude_deg": 2.0,
+            "altitude_m": 50.0,
+            "ecef_m": [1.0, 2.0, 3.0],
+            "utc": "2013-04-04 06:24:07.029 UTC",
+            "speed_3d_mps": 0.04,
+            "clock_drift_ppm": -5.2,
+            "satellites_used": 5,
+            "hdop": 1.2
+        }"#;
+
+        let stored: StoredEpoch = serde_json::from_str(json).expect("read legacy epoch");
+        let restored = stored.to_view_model();
+
+        assert_eq!(restored.time.utc.expect("legacy UTC").year, 2013);
+        assert_eq!(restored.quality.n_sats, 5);
+        assert_eq!(restored.velocity.expect("legacy velocity").speed_mps, 0.04);
+        assert!(stored.channels.is_empty());
     }
 }

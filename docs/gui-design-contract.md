@@ -32,17 +32,17 @@ This document defines the first GUI boundary before wiring gpui widgets. The GUI
 
 ## Current Readiness
 
-The backend and first functional GPUI vertical slice are integrated. `StreamingPvtRunner` runs on a single background worker with bounded IQ reads, deterministic parallel acquisition/tracking, cooperative chunk-boundary cancellation, and PVT-epoch channel telemetry. The GPUI workspace persists immutable run/configuration snapshots and selected PVT outputs in SQLite and renders determinate progress, Healthy-only C/N0 bars, robust ENU scatter, velocity history, current PVT, UTC, and persistent run history. System/Light/Dark preference is stored independently from receiver configuration.
+The backend and first functional GPUI vertical slice are integrated. `StreamingPvtRunner` runs on a single background worker with bounded IQ reads, deterministic parallel acquisition/tracking, cooperative chunk-boundary cancellation, and PVT-epoch channel telemetry. The GPUI workspace persists immutable run/configuration snapshots, complete selected PVT view models, and epoch-aligned channel snapshots in SQLite. Completed runs restore PVT, UTC, ENU, velocity, quality, and C/N0 after application restart; the shared timeline switches every view to the same epoch, manual movement exits live follow, and Return to live restores the active cursor. System/Light/Dark preference is stored independently from receiver configuration.
 
 The release GUI was exercised against the complete 100 s CTTC Spain capture using the explicit CTTC preset. It acquired PRNs 1, 11, 17, 20, and 32, persisted 810 PVT epochs, and ended at latitude `41.2748131 deg`, longitude `1.9875802 deg`, altitude `81.116 m`, speed `0.30013 m/s`, clock drift `-5.41427 ppm`, and `2013-04-04 06:24:47.029 UTC`. The preset uses the same relaxed channel-admission parameters and Raw WLS filter configuration as the existing real-data streaming regression; filename matching does not silently apply it.
 
 This vertical slice is usable but does not yet satisfy the complete interaction contract. Remaining work is explicit:
 
 - extend core PVT output with per-satellite azimuth/elevation before drawing real sky markers; the current sky plot shows an unavailable state instead of fabricated geometry;
-- persist epoch-aligned channel snapshots and discrete acquisition/loss/reacquisition/navigation events, then restore complete historical plots after restart;
+- persist discrete acquisition/loss/reacquisition/navigation events between PVT epochs and expose them in historical diagnostics;
 - persist Raw, Smoothed, and Kalman candidates instead of only the selected solution;
 - replace the secondary-configuration summary with editable standard/expert controls and validation;
-- implement historical search/filter/actions, queued-run reorder/cancel, timeline interaction, plot focus, PRN linking/pinning, and Return to live;
+- implement historical search/filter/delete/reveal actions, queued-run reorder/cancel, plot focus, and PRN linking/pinning;
 - verify responsive sidebar collapse/plot stacking and add automated GPUI screenshot tests.
 
 The first GUI exposes only configuration fields that are implemented and behaviorally active in the receiver. Signal type currently offers only GPS L1 C/A. It does not expose a nonfunctional FLL-assist toggle or invented NWPR coherent/noncoherent counts; current C/N0 controls map to the implemented prompt-window length and smoothing factor. Planned receiver capabilities remain in development documentation until their backend behavior and tests exist.

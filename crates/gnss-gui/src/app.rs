@@ -1,16 +1,17 @@
 use crate::{
     spawn_streaming_worker, ActiveWorker, GuiChannelStatus, GuiProcessingSettings, GuiPvtViewModel,
-    ProcessingRun, RunLibrary, RunStatus, WorkerEvent,
+    ProcessingRun, RunLibrary, RunStatus, StoredEpoch, WorkerEvent,
 };
 use gpui::prelude::*;
 use gpui::{
-    bounds, canvas, div, point, px, quad, rgb, size, Bounds, Context, Hsla, IntoElement,
+    bounds, canvas, div, point, px, quad, rgb, size, Bounds, Context, Entity, Hsla, IntoElement,
     ParentElement, PathBuilder, PathPromptOptions, Render, SharedString, Styled, Timer, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
     progress::Progress,
     scroll::ScrollableElement,
+    slider::{Slider, SliderEvent, SliderState},
     ActiveTheme,
 };
 use std::collections::VecDeque;
@@ -119,12 +120,17 @@ pub struct GnsscopeApp {
     history: Vec<ProcessingRun>,
     queue: VecDeque<ProcessingRun>,
     active_run: Option<ProcessingRun>,
+    live_run_id: Option<Uuid>,
     selected_run_id: Option<Uuid>,
     worker: Option<ActiveWorker>,
     worker_receiver: Option<Receiver<WorkerEvent>>,
     channels: Vec<GuiChannelStatus>,
     epochs: Vec<GuiPvtViewModel>,
+    epoch_channels: Vec<Vec<GuiChannelStatus>>,
+    historical_epochs: Vec<GuiPvtViewModel>,
+    historical_channels: Vec<Vec<GuiChannelStatus>>,
     selected_epoch: Option<usize>,
+    timeline: Entity<SliderState>,
     follow_live: bool,
     theme_preference: ThemePreference,
     system_dark: bool,
@@ -161,18 +167,52 @@ impl GnsscopeApp {
             },
             (None, _) => GuiProcessingSettings::default(),
         };
+        let timeline = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(100.0)
+                .step(0.1)
+                .default_value(100.0)
+        });
+        cx.subscribe(&timeline, |this, _, event, cx| {
+            let SliderEvent::Change(value) = event;
+            this.select_epoch_percent(value.end());
+            cx.notify();
+        })
+        .detach();
+        let initial_run_id = history
+            .iter()
+            .find(|run| run.status != RunStatus::Queued)
+            .map(|run| run.id);
+        let initial_stored_epochs = initial_run_id
+            .and_then(|id| library.as_ref().and_then(|library| library.epochs(id).ok()))
+            .unwrap_or_default();
+        let historical_channels = initial_stored_epochs
+            .iter()
+            .map(StoredEpoch::channel_view_models)
+            .collect::<Vec<_>>();
+        let historical_epochs = initial_stored_epochs
+            .iter()
+            .map(StoredEpoch::to_view_model)
+            .collect::<Vec<_>>();
+        let selected_epoch = historical_epochs.len().checked_sub(1);
         let mut app = Self {
             settings,
             library,
             history,
             queue,
             active_run: None,
-            selected_run_id: None,
+            live_run_id: None,
+            selected_run_id: initial_run_id,
             worker: None,
             worker_receiver: None,
             channels: Vec::new(),
             epochs: Vec::new(),
-            selected_epoch: None,
+            epoch_channels: Vec::new(),
+            historical_epochs,
+            historical_channels,
+            selected_epoch,
+            timeline,
             follow_live: true,
             theme_preference,
             system_dark: cx.theme().mode.is_dark(),
@@ -233,6 +273,10 @@ impl GnsscopeApp {
                 if let (Some(this), Some(path)) = (this.upgrade(), paths.into_iter().next()) {
                     this.update(cx, |this, cx| {
                         this.settings.iq_file_path = Some(path);
+                        this.selected_run_id = None;
+                        this.historical_epochs.clear();
+                        this.historical_channels.clear();
+                        this.selected_epoch = None;
                         this.status_message = "IQ 文件已就绪".to_string();
                         cx.notify();
                     })
@@ -276,6 +320,13 @@ impl GnsscopeApp {
         }
     }
 
+    fn enqueue_selected_or_draft(&mut self) {
+        if let Some(settings) = self.selected_run().map(|run| run.settings.clone()) {
+            self.settings = settings;
+        }
+        self.enqueue();
+    }
+
     fn start_run(&mut self, mut run: ProcessingRun) {
         let (sender, receiver) = mpsc::channel();
         let worker = spawn_streaming_worker(run.settings.clone(), sender);
@@ -284,11 +335,17 @@ impl GnsscopeApp {
         if let Some(library) = &self.library {
             let _ = library.update_progress(run.id, RunStatus::Processing, 0, 0, 0, &run.message);
         }
+        let run_id = run.id;
         self.active_run = Some(run);
+        self.live_run_id = Some(run_id);
+        if self.selected_run_id.is_none() {
+            self.selected_run_id = Some(run_id);
+        }
         self.worker = Some(worker);
         self.worker_receiver = Some(receiver);
         self.channels.clear();
         self.epochs.clear();
+        self.epoch_channels.clear();
         self.selected_epoch = None;
         self.follow_live = true;
         self.status_message = "初始化接收机".to_string();
@@ -352,12 +409,14 @@ impl GnsscopeApp {
                 self.status_message = phase;
             }
             WorkerEvent::Epoch { pvt, channels } => {
-                self.channels = channels;
                 if let Some(library) = &self.library {
-                    let _ = library.append_epoch(run_id, &pvt);
+                    let _ = library.append_epoch(run_id, &pvt, &channels);
                 }
+                self.channels = channels.clone();
+                self.epoch_channels.push(channels);
                 self.epochs.push(pvt);
                 if self.follow_live {
+                    self.selected_run_id = self.live_run_id;
                     self.selected_epoch = Some(self.epochs.len() - 1);
                 }
             }
@@ -439,14 +498,92 @@ impl GnsscopeApp {
 
     fn current_pvt(&self) -> Option<&GuiPvtViewModel> {
         self.selected_epoch
-            .and_then(|index| self.epochs.get(index))
-            .or_else(|| self.epochs.last())
+            .and_then(|index| self.display_epochs().get(index))
+            .or_else(|| self.display_epochs().last())
+    }
+
+    fn display_epochs(&self) -> &[GuiPvtViewModel] {
+        if self.selected_run_id.is_some() && self.selected_run_id == self.live_run_id {
+            &self.epochs
+        } else {
+            &self.historical_epochs
+        }
+    }
+
+    fn display_channels(&self) -> &[GuiChannelStatus] {
+        if self.selected_run_id.is_some() && self.selected_run_id == self.live_run_id {
+            self.selected_epoch
+                .and_then(|index| self.epoch_channels.get(index))
+                .map(Vec::as_slice)
+                .unwrap_or(&self.channels)
+        } else {
+            self.selected_epoch
+                .and_then(|index| self.historical_channels.get(index))
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        }
+    }
+
+    fn select_run(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        self.selected_run_id = Some(id);
+        self.follow_live = self.live_run_id == Some(id) && self.active_run.is_some();
+        self.timeline.update(cx, |timeline, cx| {
+            timeline.set_value(100.0, window, cx);
+        });
+        if self.live_run_id == Some(id) {
+            self.selected_epoch = self.epochs.len().checked_sub(1);
+            return;
+        }
+        let stored = self
+            .library
+            .as_ref()
+            .and_then(|library| library.epochs(id).ok())
+            .unwrap_or_default();
+        self.historical_channels = stored
+            .iter()
+            .map(StoredEpoch::channel_view_models)
+            .collect();
+        self.historical_epochs = stored.iter().map(StoredEpoch::to_view_model).collect();
+        self.selected_epoch = self.historical_epochs.len().checked_sub(1);
+    }
+
+    fn return_to_live(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.live_run_id else {
+            return;
+        };
+        self.selected_run_id = Some(id);
+        self.selected_epoch = self.epochs.len().checked_sub(1);
+        self.follow_live = self.active_run.is_some();
+        self.timeline.update(cx, |timeline, cx| {
+            timeline.set_value(100.0, window, cx);
+        });
+    }
+
+    fn select_epoch_percent(&mut self, percent: f32) {
+        let count = self.display_epochs().len();
+        self.selected_epoch = epoch_index_for_percent(count, percent);
+        self.follow_live = false;
+    }
+
+    fn selected_run(&self) -> Option<&ProcessingRun> {
+        self.selected_run_id.and_then(|id| {
+            self.active_run
+                .as_ref()
+                .filter(|run| run.id == id)
+                .or_else(|| self.history.iter().find(|run| run.id == id))
+        })
+    }
+
+    fn display_settings(&self) -> &GuiProcessingSettings {
+        self.selected_run()
+            .map(|run| &run.settings)
+            .unwrap_or(&self.settings)
     }
 
     fn file_label(&self) -> SharedString {
-        self.settings
-            .iq_file_path
-            .as_ref()
+        self.selected_run()
+            .map(|run| &run.source_path)
+            .or(self.settings.iq_file_path.as_ref())
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "未选择数据文件".to_string())
@@ -686,9 +823,8 @@ impl GnsscopeApp {
                                         palette.border
                                     })
                                     .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.selected_run_id = Some(id);
-                                        this.follow_live = false;
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.select_run(id, window, cx);
                                         cx.notify();
                                     }))
                                     .child(
@@ -739,6 +875,7 @@ impl GnsscopeApp {
 
     fn render_header(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let is_active = self.active_run.is_some();
+        let settings = self.display_settings();
         div()
             .px(px(22.))
             .py(px(14.))
@@ -775,12 +912,22 @@ impl GnsscopeApp {
                                     .text_color(palette.muted)
                                     .child(format!(
                                         "GPS L1 C/A  ·  {:.3} Msps  ·  IF {:.3} MHz  ·  {:?}",
-                                        self.settings.sample_rate_hz / 1e6,
-                                        self.settings.intermediate_frequency_hz / 1e6,
-                                        self.settings.iq_format
+                                        settings.sample_rate_hz / 1e6,
+                                        settings.intermediate_frequency_hz / 1e6,
+                                        settings.iq_format
                                     )),
                             ),
                     )
+                    .children((is_active && !self.follow_live).then(|| {
+                        Button::new("return-live")
+                            .ghost()
+                            .text_color(palette.accent)
+                            .label("返回实时")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.return_to_live(window, cx);
+                                cx.notify();
+                            }))
+                    }))
                     .child(
                         Button::new("settings")
                             .ghost()
@@ -799,8 +946,12 @@ impl GnsscopeApp {
                     } else {
                         Button::new("run")
                             .primary()
-                            .label("开始解算")
-                            .on_click(cx.listener(|this, _, _, _| this.enqueue()))
+                            .label(if self.selected_run_id.is_some() {
+                                "按此配置重算"
+                            } else {
+                                "开始解算"
+                            })
+                            .on_click(cx.listener(|this, _, _, _| this.enqueue_selected_or_draft()))
                     }),
             )
     }
@@ -823,11 +974,17 @@ impl GnsscopeApp {
             }
         });
         let elapsed = run
-            .map(|run| run.processed_samples as f64 / self.settings.sample_rate_hz)
+            .map(|run| run.processed_samples as f64 / run.settings.sample_rate_hz)
             .unwrap_or(0.0);
         let total = run
-            .map(|run| run.total_samples as f64 / self.settings.sample_rate_hz)
+            .map(|run| run.total_samples as f64 / run.settings.sample_rate_hz)
             .unwrap_or(0.0);
+        let status_message = if self.active_run.is_some() {
+            self.status_message.clone()
+        } else {
+            run.map(|run| run.message.clone())
+                .unwrap_or_else(|| self.status_message.clone())
+        };
         div()
             .px(px(22.))
             .pt(px(18.))
@@ -851,7 +1008,7 @@ impl GnsscopeApp {
                                     .text_size(px(17.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(palette.text)
-                                    .child(self.status_message.clone()),
+                                    .child(status_message),
                             ),
                     )
                     .child(
@@ -882,6 +1039,7 @@ impl GnsscopeApp {
     }
 
     fn render_config_drawer(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let settings = self.display_settings();
         div()
             .w(px(470.))
             .h_full()
@@ -905,68 +1063,66 @@ impl GnsscopeApp {
                     .mt(px(6.))
                     .text_size(px(11.))
                     .text_color(palette.muted)
-                    .child("任务入队后配置快照冻结"),
+                    .child(if self.selected_run_id.is_some() {
+                        "历史任务配置快照（只读）"
+                    } else {
+                        "任务入队后配置快照冻结"
+                    }),
             )
-            .child(
+            .children(self.selected_run_id.is_none().then(|| {
                 Button::new("cttc-preset")
                     .mt(px(14.))
                     .label("应用 CTTC Spain 预设")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.apply_cttc_preset();
                         cx.notify();
-                    })),
-            )
+                    }))
+            }))
             .children(
                 [
                     (
                         "输入与采样",
-                        format!(
-                            "{:?} · chunk {} ms",
-                            self.settings.iq_format, self.settings.chunk_ms
-                        ),
+                        format!("{:?} · chunk {} ms", settings.iq_format, settings.chunk_ms),
                     ),
                     (
                         "捕获",
                         format!(
                             "{} ms × {} · threshold {:.2}",
-                            self.settings.acquisition_window_ms,
-                            self.settings.acquisition_noncoherent_integrations,
-                            self.settings.acquisition_threshold
+                            settings.acquisition_window_ms,
+                            settings.acquisition_noncoherent_integrations,
+                            settings.acquisition_threshold
                         ),
                     ),
                     (
                         "跟踪",
                         format!(
                             "DLL {:.1} Hz · PLL {:.1} Hz",
-                            self.settings.dll_bandwidth_hz, self.settings.pll_bandwidth_hz
+                            settings.dll_bandwidth_hz, settings.pll_bandwidth_hz
                         ),
                     ),
                     (
                         "锁定判据",
                         format!(
                             "PLL {:.2} · C/N0 {:.1} dB-Hz",
-                            self.settings.minimum_pll_lock_metric, self.settings.minimum_cn0_db_hz
+                            settings.minimum_pll_lock_metric, settings.minimum_cn0_db_hz
                         ),
                     ),
                     (
                         "C/N0",
                         format!(
                             "{} samples · α {:.2}",
-                            self.settings.cn0_samples, self.settings.cn0_smoother_alpha
+                            settings.cn0_samples, settings.cn0_smoother_alpha
                         ),
                     ),
                     (
                         "PVT",
-                        format!(
-                            "{} ms · epoch Doppler average",
-                            self.settings.pvt_output_rate_ms
-                        ),
+                        format!("{} ms · epoch Doppler average", settings.pvt_output_rate_ms),
                     ),
                     (
                         "性能",
                         format!(
                             "acq {} · tracking {}",
-                            self.settings.parallel_acquisition, self.settings.parallel_tracking
+                            settings.parallel_acquisition, settings.parallel_tracking
                         ),
                     ),
                 ]
@@ -996,6 +1152,8 @@ impl GnsscopeApp {
     }
 
     fn render_overview(&self, palette: Palette) -> impl IntoElement {
+        let epochs = self.display_epochs();
+        let channels = self.display_channels();
         let pvt = self.current_pvt();
         let latitude = pvt
             .map(|p| format!("{:.7}", p.latitude_deg))
@@ -1043,14 +1201,14 @@ impl GnsscopeApp {
                     .child(self.plot_panel(
                         "ENU 位置",
                         "首个有效 epoch 为原点",
-                        position_plot(&self.epochs, palette),
+                        position_plot(epochs, self.selected_epoch, palette),
                         palette,
                     )),
             )
             .child(div().mt(px(12.)).child(self.plot_panel(
                 "稳定通道 C/N0",
                 "仅显示 Healthy PRN",
-                cn0_plot(&self.channels, palette),
+                cn0_plot(channels, palette),
                 palette,
             )))
             .child(
@@ -1062,7 +1220,7 @@ impl GnsscopeApp {
                     .child(self.plot_panel(
                         "速度与钟漂",
                         "共享 epoch 时间轴",
-                        velocity_plot(&self.epochs, palette),
+                        velocity_plot(epochs, self.selected_epoch, palette),
                         palette,
                     ))
                     .child(
@@ -1127,20 +1285,7 @@ impl GnsscopeApp {
                         div()
                             .ml(px(10.))
                             .flex_1()
-                            .h(px(3.))
-                            .rounded_full()
-                            .bg(palette.border)
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(gpui::relative(if self.epochs.is_empty() {
-                                        0.0
-                                    } else {
-                                        1.0
-                                    }))
-                                    .rounded_full()
-                                    .bg(palette.accent),
-                            ),
+                            .child(Slider::new(&self.timeline).disabled(epochs.len() < 2)),
                     )
                     .child(
                         div()
@@ -1150,7 +1295,7 @@ impl GnsscopeApp {
                             .child(format!(
                                 "{} / {}",
                                 self.selected_epoch.map(|i| i + 1).unwrap_or(0),
-                                self.epochs.len()
+                                epochs.len()
                             )),
                     ),
             )
@@ -1327,23 +1472,28 @@ fn cn0_plot(channels: &[GuiChannelStatus], palette: Palette) -> impl IntoElement
         }))
 }
 
-fn position_plot(epochs: &[GuiPvtViewModel], palette: Palette) -> impl IntoElement {
+fn position_plot(
+    epochs: &[GuiPvtViewModel],
+    selected_epoch: Option<usize>,
+    palette: Palette,
+) -> impl IntoElement {
     let lla = epochs
         .iter()
-        .filter(|pvt| {
+        .enumerate()
+        .filter(|(_, pvt)| {
             pvt.quality.converged && pvt.latitude_deg.is_finite() && pvt.longitude_deg.is_finite()
         })
-        .map(|pvt| (pvt.latitude_deg, pvt.longitude_deg))
+        .map(|(index, pvt)| (index, pvt.latitude_deg, pvt.longitude_deg))
         .collect::<Vec<_>>();
     let points = lla
         .first()
-        .map_or_else(Vec::new, |(latitude_0, longitude_0)| {
+        .map_or_else(Vec::new, |(_, latitude_0, longitude_0)| {
             let cos_latitude = latitude_0.to_radians().cos();
             lla.iter()
-                .map(|(latitude, longitude)| {
+                .map(|(index, latitude, longitude)| {
                     let east = (longitude - longitude_0).to_radians() * 6_378_137.0 * cos_latitude;
                     let north = (latitude - latitude_0).to_radians() * 6_378_137.0;
-                    (east, north)
+                    (*index, east, north)
                 })
                 .collect()
         });
@@ -1381,7 +1531,7 @@ fn position_plot(epochs: &[GuiPvtViewModel], palette: Palette) -> impl IntoEleme
             }
             let mut extents = points
                 .iter()
-                .map(|(east, north)| east.abs().max(north.abs()))
+                .map(|(_, east, north)| east.abs().max(north.abs()))
                 .filter(|extent| extent.is_finite())
                 .collect::<Vec<_>>();
             extents.sort_by(f64::total_cmp);
@@ -1389,13 +1539,13 @@ fn position_plot(epochs: &[GuiPvtViewModel], palette: Palette) -> impl IntoEleme
             let extent = extents[robust_index].max(1.0);
             let half_width = plot_bounds.size.width / 2. - px(8.);
             let half_height = plot_bounds.size.height / 2. - px(8.);
-            for (index, (east, north)) in points.iter().enumerate() {
+            for (index, east, north) in &points {
                 if east.abs() > extent || north.abs() > extent {
                     continue;
                 }
                 let x = center.x + half_width * (*east / extent) as f32;
                 let y = center.y - half_height * (*north / extent) as f32;
-                let selected = index + 1 == points.len();
+                let selected = Some(*index) == selected_epoch;
                 let diameter = if selected { px(6.) } else { px(3.) };
                 window.paint_quad(quad(
                     bounds(
@@ -1418,7 +1568,11 @@ fn position_plot(epochs: &[GuiPvtViewModel], palette: Palette) -> impl IntoEleme
     .size_full()
 }
 
-fn velocity_plot(epochs: &[GuiPvtViewModel], palette: Palette) -> impl IntoElement {
+fn velocity_plot(
+    epochs: &[GuiPvtViewModel],
+    selected_epoch: Option<usize>,
+    palette: Palette,
+) -> impl IntoElement {
     let points = epochs
         .iter()
         .enumerate()
@@ -1428,10 +1582,20 @@ fn velocity_plot(epochs: &[GuiPvtViewModel], palette: Palette) -> impl IntoEleme
                 .map(|velocity| (index as f64, velocity.speed_mps))
         })
         .collect::<Vec<_>>();
-    line_plot(points, palette.healthy, palette)
+    line_plot(
+        points,
+        palette.healthy,
+        palette,
+        selected_epoch.map(|index| index as f64),
+    )
 }
 
-fn line_plot(points: Vec<(f64, f64)>, color: Hsla, palette: Palette) -> impl IntoElement {
+fn line_plot(
+    points: Vec<(f64, f64)>,
+    color: Hsla,
+    palette: Palette,
+    selected_x: Option<f64>,
+) -> impl IntoElement {
     canvas(
         move |_, _, _| {},
         move |plot_bounds, _, window, _| {
@@ -1478,7 +1642,44 @@ fn line_plot(points: Vec<(f64, f64)>, color: Hsla, palette: Palette) -> impl Int
             if let Ok(path) = builder.build() {
                 window.paint_path(path, color);
             }
+            if let Some((x, y)) = selected_x.and_then(|selected_x| {
+                points
+                    .iter()
+                    .find(|(x, _)| (*x - selected_x).abs() < f64::EPSILON)
+            }) {
+                let px_x =
+                    plot_bounds.origin.x + plot_bounds.size.width * ((*x - min_x) / span_x) as f32;
+                let normalized_y = (y.clamp(min_y, max_y) - min_y) / span_y;
+                let px_y =
+                    plot_bounds.origin.y + plot_bounds.size.height * (1.0 - normalized_y as f32);
+                window.paint_quad(quad(
+                    bounds(point(px_x - px(4.), px_y - px(4.)), size(px(8.), px(8.))),
+                    px(4.),
+                    palette.accent,
+                    px(1.),
+                    palette.surface,
+                    Default::default(),
+                ));
+            }
         },
     )
     .size_full()
+}
+
+fn epoch_index_for_percent(count: usize, percent: f32) -> Option<usize> {
+    (count > 0).then(|| ((percent.clamp(0.0, 100.0) / 100.0) * (count - 1) as f32).round() as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::epoch_index_for_percent;
+
+    #[test]
+    fn timeline_percent_maps_to_shared_epoch_index() {
+        assert_eq!(epoch_index_for_percent(0, 50.0), None);
+        assert_eq!(epoch_index_for_percent(1, 0.0), Some(0));
+        assert_eq!(epoch_index_for_percent(101, 0.0), Some(0));
+        assert_eq!(epoch_index_for_percent(101, 50.0), Some(50));
+        assert_eq!(epoch_index_for_percent(101, 100.0), Some(100));
+    }
 }
