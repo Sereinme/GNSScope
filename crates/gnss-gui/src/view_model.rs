@@ -11,6 +11,19 @@ pub struct GuiPvtViewModel {
     pub time: GuiPvtTime,
     pub velocity: Option<GuiPvtVelocity>,
     pub quality: GuiPvtQuality,
+    pub satellites: Vec<GuiSatelliteGeometry>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GuiSatelliteGeometry {
+    pub prn: u8,
+    pub azimuth_deg: f64,
+    pub elevation_deg: f64,
+    pub residual_m: f64,
+    pub standardized_residual: f64,
+    pub pseudorange_sigma_m: f64,
+    pub used_in_solution: bool,
+    pub raim_excluded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +110,20 @@ impl GuiPvtViewModel {
                 vertical_sigma_m: output.quality.vertical_sigma_m,
                 velocity_sigma_mps: output.quality.velocity_sigma_mps,
             },
+            satellites: output
+                .satellites
+                .iter()
+                .map(|satellite| GuiSatelliteGeometry {
+                    prn: satellite.prn,
+                    azimuth_deg: satellite.azimuth_rad.to_degrees(),
+                    elevation_deg: satellite.elevation_rad.to_degrees(),
+                    residual_m: satellite.residual_m,
+                    standardized_residual: satellite.standardized_residual,
+                    pseudorange_sigma_m: satellite.pseudorange_sigma_m,
+                    used_in_solution: satellite.used_in_solution,
+                    raim_excluded: satellite.raim_excluded,
+                })
+                .collect(),
         }
     }
 
@@ -108,7 +135,7 @@ impl GuiPvtViewModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gnss_core::pvt::{PvtQualityOutput, PvtTimeOutput, PvtVelocityOutput};
+    use gnss_core::pvt::{PvtQualityOutput, PvtSatelliteOutput, PvtTimeOutput, PvtVelocityOutput};
 
     #[test]
     fn test_view_model_exposes_position_velocity_time_quality() {
@@ -165,6 +192,16 @@ mod tests {
                 position_sigma_m: 10.0,
                 velocity_sigma_mps: Some(0.3),
             },
+            satellites: vec![PvtSatelliteOutput {
+                prn: 20,
+                azimuth_rad: 1.25,
+                elevation_rad: 0.75,
+                residual_m: -0.4,
+                standardized_residual: -0.2,
+                pseudorange_sigma_m: 2.0,
+                used_in_solution: true,
+                raim_excluded: false,
+            }],
         };
 
         let view = GuiPvtViewModel::from_epoch_output(&output);
@@ -181,5 +218,9 @@ mod tests {
         assert_eq!(velocity.vertical_speed_mps, -0.5);
         assert_eq!(view.quality.n_sats, 5);
         assert_eq!(view.quality.excluded_prns, vec![17]);
+        assert_eq!(view.satellites.len(), 1);
+        assert_eq!(view.satellites[0].prn, 20);
+        assert!((view.satellites[0].azimuth_deg - 1.25_f64.to_degrees()).abs() < 1e-12);
+        assert!((view.satellites[0].elevation_deg - 0.75_f64.to_degrees()).abs() < 1e-12);
     }
 }

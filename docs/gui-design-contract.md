@@ -32,19 +32,20 @@ This document defines the first GUI boundary before wiring gpui widgets. The GUI
 
 ## Current Readiness
 
-The backend and first functional GPUI vertical slice are integrated. `StreamingPvtRunner` runs on a single background worker with bounded IQ reads, deterministic parallel acquisition/tracking, cooperative chunk-boundary cancellation, and PVT-epoch channel telemetry. The GPUI workspace persists immutable run/configuration snapshots, complete selected PVT view models, and epoch-aligned channel snapshots in SQLite. Completed runs restore PVT, UTC, ENU, velocity, quality, and C/N0 after application restart; the shared timeline switches every view to the same epoch, manual movement exits live follow, and Return to live restores the active cursor. System/Light/Dark preference is stored independently from receiver configuration.
+The backend and first functional GPUI vertical slice are integrated. `StreamingPvtRunner` runs on a single background worker with bounded IQ reads, deterministic parallel acquisition/tracking, cooperative chunk-boundary cancellation, and PVT-epoch channel telemetry. The GPUI workspace persists immutable run/configuration snapshots, complete selected PVT view models, per-satellite WLS geometry, and epoch-aligned channel snapshots in SQLite. Completed runs restore PVT, UTC, ENU, velocity, quality, sky geometry, and C/N0 after application restart; the shared timeline switches every view to the same epoch, manual movement exits live follow, and Return to live restores the active cursor. System/Light/Dark preference is stored independently from receiver configuration.
 
-The release GUI was exercised against the complete 100 s CTTC Spain capture using the explicit CTTC preset. It acquired PRNs 1, 11, 17, 20, and 32, persisted 810 PVT epochs, and ended at latitude `41.2748131 deg`, longitude `1.9875802 deg`, altitude `81.116 m`, speed `0.30013 m/s`, clock drift `-5.41427 ppm`, and `2013-04-04 06:24:47.029 UTC`. The preset uses the same relaxed channel-admission parameters and Raw WLS filter configuration as the existing real-data streaming regression; filename matching does not silently apply it.
+The release GUI was exercised against the complete 100 s CTTC Spain capture using the explicit CTTC preset after satellite-geometry persistence was added. It acquired PRNs 1, 11, 17, 20, and 32, persisted 810 PVT epochs, produced real sky geometry from the first solved epoch onward, restored the final five-satellite plot after restart, and ended at latitude `41.2748131 deg`, longitude `1.9875802 deg`, altitude `81.116 m`, speed `0.30013 m/s`, clock drift `-5.41427 ppm`, and `2013-04-04 06:24:47.029 UTC`. The preset uses the same relaxed channel-admission parameters and Raw WLS filter configuration as the existing real-data streaming regression; filename matching does not silently apply it.
 
 Streaming PVT epoch identity is monotonic across successive single-epoch solves. SQLite nevertheless uses a GUI-owned insertion ordinal as the epoch primary key rather than trusting a receiver-provided label to be unique. This prevents repeated core indexes from replacing earlier history rows. On startup, stored run summaries are reconciled against the actual epoch row count so older affected records report the recoverable count honestly; rows already replaced by the former schema cannot be reconstructed without reprocessing the IQ file.
 
+The sky plot consumes the selected position solution's final WLS satellite diagnostics. Azimuth/elevation, residual, standardized residual, uncertainty, and solution-use flags are converted into the GUI view model and persisted with each epoch. The display uses zenith at center, horizon at the outer ring, north up, and east right. Markers are joined to the same epoch's channel snapshot by PRN and use semantic lock/solution colors. Satellites excluded before the final WLS diagnostics are not assigned fabricated geometry. Epoch rows written by versions before satellite persistence deserialize with an empty geometry list and require IQ reprocessing to populate the plot.
+
 This vertical slice is usable but does not yet satisfy the complete interaction contract. Remaining work is explicit:
 
-- extend core PVT output with per-satellite azimuth/elevation before drawing real sky markers; the current sky plot shows an unavailable state instead of fabricated geometry;
 - persist discrete acquisition/loss/reacquisition/navigation events between PVT epochs and expose them in historical diagnostics;
 - persist Raw, Smoothed, and Kalman candidates instead of only the selected solution;
 - replace the secondary-configuration summary with editable standard/expert controls and validation;
-- implement historical search/filter/delete/reveal actions, queued-run reorder/cancel, plot focus, and PRN linking/pinning;
+- implement historical search/filter/delete/reveal actions, queued-run reorder/cancel, plot focus, sky-marker hover details, and PRN linking/pinning;
 - verify responsive sidebar collapse/plot stacking and add automated GPUI screenshot tests.
 
 The first GUI exposes only configuration fields that are implemented and behaviorally active in the receiver. Signal type currently offers only GPS L1 C/A. It does not expose a nonfunctional FLL-assist toggle or invented NWPR coherent/noncoherent counts; current C/N0 controls map to the implemented prompt-window length and smoothing factor. Planned receiver capabilities remain in development documentation until their backend behavior and tests exist.
@@ -238,7 +239,7 @@ Current GUI-facing Rust modules:
 - `gnss_gui::GuiReceiverEvent`: stable event bridge from settings changes, resolved navigation source, worker progress, channel updates, PVT updates, completion, and failure into UI state.
 - `gnss_gui::GuiNavSourceStatus`: resolved navigation source status for GUI settings and processing diagnostics.
 - `gnss_gui::GuiProcessingSettings`: receiver settings and navigation-file policy.
-- `gnss_gui::GuiPvtViewModel`: position, velocity, time, and quality display model.
+- `gnss_gui::GuiPvtViewModel`: position, velocity, time, quality, and per-satellite WLS geometry display model.
 - `gnss_gui::GuiReceiverWorkspaceState`: processing lifecycle, settings validation, latest PVT, and channels.
 - `gnss_gui::ReceiverWorkspaceLayout`: first-screen panel layout.
 - `gnss_gui::build_receiver_workspace_screen`: structured pre-render screen model with typed controls, metrics, and channel tables.

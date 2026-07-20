@@ -1,6 +1,6 @@
 use crate::{
     GuiChannelStatus, GuiProcessingSettings, GuiPvtQuality, GuiPvtTime, GuiPvtVelocity,
-    GuiPvtViewModel,
+    GuiPvtViewModel, GuiSatelliteGeometry,
 };
 use chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc};
 use directories::ProjectDirs;
@@ -80,6 +80,8 @@ pub struct StoredEpoch {
     pub quality: StoredQuality,
     #[serde(default)]
     pub channels: Vec<StoredChannel>,
+    #[serde(default)]
+    pub satellites: Vec<StoredSatellite>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -142,6 +144,18 @@ pub struct StoredChannel {
     pub residual_m: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredSatellite {
+    pub prn: u8,
+    pub azimuth_deg: f64,
+    pub elevation_deg: f64,
+    pub residual_m: f64,
+    pub standardized_residual: f64,
+    pub pseudorange_sigma_m: f64,
+    pub used_in_solution: bool,
+    pub raim_excluded: bool,
+}
+
 impl StoredEpoch {
     pub fn from_view_model(value: &GuiPvtViewModel, channels: &[GuiChannelStatus]) -> Self {
         Self {
@@ -202,6 +216,7 @@ impl StoredEpoch {
                 velocity_sigma_mps: value.quality.velocity_sigma_mps,
             },
             channels: channels.iter().map(StoredChannel::from).collect(),
+            satellites: value.satellites.iter().map(StoredSatellite::from).collect(),
         }
     }
 
@@ -270,6 +285,11 @@ impl StoredEpoch {
                     velocity_sigma_mps: None,
                 }
             },
+            satellites: self
+                .satellites
+                .iter()
+                .map(GuiSatelliteGeometry::from)
+                .collect(),
         }
     }
 
@@ -362,6 +382,36 @@ impl From<&StoredChannel> for GuiChannelStatus {
             cn0_db_hz: value.cn0_db_hz,
             doppler_hz: value.doppler_hz,
             residual_m: value.residual_m,
+        }
+    }
+}
+
+impl From<&GuiSatelliteGeometry> for StoredSatellite {
+    fn from(value: &GuiSatelliteGeometry) -> Self {
+        Self {
+            prn: value.prn,
+            azimuth_deg: value.azimuth_deg,
+            elevation_deg: value.elevation_deg,
+            residual_m: value.residual_m,
+            standardized_residual: value.standardized_residual,
+            pseudorange_sigma_m: value.pseudorange_sigma_m,
+            used_in_solution: value.used_in_solution,
+            raim_excluded: value.raim_excluded,
+        }
+    }
+}
+
+impl From<&StoredSatellite> for GuiSatelliteGeometry {
+    fn from(value: &StoredSatellite) -> Self {
+        Self {
+            prn: value.prn,
+            azimuth_deg: value.azimuth_deg,
+            elevation_deg: value.elevation_deg,
+            residual_m: value.residual_m,
+            standardized_residual: value.standardized_residual,
+            pseudorange_sigma_m: value.pseudorange_sigma_m,
+            used_in_solution: value.used_in_solution,
+            raim_excluded: value.raim_excluded,
         }
     }
 }
@@ -615,7 +665,17 @@ mod tests {
             ..Default::default()
         };
         let run = library.create_run(&settings).expect("create run");
-        let epoch = crate::sample_pvt_view_model();
+        let mut epoch = crate::sample_pvt_view_model();
+        epoch.satellites.push(GuiSatelliteGeometry {
+            prn: 20,
+            azimuth_deg: 123.5,
+            elevation_deg: 47.25,
+            residual_m: -0.4,
+            standardized_residual: -0.2,
+            pseudorange_sigma_m: 2.0,
+            used_in_solution: true,
+            raim_excluded: false,
+        });
         let channels = crate::state::sample_channel_statuses();
 
         library
@@ -629,6 +689,7 @@ mod tests {
         assert_eq!(restored.epoch_index, epoch.epoch_index);
         assert_eq!(restored.time.utc, epoch.time.utc);
         assert_eq!(restored.quality.used_prns, epoch.quality.used_prns);
+        assert_eq!(restored.satellites, epoch.satellites);
         assert_eq!(
             restored
                 .velocity
@@ -661,6 +722,7 @@ mod tests {
         assert_eq!(restored.quality.n_sats, 5);
         assert_eq!(restored.velocity.expect("legacy velocity").speed_mps, 0.04);
         assert!(stored.channels.is_empty());
+        assert!(stored.satellites.is_empty());
     }
 
     #[test]

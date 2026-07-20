@@ -1,6 +1,6 @@
 use crate::{
     spawn_streaming_worker, ActiveWorker, GuiChannelStatus, GuiProcessingSettings, GuiPvtViewModel,
-    ProcessingRun, RunLibrary, RunStatus, StoredEpoch, WorkerEvent,
+    GuiSatelliteGeometry, ProcessingRun, RunLibrary, RunStatus, StoredEpoch, WorkerEvent,
 };
 use gpui::prelude::*;
 use gpui::{
@@ -1196,7 +1196,11 @@ impl GnsscopeApp {
                     .child(self.plot_panel(
                         "卫星天空图",
                         "真实方位/仰角",
-                        sky_plot(palette),
+                        sky_plot(
+                            pvt.map(|pvt| pvt.satellites.as_slice()).unwrap_or(&[]),
+                            channels,
+                            palette,
+                        ),
                         palette,
                     ))
                     .child(self.plot_panel(
@@ -1355,69 +1359,178 @@ impl Render for GnsscopeApp {
     }
 }
 
-fn sky_plot(palette: Palette) -> impl IntoElement {
+#[derive(Clone, Copy)]
+struct SkyMarker {
+    prn: u8,
+    x: f32,
+    y: f32,
+    color: Hsla,
+}
+
+fn sky_plot(
+    satellites: &[GuiSatelliteGeometry],
+    channels: &[GuiChannelStatus],
+    palette: Palette,
+) -> impl IntoElement {
+    let markers = satellites
+        .iter()
+        .filter_map(|satellite| {
+            let (x, y) = sky_plot_position(satellite.azimuth_deg, satellite.elevation_deg)?;
+            let channel = channels.iter().find(|channel| channel.prn == satellite.prn);
+            let marker_color = if satellite.raim_excluded {
+                palette.danger
+            } else if channel.is_some_and(|channel| channel.tracking_locked)
+                && satellite.used_in_solution
+            {
+                palette.healthy
+            } else if channel.is_some() {
+                palette.warning
+            } else {
+                palette.muted
+            };
+            Some(SkyMarker {
+                prn: satellite.prn,
+                x,
+                y,
+                color: marker_color,
+            })
+        })
+        .collect::<Vec<_>>();
+    let geometry_available = !markers.is_empty();
+
     div()
         .size_full()
         .relative()
-        .child(
-            canvas(
-                move |_, _, _| {},
-                move |plot_bounds, _, window, _| {
-                    let diameter = plot_bounds.size.width.min(plot_bounds.size.height) - px(16.);
-                    let origin = point(
-                        plot_bounds.origin.x + (plot_bounds.size.width - diameter) / 2.,
-                        plot_bounds.origin.y + (plot_bounds.size.height - diameter) / 2.,
-                    );
-                    for ratio in [1.0_f32, 0.66, 0.33] {
-                        let d = diameter * ratio;
-                        let ring = Bounds {
-                            origin: point(
-                                origin.x + (diameter - d) / 2.,
-                                origin.y + (diameter - d) / 2.,
-                            ),
-                            size: size(d, d),
-                        };
-                        window.paint_quad(quad(
-                            ring,
-                            d / 2.,
-                            palette.surface_alt,
-                            px(1.),
-                            palette.border,
-                            Default::default(),
-                        ));
-                    }
-                    let center_x = origin.x + diameter / 2.;
-                    let center_y = origin.y + diameter / 2.;
-                    window.paint_quad(quad(
-                        bounds(point(center_x - px(1.), origin.y), size(px(2.), diameter)),
-                        px(0.),
-                        palette.border,
-                        px(0.),
-                        palette.border,
-                        Default::default(),
-                    ));
-                    window.paint_quad(quad(
-                        bounds(point(origin.x, center_y - px(1.)), size(diameter, px(2.))),
-                        px(0.),
-                        palette.border,
-                        px(0.),
-                        palette.border,
-                        Default::default(),
-                    ));
-                },
-            )
-            .size_full(),
-        )
+        .flex()
+        .justify_center()
+        .items_center()
         .child(
             div()
+                .relative()
+                .w(px(184.))
+                .h(px(184.))
+                .child(
+                    canvas(
+                        move |_, _, _| {},
+                        move |plot_bounds, _, window, _| {
+                            let diameter = plot_bounds.size.width.min(plot_bounds.size.height)
+                                * SKY_PLOT_DIAMETER_FRACTION;
+                            let origin = point(
+                                plot_bounds.origin.x + (plot_bounds.size.width - diameter) / 2.,
+                                plot_bounds.origin.y + (plot_bounds.size.height - diameter) / 2.,
+                            );
+                            for ratio in [1.0_f32, 2.0 / 3.0, 1.0 / 3.0] {
+                                let ring_diameter = diameter * ratio;
+                                let ring = Bounds {
+                                    origin: point(
+                                        origin.x + (diameter - ring_diameter) / 2.,
+                                        origin.y + (diameter - ring_diameter) / 2.,
+                                    ),
+                                    size: size(ring_diameter, ring_diameter),
+                                };
+                                window.paint_quad(quad(
+                                    ring,
+                                    ring_diameter / 2.,
+                                    palette.surface_alt,
+                                    px(1.),
+                                    palette.border,
+                                    Default::default(),
+                                ));
+                            }
+                            let center_x = origin.x + diameter / 2.;
+                            let center_y = origin.y + diameter / 2.;
+                            window.paint_quad(quad(
+                                bounds(point(center_x - px(0.5), origin.y), size(px(1.), diameter)),
+                                px(0.),
+                                palette.border,
+                                px(0.),
+                                palette.border,
+                                Default::default(),
+                            ));
+                            window.paint_quad(quad(
+                                bounds(point(origin.x, center_y - px(0.5)), size(diameter, px(1.))),
+                                px(0.),
+                                palette.border,
+                                px(0.),
+                                palette.border,
+                                Default::default(),
+                            ));
+                        },
+                    )
+                    .size_full(),
+                )
+                .children(markers.into_iter().map(move |marker| {
+                    div()
+                        .absolute()
+                        .left(gpui::relative(marker.x))
+                        .top(gpui::relative(marker.y))
+                        .ml(px(-11.))
+                        .mt(px(-11.))
+                        .w(px(22.))
+                        .h(px(22.))
+                        .rounded(px(11.))
+                        .bg(palette.surface)
+                        .border_2()
+                        .border_color(marker.color)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(8.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(palette.text)
+                        .child(format!("{:02}", marker.prn))
+                }))
+                .child(cardinal_label("N", 0.5, 0.0, palette))
+                .child(cardinal_label("E", 1.0, 0.5, palette))
+                .child(cardinal_label("S", 0.5, 1.0, palette))
+                .child(cardinal_label("W", 0.0, 0.5, palette)),
+        )
+        .children((!geometry_available).then(|| {
+            div()
                 .absolute()
-                .bottom(px(6.))
+                .bottom(px(4.))
                 .w_full()
                 .text_center()
                 .text_size(px(10.))
                 .text_color(palette.muted)
-                .child("等待 PVT 输出卫星方位角与仰角"),
-        )
+                .child("当前 epoch 无卫星方位角/仰角")
+        }))
+}
+
+const SKY_PLOT_RADIUS_FRACTION: f32 = 0.43;
+const SKY_PLOT_DIAMETER_FRACTION: f32 = SKY_PLOT_RADIUS_FRACTION * 2.0;
+
+fn sky_plot_position(azimuth_deg: f64, elevation_deg: f64) -> Option<(f32, f32)> {
+    if !azimuth_deg.is_finite()
+        || !elevation_deg.is_finite()
+        || !(0.0..=90.0).contains(&elevation_deg)
+    {
+        return None;
+    }
+    let radial_fraction = ((90.0 - elevation_deg) / 90.0) as f32;
+    let azimuth_rad = azimuth_deg.to_radians();
+    Some((
+        0.5 + SKY_PLOT_RADIUS_FRACTION * radial_fraction * azimuth_rad.sin() as f32,
+        0.5 - SKY_PLOT_RADIUS_FRACTION * radial_fraction * azimuth_rad.cos() as f32,
+    ))
+}
+
+fn cardinal_label(label: &'static str, x: f32, y: f32, palette: Palette) -> impl IntoElement {
+    div()
+        .absolute()
+        .left(gpui::relative(x))
+        .top(gpui::relative(y))
+        .ml(px(-7.))
+        .mt(px(-7.))
+        .w(px(14.))
+        .h(px(14.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(8.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(palette.muted)
+        .child(label)
 }
 
 fn cn0_plot(channels: &[GuiChannelStatus], palette: Palette) -> impl IntoElement {
@@ -1665,6 +1778,26 @@ fn line_plot(
         },
     )
     .size_full()
+}
+
+#[cfg(test)]
+mod sky_plot_tests {
+    use super::sky_plot_position;
+
+    #[test]
+    fn sky_plot_uses_north_up_and_east_right() {
+        let north_horizon = sky_plot_position(0.0, 0.0).unwrap();
+        let east_horizon = sky_plot_position(90.0, 0.0).unwrap();
+        let zenith = sky_plot_position(225.0, 90.0).unwrap();
+
+        assert!((north_horizon.0 - 0.5).abs() < 1e-6);
+        assert!(north_horizon.1 < 0.5);
+        assert!(east_horizon.0 > 0.5);
+        assert!((east_horizon.1 - 0.5).abs() < 1e-6);
+        assert!((zenith.0 - 0.5).abs() < 1e-6);
+        assert!((zenith.1 - 0.5).abs() < 1e-6);
+        assert!(sky_plot_position(0.0, -0.1).is_none());
+    }
 }
 
 fn epoch_index_for_percent(count: usize, percent: f32) -> Option<usize> {

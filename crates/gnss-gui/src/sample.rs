@@ -66,6 +66,7 @@ fn sample_pvt_epoch_output() -> PvtEpochOutput {
             position_sigma_m: 22.0,
             velocity_sigma_mps: Some(0.10),
         },
+        satellites: Vec::new(),
     }
 }
 

@@ -188,6 +188,18 @@ pub struct PvtQualityOutput {
 }
 
 #[derive(Debug, Clone)]
+pub struct PvtSatelliteOutput {
+    pub prn: u8,
+    pub azimuth_rad: f64,
+    pub elevation_rad: f64,
+    pub residual_m: f64,
+    pub standardized_residual: f64,
+    pub pseudorange_sigma_m: f64,
+    pub used_in_solution: bool,
+    pub raim_excluded: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct PvtEpochOutput {
     pub epoch_index: usize,
     pub solution_kind: PvtEpochSolutionKind,
@@ -196,6 +208,7 @@ pub struct PvtEpochOutput {
     pub lla_rad: [f64; 3],
     pub velocity: Option<PvtVelocityOutput>,
     pub quality: PvtQualityOutput,
+    pub satellites: Vec<PvtSatelliteOutput>,
 }
 
 impl ContinuousPvtEpochResult {
@@ -214,6 +227,7 @@ impl ContinuousPvtEpochResult {
             lla_rad: selection.lla.unwrap_or([0.0; 3]),
             velocity: selection.velocity,
             quality: selection.quality,
+            satellites: selection.satellites,
         }
     }
 
@@ -235,6 +249,7 @@ impl ContinuousPvtEpochResult {
                 clock_bias_s: Some(kalman.clock_bias_s),
                 velocity: Some(PvtVelocityOutput::from_kalman(kalman)),
                 quality: quality_from_position_and_kalman(position, kalman),
+                satellites: satellites_from_position(position),
             };
         }
         if let Some(smoothed) = self
@@ -252,6 +267,7 @@ impl ContinuousPvtEpochResult {
                     .as_ref()
                     .map(PvtVelocityOutput::from_velocity),
                 quality: quality_from_position(smoothed, None),
+                satellites: satellites_from_position(smoothed),
             };
         }
         if self.raw_solution.converged {
@@ -265,6 +281,7 @@ impl ContinuousPvtEpochResult {
                     .as_ref()
                     .map(PvtVelocityOutput::from_velocity),
                 quality: quality_from_position(&self.raw_solution, None),
+                satellites: satellites_from_position(&self.raw_solution),
             };
         }
         SelectedEpochSolution {
@@ -274,6 +291,7 @@ impl ContinuousPvtEpochResult {
             clock_bias_s: None,
             velocity: None,
             quality: quality_from_position(&self.raw_solution, None),
+            satellites: satellites_from_position(&self.raw_solution),
         }
     }
 
@@ -377,6 +395,24 @@ struct SelectedEpochSolution {
     clock_bias_s: Option<f64>,
     velocity: Option<PvtVelocityOutput>,
     quality: PvtQualityOutput,
+    satellites: Vec<PvtSatelliteOutput>,
+}
+
+fn satellites_from_position(position: &PvtSolution) -> Vec<PvtSatelliteOutput> {
+    position
+        .satellite_diagnostics
+        .iter()
+        .map(|diagnostic| PvtSatelliteOutput {
+            prn: diagnostic.prn,
+            azimuth_rad: diagnostic.azimuth_rad,
+            elevation_rad: diagnostic.elevation_rad,
+            residual_m: diagnostic.residual_m,
+            standardized_residual: diagnostic.standardized_residual,
+            pseudorange_sigma_m: diagnostic.pseudorange_sigma_m,
+            used_in_solution: true,
+            raim_excluded: false,
+        })
+        .collect()
 }
 
 fn quality_from_position(
@@ -917,6 +953,7 @@ fn zero_velocity_fallback(sigma_mps: f64) -> VelocitySolution {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pvt::PvtSatelliteDiagnostic;
 
     #[test]
     fn test_continuous_runner_solves_raw_and_smoothed_epochs() {
@@ -1414,6 +1451,21 @@ mod tests {
                 solution.n_sats = pseudoranges.len();
                 solution.used_prns = pseudoranges.iter().map(|pr| pr.prn).collect();
                 solution.residual_rms_m = 1.25;
+                solution.satellite_diagnostics = vec![PvtSatelliteDiagnostic {
+                    prn: 1,
+                    azimuth_rad: 1.25,
+                    elevation_rad: 0.75,
+                    residual_m: -0.4,
+                    standardized_residual: -0.2,
+                    pseudorange_sigma_m: 2.0,
+                    cn0_sigma_m: 0.0,
+                    elevation_sigma_m: 0.0,
+                    iono_sigma_m: 0.0,
+                    tracking_jitter_sigma_m: 0.0,
+                    weight: 0.25,
+                    iono_delay_m: 0.0,
+                    tropo_delay_m: 0.0,
+                }];
                 solution
             },
             |_, _| {
@@ -1440,6 +1492,14 @@ mod tests {
         assert!((velocity.speed_mps - 5.0).abs() < 1e-12);
         assert!((velocity.horizontal_speed_mps - 5.0).abs() < 1e-12);
         assert!((velocity.clock_drift_sps - 6.0 / C_LIGHT).abs() < 1e-15);
+        assert_eq!(output.satellites.len(), 1);
+        let satellite = &output.satellites[0];
+        assert_eq!(satellite.prn, 1);
+        assert_eq!(satellite.azimuth_rad, 1.25);
+        assert_eq!(satellite.elevation_rad, 0.75);
+        assert_eq!(satellite.residual_m, -0.4);
+        assert!(satellite.used_in_solution);
+        assert!(!satellite.raim_excluded);
     }
 
     fn four_prns(base_pseudorange_m: f64, receive_time_sow: f64) -> Vec<Pseudorange> {
