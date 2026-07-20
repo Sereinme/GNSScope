@@ -413,6 +413,7 @@ impl GnsscopeApp {
             self.status_message = "运行记录数据库不可用".to_string();
             return;
         };
+        self.settings = self.settings.normalized_for_processing();
         match library.create_run(&self.settings) {
             Ok(run) => {
                 self.history.insert(0, run.clone());
@@ -1293,10 +1294,9 @@ impl GnsscopeApp {
         let editable = self.selected_run_id.is_none() && self.active_run.is_none();
         div()
             .w(px(470.))
+            .flex_shrink_0()
             .h_full()
-            .absolute()
-            .right_0()
-            .top_0()
+            .overflow_y_scrollbar()
             .bg(palette.surface)
             .border_l_1()
             .border_color(palette.border)
@@ -1304,10 +1304,27 @@ impl GnsscopeApp {
             .p(px(20.))
             .child(
                 div()
-                    .text_size(px(16.))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(palette.text)
-                    .child("接收机详细配置"),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(16.))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(palette.text)
+                            .child("接收机详细配置"),
+                    )
+                    .child(
+                        Button::new("close-settings-drawer")
+                            .ghost()
+                            .text_color(palette.muted)
+                            .icon(IconName::CircleX)
+                            .tooltip("关闭详细配置")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.settings_open = false;
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(
                 div()
@@ -1870,24 +1887,31 @@ impl Render for GnsscopeApp {
                     .child(self.render_sidebar(palette, cx))
                     .child(
                         div()
-                            .relative()
                             .flex_1()
                             .min_w_0()
                             .h_full()
                             .flex()
-                            .flex_col()
-                            .child(self.render_header(palette, cx))
                             .child(
                                 div()
                                     .flex_1()
+                                    .min_w_0()
                                     .min_h_0()
-                                    .overflow_y_scrollbar()
-                                    .child(self.render_progress(palette))
-                                    .child(self.render_overview(palette)),
-                            )
-                            .children(
-                                self.timeline_visible
-                                    .then(|| self.render_timeline_bar(palette)),
+                                    .h_full()
+                                    .flex()
+                                    .flex_col()
+                                    .child(self.render_header(palette, cx))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .overflow_y_scrollbar()
+                                            .child(self.render_progress(palette))
+                                            .child(self.render_overview(palette)),
+                                    )
+                                    .children(
+                                        self.timeline_visible
+                                            .then(|| self.render_timeline_bar(palette)),
+                                    ),
                             )
                             .children(
                                 self.settings_open
@@ -2451,9 +2475,12 @@ mod position_quality_tests {
         valid.altitude_m = 70.0;
         let mut implausible = valid.clone();
         implausible.altitude_m = 1_123_486.0;
+        let mut stratospheric = valid.clone();
+        stratospheric.altitude_m = 90_225.0;
 
         assert!(pvt_position_is_displayable(&valid));
         assert!(!pvt_position_is_displayable(&implausible));
+        assert!(!pvt_position_is_displayable(&stratospheric));
         assert_eq!(
             altitude_statistics(&[valid, implausible]),
             "均值 70.0 m · 原始 σ 0.0 m · 70.0–70.0 m"

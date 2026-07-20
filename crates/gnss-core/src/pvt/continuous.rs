@@ -102,6 +102,8 @@ pub struct PositionQualityConfig {
     pub min_altitude_m: f64,
     /// Maximum plausible receiver altitude for the terrestrial receiver profile [m].
     pub max_altitude_m: f64,
+    /// Reject position solutions with post-fit pseudorange residual RMS above this value [m].
+    pub max_residual_rms_m: f64,
     /// Maximum implied receiver speed between accepted epochs [m/s].
     pub max_implied_speed_mps: f64,
     /// Fixed position-jump allowance for measurement noise and reacquisition [m].
@@ -112,7 +114,8 @@ impl Default for PositionQualityConfig {
     fn default() -> Self {
         Self {
             min_altitude_m: -2_000.0,
-            max_altitude_m: 100_000.0,
+            max_altitude_m: 20_000.0,
+            max_residual_rms_m: 1_000.0,
             max_implied_speed_mps: 12_000.0,
             jump_margin_m: 1_000.0,
         }
@@ -926,6 +929,8 @@ fn position_solution_is_acceptable(
     if !solution.converged
         || solution.ecef.iter().any(|value| !value.is_finite())
         || solution.lla.iter().any(|value| !value.is_finite())
+        || !solution.residual_rms_m.is_finite()
+        || solution.residual_rms_m > config.max_residual_rms_m.max(0.0)
         || !(config.min_altitude_m..=config.max_altitude_m).contains(&solution.lla[2])
     {
         return false;
@@ -1412,6 +1417,46 @@ mod tests {
             results[1].to_output().solution_kind,
             PvtEpochSolutionKind::Unconverged
         );
+    }
+
+    #[test]
+    fn test_default_position_quality_rejects_stratospheric_cold_start() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig::default());
+        let epochs = vec![PseudorangeEpoch {
+            pseudoranges: four_prns(20_000_000.0, 100.0),
+        }];
+        let bad_lla = [38.1403_f64.to_radians(), 0.5290_f64.to_radians(), 90_225.0];
+
+        let results = runner.solve_epochs_with(&epochs, |_| PvtSolution {
+            ecef: lla_to_ecef(bad_lla),
+            lla: bad_lla,
+            n_sats: 5,
+            residual_rms_m: 116_622.0,
+            converged: true,
+            ..Default::default()
+        });
+
+        assert!(!results[0].raw_solution.converged);
+    }
+
+    #[test]
+    fn test_default_position_quality_rejects_large_postfit_residual() {
+        let mut runner = ContinuousPvtRunner::new(ContinuousPvtConfig::default());
+        let epochs = vec![PseudorangeEpoch {
+            pseudoranges: four_prns(20_000_000.0, 100.0),
+        }];
+        let lla = [41.2747_f64.to_radians(), 1.9875_f64.to_radians(), 70.0];
+
+        let results = runner.solve_epochs_with(&epochs, |_| PvtSolution {
+            ecef: lla_to_ecef(lla),
+            lla,
+            n_sats: 5,
+            residual_rms_m: 116_622.0,
+            converged: true,
+            ..Default::default()
+        });
+
+        assert!(!results[0].raw_solution.converged);
     }
 
     #[test]

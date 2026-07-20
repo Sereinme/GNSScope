@@ -135,6 +135,34 @@ impl GuiProcessingSettings {
         config
     }
 
+    pub fn normalized_for_processing(&self) -> Self {
+        let mut settings = self.clone();
+        if settings.is_cttc_spain_reference_capture() {
+            settings.enable_integer_ms_ambiguity_resolution = true;
+            settings
+                .initial_position_lla_deg_m
+                .get_or_insert(StreamingPvtConfig::CTTC_SPAIN_APPROX_LLA_DEG_M);
+        }
+        settings
+    }
+
+    fn is_cttc_spain_reference_capture(&self) -> bool {
+        let file_matches = self
+            .iq_file_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .is_some_and(|name| {
+                name.to_string_lossy()
+                    .eq_ignore_ascii_case("2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat")
+            });
+        let signal_matches = (self.sample_rate_hz - 4_000_000.0).abs() < f64::EPSILON
+            && self.intermediate_frequency_hz.abs() < f64::EPSILON
+            && self.iq_format == GuiIqFormat::Int16Interleaved
+            && self.fixed_prns.as_deref()
+                == Some(StreamingPvtConfig::CTTC_SPAIN_GPS_L1_CA_PRNS.as_slice());
+        file_matches && signal_matches
+    }
+
     pub fn is_ready_to_process(&self) -> bool {
         self.iq_file_path.is_some()
             && self.sample_rate_hz.is_finite()
@@ -382,5 +410,34 @@ mod tests {
         assert!(config.continuous_pvt.integer_ms_ambiguity.is_some());
         assert!(config.continuous_pvt.initial_position_lla_rad.is_some());
         assert_eq!(config.continuous_pvt.wls.raim_max_exclusions, 0);
+    }
+
+    #[test]
+    fn test_legacy_cttc_settings_restore_coarse_position_prior() {
+        let settings: GuiProcessingSettings = serde_json::from_str(
+            r#"{
+                "iq_file_path":"data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat",
+                "sample_rate_hz":4000000.0,
+                "intermediate_frequency_hz":0.0,
+                "iq_format":"Int16Interleaved",
+                "enable_integer_ms_ambiguity_resolution":false,
+                "fixed_prns":[1,11,17,20,32]
+            }"#,
+        )
+        .expect("deserialize legacy CTTC settings");
+
+        assert!(!settings.enable_integer_ms_ambiguity_resolution);
+        let normalized = settings.normalized_for_processing();
+        let config = normalized.streaming_pvt_config();
+        let prior = config
+            .continuous_pvt
+            .initial_position_lla_rad
+            .expect("CTTC compatibility prior");
+
+        assert!((prior[0].to_degrees() - 41.2747).abs() < 1e-9);
+        assert!((prior[1].to_degrees() - 1.9875).abs() < 1e-9);
+        assert_eq!(prior[2], 60.0);
+        assert!(normalized.enable_integer_ms_ambiguity_resolution);
+        assert!(config.continuous_pvt.integer_ms_ambiguity.is_some());
     }
 }

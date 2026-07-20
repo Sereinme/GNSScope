@@ -67,6 +67,7 @@ fn test_streaming_runner_real_data_smoke() {
     let mut implausible_position_epochs = Vec::new();
     let mut converged_satellite_counts = Vec::new();
     let mut converged_altitudes_m = Vec::new();
+    let mut first_converged_epoch_index = None;
     let summary = runner
         .stream_iq_file_until_ms(max_ms, |step| {
             implausible_position_epochs.extend(step.events.iter().filter_map(|event| {
@@ -74,6 +75,7 @@ fn test_streaming_runner_real_data_smoke() {
                     return None;
                 };
                 if output.quality.converged {
+                    first_converged_epoch_index.get_or_insert(output.epoch_index);
                     converged_satellite_counts.push(output.quality.n_sats);
                     converged_altitudes_m.push(output.lla_rad[2]);
                 }
@@ -136,6 +138,13 @@ fn test_streaming_runner_real_data_smoke() {
     if max_ms >= 60_000 {
         assert!(summary.event_counts.nav_subframes > 0);
         assert!(summary.event_counts.pvt_outputs > 0);
+        let first_converged_epoch_index =
+            first_converged_epoch_index.expect("at least one converged CTTC PVT output");
+        eprintln!("first converged CTTC PVT epoch: {first_converged_epoch_index}");
+        assert!(
+            first_converged_epoch_index < 100,
+            "first converged CTTC PVT output arrived too late: {first_converged_epoch_index}"
+        );
         let time = &summary
             .latest_pvt_output
             .expect("latest streaming PVT")
