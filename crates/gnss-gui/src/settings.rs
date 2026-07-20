@@ -26,6 +26,8 @@ pub struct GuiProcessingSettings {
     pub enable_carrier_smoothing: bool,
     pub enable_kalman: bool,
     pub enable_integer_ms_ambiguity_resolution: bool,
+    pub enable_raim: bool,
+    pub initial_position_lla_deg_m: Option<[f64; 3]>,
     pub chunk_ms: usize,
     pub pvt_output_rate_ms: u64,
     pub average_doppler_over_pvt_epoch: bool,
@@ -64,6 +66,8 @@ impl Default for GuiProcessingSettings {
             enable_carrier_smoothing: true,
             enable_kalman: true,
             enable_integer_ms_ambiguity_resolution: true,
+            enable_raim: false,
+            initial_position_lla_deg_m: None,
             chunk_ms: 20,
             pvt_output_rate_ms: 1_000,
             average_doppler_over_pvt_epoch: true,
@@ -108,14 +112,27 @@ impl GuiProcessingSettings {
     }
 
     pub fn continuous_pvt_config(&self) -> ContinuousPvtConfig {
-        ContinuousPvtConfig {
+        let mut config = ContinuousPvtConfig {
             hatch: self.enable_carrier_smoothing.then(HatchConfig::default),
             integer_ms_ambiguity: self
                 .enable_integer_ms_ambiguity_resolution
                 .then(IntegerMsAmbiguityConfig::default),
+            initial_position_lla_rad: self.initial_position_lla_deg_m.map(
+                |[latitude_deg, longitude_deg, altitude_m]| {
+                    [
+                        latitude_deg.to_radians(),
+                        longitude_deg.to_radians(),
+                        altitude_m,
+                    ]
+                },
+            ),
             kalman: self.enable_kalman.then(KalmanConfig::default),
             ..Default::default()
+        };
+        if !self.enable_raim {
+            config.wls.raim_max_exclusions = 0;
         }
+        config
     }
 
     pub fn is_ready_to_process(&self) -> bool {
@@ -199,6 +216,8 @@ impl GuiProcessingSettings {
             enable_carrier_smoothing: false,
             enable_kalman: false,
             enable_integer_ms_ambiguity_resolution: true,
+            enable_raim: false,
+            initial_position_lla_deg_m: Some(StreamingPvtConfig::CTTC_SPAIN_APPROX_LLA_DEG_M),
             fixed_prns: Some(fixed_prns),
             ..Default::default()
         }
@@ -241,6 +260,7 @@ mod tests {
             enable_carrier_smoothing: false,
             enable_kalman: false,
             enable_integer_ms_ambiguity_resolution: false,
+            enable_raim: false,
             ..Default::default()
         };
 
@@ -249,6 +269,23 @@ mod tests {
         assert!(config.hatch.is_none());
         assert!(config.kalman.is_none());
         assert!(config.integer_ms_ambiguity.is_none());
+        assert_eq!(config.wls.raim_max_exclusions, 0);
+    }
+
+    #[test]
+    fn test_settings_enable_raim_with_wls_defaults() {
+        let settings = GuiProcessingSettings {
+            enable_raim: true,
+            ..Default::default()
+        };
+
+        let config = settings.continuous_pvt_config();
+
+        assert_eq!(
+            config.wls.raim_max_exclusions,
+            gnss_core::pvt::WlsConfig::default().raim_max_exclusions
+        );
+        assert!(config.wls.raim_max_exclusions > 0);
     }
 
     #[test]
@@ -343,5 +380,7 @@ mod tests {
         assert!(config.continuous_pvt.hatch.is_none());
         assert!(config.continuous_pvt.kalman.is_none());
         assert!(config.continuous_pvt.integer_ms_ambiguity.is_some());
+        assert!(config.continuous_pvt.initial_position_lla_rad.is_some());
+        assert_eq!(config.continuous_pvt.wls.raim_max_exclusions, 0);
     }
 }

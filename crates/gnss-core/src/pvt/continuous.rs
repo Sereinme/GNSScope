@@ -134,6 +134,9 @@ impl Default for VelocityQualityConfig {
 pub struct ContinuousPvtConfig {
     pub hatch: Option<HatchConfig>,
     pub integer_ms_ambiguity: Option<IntegerMsAmbiguityConfig>,
+    /// Optional coarse receiver position used only to bootstrap cold-start WLS
+    /// and integer-millisecond ambiguity resolution [lat rad, lon rad, alt m].
+    pub initial_position_lla_rad: Option<[f64; 3]>,
     pub ephemeris_selection: EphemerisSelectionConfig,
     pub kalman: Option<KalmanConfig>,
     pub velocity_quality: VelocityQualityConfig,
@@ -511,7 +514,8 @@ impl ContinuousPvtRunner {
         let wls = self.config.wls.clone();
         let apriori_ecef = has_apriori(rx_lat_rad, rx_lon_rad, rx_alt_m)
             .then(|| lla_to_ecef([rx_lat_rad, rx_lon_rad, rx_alt_m]))
-            .or_else(|| self.last_accepted_position.map(|position| position.ecef));
+            .or_else(|| self.last_accepted_position.map(|position| position.ecef))
+            .or_else(|| self.config.initial_position_lla_rad.map(lla_to_ecef));
         let solver_apriori = apriori_ecef
             .map(ecef_to_lla)
             .unwrap_or([rx_lat_rad, rx_lon_rad, rx_alt_m]);
@@ -561,7 +565,8 @@ impl ContinuousPvtRunner {
         let selection_config = self.config.ephemeris_selection.clone();
         let apriori_ecef = has_apriori(rx_lat_rad, rx_lon_rad, rx_alt_m)
             .then(|| lla_to_ecef([rx_lat_rad, rx_lon_rad, rx_alt_m]))
-            .or_else(|| self.last_accepted_position.map(|position| position.ecef));
+            .or_else(|| self.last_accepted_position.map(|position| position.ecef))
+            .or_else(|| self.config.initial_position_lla_rad.map(lla_to_ecef));
         let solver_apriori = apriori_ecef
             .map(ecef_to_lla)
             .unwrap_or([rx_lat_rad, rx_lon_rad, rx_alt_m]);

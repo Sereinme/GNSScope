@@ -139,6 +139,14 @@ fn settings_section(state: &GuiReceiverWorkspaceState) -> GuiScreenSection {
             None,
         ),
         control(
+            "enable_raim",
+            "RAIM",
+            GuiSettingControlKind::Toggle,
+            state.settings.enable_raim.to_string(),
+            true,
+            None,
+        ),
+        control(
             "start_processing",
             "Start",
             GuiSettingControlKind::Action,
@@ -507,6 +515,11 @@ mod tests {
         }));
         assert!(settings.controls.iter().any(|control| {
             control.id == "enable_kalman" && control.kind == GuiSettingControlKind::Toggle
+        }));
+        assert!(settings.controls.iter().any(|control| {
+            control.id == "enable_raim"
+                && control.kind == GuiSettingControlKind::Toggle
+                && control.value == "false"
         }));
         assert!(settings.controls.iter().any(|control| {
             control.id == "start_processing" && control.kind == GuiSettingControlKind::Action

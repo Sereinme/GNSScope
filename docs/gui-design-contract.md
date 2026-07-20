@@ -223,6 +223,8 @@ Absolute latitude, longitude, altitude, and ECEF remain visible as selected-epoc
 
 The altitude history preserves the raw accepted WLS curve and overlays a 10-point arithmetic moving-average trend. Its summary labels raw population sigma and 10-point population sigma separately. The moving average is a presentation statistic compatible with the supplied GNSS-SDR CTTC configuration; it is not a replacement PVT solution and must not bridge rejected or missing epochs.
 
+RAIM fault detection and exclusion is an advanced PVT toggle and defaults to disabled. Disabling it sets the WLS maximum sequential exclusions to zero; enabling it restores the solver's configured residual thresholds and exclusion limit. Physical position gates and integer-millisecond ambiguity resolution remain independent safeguards. Dataset presets may provide a coarse initial position to bootstrap integer-millisecond ambiguity resolution without RAIM; the prior is replaced by the first accepted solution and is never reported as an observation-derived result.
+
 Channel diagnostics should show:
 
 - PRN

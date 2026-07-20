@@ -548,6 +548,7 @@ impl Default for StreamingPvtConfig {
 
 impl StreamingPvtConfig {
     pub const CTTC_SPAIN_GPS_L1_CA_PRNS: [u8; 5] = [1, 11, 17, 20, 32];
+    pub const CTTC_SPAIN_APPROX_LLA_DEG_M: [f64; 3] = [41.2747, 1.9875, 60.0];
 
     pub fn cttc_fixed_prns(prns: Vec<u8>) -> Self {
         let acquisition = AcquisitionSchedulerConfig {
@@ -577,6 +578,13 @@ impl StreamingPvtConfig {
         config.acquisition_ring_ms = 10;
         config.continuous_pvt.integer_ms_ambiguity =
             Some(crate::pvt::IntegerMsAmbiguityConfig::default());
+        let [latitude_deg, longitude_deg, altitude_m] = Self::CTTC_SPAIN_APPROX_LLA_DEG_M;
+        config.continuous_pvt.initial_position_lla_rad = Some([
+            latitude_deg.to_radians(),
+            longitude_deg.to_radians(),
+            altitude_m,
+        ]);
+        config.continuous_pvt.wls.raim_max_exclusions = 0;
         config
     }
 
@@ -1976,6 +1984,8 @@ mod tests {
         assert!(config.average_doppler_over_pvt_epoch);
         assert!(config.parallel_tracking);
         assert!(config.continuous_pvt.integer_ms_ambiguity.is_some());
+        assert!(config.continuous_pvt.initial_position_lla_rad.is_some());
+        assert_eq!(config.continuous_pvt.wls.raim_max_exclusions, 0);
     }
 
     #[test]

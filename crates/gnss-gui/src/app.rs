@@ -379,6 +379,7 @@ impl GnsscopeApp {
             "parallel_tracking" => {
                 self.settings.parallel_tracking = !self.settings.parallel_tracking
             }
+            "enable_raim" => self.settings.enable_raim = !self.settings.enable_raim,
             _ => {}
         }
     }
@@ -1293,7 +1294,11 @@ impl GnsscopeApp {
                     ),
                     (
                         "PVT",
-                        format!("{} ms · epoch Doppler average", settings.pvt_output_rate_ms),
+                        format!(
+                            "{} ms · epoch Doppler average · RAIM {}",
+                            settings.pvt_output_rate_ms,
+                            if settings.enable_raim { "on" } else { "off" }
+                        ),
                     ),
                     (
                         "性能",
@@ -1357,6 +1362,13 @@ impl GnsscopeApp {
                         "epoch 多普勒平均",
                         self.settings.average_doppler_over_pvt_epoch,
                         "average_doppler_over_pvt_epoch",
+                        palette,
+                        cx,
+                    ))
+                    .child(self.render_setting_toggle(
+                        "RAIM 故障检测与排除",
+                        self.settings.enable_raim,
+                        "enable_raim",
                         palette,
                         cx,
                     ))
