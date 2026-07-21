@@ -360,6 +360,9 @@ pub struct AcquisitionScheduler {
     config: AcquisitionSchedulerConfig,
     last_cold_scan_ms: Option<u64>,
     last_reacq_scan_ms: Option<u64>,
+    cold_scan_cursor: u8,
+    cold_scan_round_active: bool,
+    reacq_scan_cursor: u8,
 }
 
 impl AcquisitionScheduler {
@@ -368,6 +371,9 @@ impl AcquisitionScheduler {
             config,
             last_cold_scan_ms: None,
             last_reacq_scan_ms: None,
+            cold_scan_cursor: 1,
+            cold_scan_round_active: false,
+            reacq_scan_cursor: 1,
         }
     }
 
@@ -385,29 +391,46 @@ impl AcquisitionScheduler {
             now_ms,
             self.config.reacq_interval_ms,
         ) {
-            let prns = limited(
+            let prns = limited_rotating(
                 manager.reacquisition_prns(),
                 self.config.max_acq_prns_per_scan,
+                self.reacq_scan_cursor,
             );
             if !prns.is_empty() {
+                self.reacq_scan_cursor = next_prn_after(*prns.last().expect("non-empty batch"));
                 self.last_reacq_scan_ms = Some(now_ms);
                 return Some(self.plan(AcquisitionScanKind::Reacquisition, prns));
             }
         }
 
-        if self.interval_due(
-            self.last_cold_scan_ms,
-            now_ms,
-            self.config.cold_acq_interval_ms,
-        ) {
-            let prns = limited(
-                self.cold_candidates(manager),
-                self.config.max_acq_prns_per_scan,
-            );
+        if self.cold_scan_round_active
+            || self.interval_due(
+                self.last_cold_scan_ms,
+                now_ms,
+                self.config.cold_acq_interval_ms,
+            )
+        {
+            let candidates = sorted_unique(self.cold_candidates(manager));
+            let prns = candidates
+                .iter()
+                .copied()
+                .filter(|prn| *prn >= self.cold_scan_cursor)
+                .take(self.config.max_acq_prns_per_scan)
+                .collect::<Vec<_>>();
             if !prns.is_empty() {
-                self.last_cold_scan_ms = Some(now_ms);
+                let last_prn = *prns.last().expect("non-empty batch");
+                self.cold_scan_round_active = candidates.iter().any(|prn| *prn > last_prn);
+                if self.cold_scan_round_active {
+                    self.cold_scan_cursor = next_prn_after(last_prn);
+                } else {
+                    self.cold_scan_cursor = 1;
+                    self.last_cold_scan_ms = Some(now_ms);
+                }
                 return Some(self.plan(AcquisitionScanKind::Cold, prns));
             }
+            self.cold_scan_cursor = 1;
+            self.cold_scan_round_active = false;
+            self.last_cold_scan_ms = Some(now_ms);
         }
 
         None
@@ -441,10 +464,28 @@ impl AcquisitionScheduler {
     }
 }
 
-fn limited(mut prns: Vec<u8>, max_len: usize) -> Vec<u8> {
+fn sorted_unique(mut prns: Vec<u8>) -> Vec<u8> {
     prns.sort_unstable();
-    prns.truncate(max_len);
+    prns.dedup();
     prns
+}
+
+fn limited_rotating(prns: Vec<u8>, max_len: usize, cursor: u8) -> Vec<u8> {
+    let prns = sorted_unique(prns);
+    prns.iter()
+        .copied()
+        .filter(|prn| *prn >= cursor)
+        .chain(prns.iter().copied().filter(|prn| *prn < cursor))
+        .take(prns.len().min(max_len))
+        .collect()
+}
+
+fn next_prn_after(prn: u8) -> u8 {
+    if prn >= 32 {
+        1
+    } else {
+        prn + 1
+    }
 }
 
 fn acquire_prns_sequential(
@@ -1993,6 +2034,60 @@ mod tests {
         let plan = scheduler.plan_scan(2, &manager).expect("cold plan");
         assert_eq!(plan.kind, AcquisitionScanKind::Cold);
         assert_eq!(plan.prns, vec![1, 17]);
+    }
+
+    #[test]
+    fn scheduler_completes_cold_scan_round_before_waiting_for_interval() {
+        let manager = ChannelManager::new(1..=12, ChannelAdmissionConfig::default());
+        let mut scheduler = AcquisitionScheduler::new(AcquisitionSchedulerConfig {
+            cold_acq_interval_ms: 10_000,
+            max_acq_prns_per_scan: 4,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            scheduler.plan_scan(0, &manager).expect("first batch").prns,
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            scheduler.plan_scan(1, &manager).expect("second batch").prns,
+            vec![5, 6, 7, 8]
+        );
+        assert_eq!(
+            scheduler.plan_scan(2, &manager).expect("third batch").prns,
+            vec![9, 10, 11, 12]
+        );
+        assert!(scheduler.plan_scan(3, &manager).is_none());
+    }
+
+    #[test]
+    fn scheduler_rotates_reacquisition_batches() {
+        let admission = ChannelAdmissionConfig {
+            probation_good_epochs: 1,
+            lost_bad_epochs: 1,
+            ..Default::default()
+        };
+        let mut manager = ChannelManager::new(1..=8, admission);
+        for prn in 1..=8 {
+            manager.accept_acquisition(acq(prn, 1_000.0 + prn as f64), 0);
+            let mut bad = good_obs(1_000.0 + prn as f64);
+            bad.cn0_db_hz = 0.0;
+            manager.observe_tracking(prn, bad, 1);
+        }
+        let mut scheduler = AcquisitionScheduler::new(AcquisitionSchedulerConfig {
+            reacq_interval_ms: 1,
+            max_acq_prns_per_scan: 4,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            scheduler.plan_scan(1, &manager).expect("first batch").prns,
+            vec![1, 2, 3, 4]
+        );
+        assert_eq!(
+            scheduler.plan_scan(2, &manager).expect("second batch").prns,
+            vec![5, 6, 7, 8]
+        );
     }
 
     #[test]

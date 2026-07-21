@@ -327,4 +327,53 @@ mod tests {
         assert!(matches!(events.last(), Some(WorkerEvent::Completed { .. })));
         let _ = std::fs::remove_file(path);
     }
+
+    #[test]
+    #[ignore = "processes real LabSat IQ through the GUI worker until PVT converges"]
+    fn real_labsat_gui_settings_acquire_full_constellation_and_produce_pvt() {
+        let iq_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data/202306202155/Data202306202155(2).dat");
+        if !iq_path.exists() {
+            eprintln!("SKIP: LabSat Int8 real IQ data not present");
+            return;
+        }
+        let mut settings = GuiProcessingSettings::default();
+        assert!(settings.select_iq_file(iq_path));
+        let settings = settings.normalized_for_processing();
+        assert!(settings.fixed_prns.is_none());
+
+        let (sender, receiver) = mpsc::channel();
+        let worker = spawn_streaming_worker(settings, sender);
+        let mut acquired_prns = BTreeSet::new();
+        let mut converged_pvt = None;
+        while let Ok(event) = receiver.recv() {
+            match event {
+                WorkerEvent::Diagnostic(event)
+                    if event.kind == GuiDiagnosticEventKind::Acquisition =>
+                {
+                    acquired_prns.extend(event.prn);
+                }
+                WorkerEvent::Epoch { pvt, .. } if pvt.quality.converged => {
+                    converged_pvt = Some(pvt);
+                    worker.cancel();
+                }
+                WorkerEvent::Cancelled { .. } | WorkerEvent::Completed { .. } => break,
+                WorkerEvent::Failed(message) => panic!("GUI worker failed: {message}"),
+                _ => {}
+            }
+        }
+
+        let pvt = converged_pvt.expect("converged GUI PVT output");
+        eprintln!(
+            "GUI LabSat PVT: acquired={acquired_prns:?}, lat={:.8}, lon={:.8}, alt={:.3} m, sats={:?}",
+            pvt.latitude_deg,
+            pvt.longitude_deg,
+            pvt.altitude_m,
+            pvt.quality.used_prns
+        );
+        assert!(acquired_prns.len() >= 4, "acquired PRNs: {acquired_prns:?}");
+        assert!(pvt.quality.n_sats >= 4);
+        assert!((pvt.latitude_deg - 40.00154).abs() < 0.01);
+        assert!((pvt.longitude_deg - 116.33028).abs() < 0.01);
+    }
 }
