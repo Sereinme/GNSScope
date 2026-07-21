@@ -38,13 +38,15 @@ if (-not (Test-Path -LiteralPath $binaryPath)) {
 
 New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
 $layouts = @(
-    @{ Name = "desktop"; Width = 1440; Height = 900; Theme = "dark"; SettingsCategory = "input"; OpenSettings = $false; OpenComparison = $false },
-    @{ Name = "compact-drawer"; Width = 1100; Height = 800; Theme = "dark"; SettingsCategory = "input"; OpenSettings = $true; OpenComparison = $false },
-    @{ Name = "settings-tracking"; Width = 1440; Height = 900; Theme = "dark"; SettingsCategory = "tracking"; OpenSettings = $true; OpenComparison = $false },
-    @{ Name = "settings-light"; Width = 1440; Height = 900; Theme = "light"; SettingsCategory = "input"; OpenSettings = $true; OpenComparison = $false },
-    @{ Name = "candidate-comparison"; Width = 1440; Height = 900; Theme = "dark"; SettingsCategory = "input"; OpenSettings = $false; OpenComparison = $true },
-    @{ Name = "candidate-comparison-compact"; Width = 1100; Height = 800; Theme = "dark"; SettingsCategory = "input"; OpenSettings = $false; OpenComparison = $true },
-    @{ Name = "narrow"; Width = 800; Height = 720; Theme = "dark"; SettingsCategory = "input"; OpenSettings = $false; OpenComparison = $false }
+    @{ Name = "desktop"; Width = 1440; Height = 900; Theme = "dark"; Language = "zh-CN"; InterfaceSettings = $false; SettingsCategory = "input"; OpenSettings = $false; OpenComparison = $false },
+    @{ Name = "compact-drawer"; Width = 1100; Height = 800; Theme = "dark"; Language = "zh-CN"; InterfaceSettings = $false; SettingsCategory = "input"; OpenSettings = $true; OpenComparison = $false },
+    @{ Name = "settings-tracking"; Width = 1440; Height = 900; Theme = "dark"; Language = "zh-CN"; InterfaceSettings = $false; SettingsCategory = "tracking"; OpenSettings = $true; OpenComparison = $false },
+    @{ Name = "settings-light"; Width = 1440; Height = 900; Theme = "light"; Language = "zh-CN"; InterfaceSettings = $false; SettingsCategory = "input"; OpenSettings = $true; OpenComparison = $false },
+    @{ Name = "interface-settings"; Width = 1440; Height = 900; Theme = "dark"; Language = "zh-CN"; InterfaceSettings = $true; SettingsCategory = "input"; OpenSettings = $false; OpenComparison = $false },
+    @{ Name = "interface-settings-english"; Width = 1100; Height = 800; Theme = "light"; Language = "en"; InterfaceSettings = $true; SettingsCategory = "input"; OpenSettings = $false; OpenComparison = $false },
+    @{ Name = "candidate-comparison"; Width = 1440; Height = 900; Theme = "dark"; Language = "zh-CN"; InterfaceSettings = $false; SettingsCategory = "input"; OpenSettings = $false; OpenComparison = $true },
+    @{ Name = "candidate-comparison-compact"; Width = 1100; Height = 800; Theme = "dark"; Language = "zh-CN"; InterfaceSettings = $false; SettingsCategory = "input"; OpenSettings = $false; OpenComparison = $true },
+    @{ Name = "narrow"; Width = 800; Height = 720; Theme = "dark"; Language = "zh-CN"; InterfaceSettings = $false; SettingsCategory = "input"; OpenSettings = $false; OpenComparison = $false }
 )
 
 foreach ($layout in $layouts) {
@@ -55,6 +57,8 @@ foreach ($layout in $layouts) {
     $processInfo.Environment["GNSSCOPE_WINDOW_HEIGHT"] = $layout.Height.ToString()
     $processInfo.Environment["GNSSCOPE_PREVIEW"] = "1"
     $processInfo.Environment["GNSSCOPE_THEME"] = $layout.Theme
+    $processInfo.Environment["GNSSCOPE_LANGUAGE"] = $layout.Language
+    $processInfo.Environment["GNSSCOPE_OPEN_INTERFACE_SETTINGS"] = if ($layout.InterfaceSettings) { "1" } else { "0" }
     $processInfo.Environment["GNSSCOPE_SETTINGS_CATEGORY"] = $layout.SettingsCategory
     $processInfo.Environment["GNSSCOPE_OPEN_SETTINGS"] = if ($layout.OpenSettings) { "1" } else { "0" }
     $processInfo.Environment["GNSSCOPE_OPEN_COMPARISON"] = if ($layout.OpenComparison) { "1" } else { "0" }

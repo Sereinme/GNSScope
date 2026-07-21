@@ -16,6 +16,7 @@ use gpui_component::{
     progress::Progress,
     scroll::ScrollableElement,
     slider::{Slider, SliderEvent, SliderState},
+    switch::Switch,
     ActiveTheme, Disableable, IconName, Theme, ThemeMode, TitleBar,
 };
 use std::collections::{BTreeMap, VecDeque};
@@ -122,11 +123,23 @@ fn parse_initial_lla(value: &str) -> Result<Option<[f64; 3]>, ()> {
         .map(Some)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ThemePreference {
     System,
     Light,
     Dark,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InterfaceLanguage {
+    SimplifiedChinese,
+    English,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppPage {
+    Workspace,
+    InterfaceSettings,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -249,14 +262,6 @@ impl ThemePreference {
         }
     }
 
-    fn next(self) -> Self {
-        match self {
-            Self::System => Self::Light,
-            Self::Light => Self::Dark,
-            Self::Dark => Self::System,
-        }
-    }
-
     fn value(self) -> &'static str {
         match self {
             Self::System => "system",
@@ -264,12 +269,20 @@ impl ThemePreference {
             Self::Dark => "dark",
         }
     }
+}
 
-    fn label(self) -> &'static str {
+impl InterfaceLanguage {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("en") | Some("english") => Self::English,
+            _ => Self::SimplifiedChinese,
+        }
+    }
+
+    fn value(self) -> &'static str {
         match self {
-            Self::System => "系统",
-            Self::Light => "浅色",
-            Self::Dark => "深色",
+            Self::SimplifiedChinese => "zh-CN",
+            Self::English => "en",
         }
     }
 }
@@ -351,6 +364,8 @@ pub struct GnsscopeApp {
     focused_plot: Option<PlotFocus>,
     follow_live: bool,
     theme_preference: ThemePreference,
+    interface_language: InterfaceLanguage,
+    page: AppPage,
     system_dark: bool,
     side_drawer: Option<SideDrawer>,
     settings_category: SettingsCategory,
@@ -379,6 +394,14 @@ impl GnsscopeApp {
             .as_deref()
             .map(|value| ThemePreference::parse(Some(value)))
             .unwrap_or_else(|| ThemePreference::parse(stored_theme.as_deref()));
+        let stored_language = library
+            .as_ref()
+            .and_then(|library| library.preference("interface_language").ok().flatten());
+        let interface_language = std::env::var("GNSSCOPE_LANGUAGE")
+            .ok()
+            .as_deref()
+            .map(|value| InterfaceLanguage::parse(Some(value)))
+            .unwrap_or_else(|| InterfaceLanguage::parse(stored_language.as_deref()));
         match theme_preference {
             ThemePreference::System => Theme::sync_system_appearance(Some(window), cx),
             ThemePreference::Light => Theme::change(ThemeMode::Light, Some(window), cx),
@@ -412,7 +435,10 @@ impl GnsscopeApp {
         .detach();
         let history_search = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("搜索文件名或路径")
+                .placeholder(match interface_language {
+                    InterfaceLanguage::SimplifiedChinese => "搜索文件名或路径",
+                    InterfaceLanguage::English => "Search file name or path",
+                })
                 .clean_on_escape()
         });
         cx.subscribe(&history_search, |_, _, event: &InputEvent, cx| {
@@ -491,6 +517,14 @@ impl GnsscopeApp {
             focused_plot: None,
             follow_live: true,
             theme_preference,
+            interface_language,
+            page: if std::env::var("GNSSCOPE_OPEN_INTERFACE_SETTINGS")
+                .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            {
+                AppPage::InterfaceSettings
+            } else {
+                AppPage::Workspace
+            },
             system_dark: cx.theme().mode.is_dark(),
             side_drawer: if std::env::var("GNSSCOPE_OPEN_COMPARISON")
                 .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
@@ -509,6 +543,10 @@ impl GnsscopeApp {
             timeline_visible,
             status_message: "请选择 IQ 文件开始解算".to_string(),
         };
+        if let Some(settings) = app.selected_run().map(|run| run.settings.clone()) {
+            app.settings = settings;
+            app.sync_setting_inputs(window, cx);
+        }
         if std::env::var("GNSSCOPE_PREVIEW")
             .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         {
@@ -541,8 +579,13 @@ impl GnsscopeApp {
         }
     }
 
-    fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.theme_preference = self.theme_preference.next();
+    fn set_theme_preference(
+        &mut self,
+        preference: ThemePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.theme_preference = preference;
         match self.theme_preference {
             ThemePreference::System => Theme::sync_system_appearance(Some(window), cx),
             ThemePreference::Light => Theme::change(ThemeMode::Light, Some(window), cx),
@@ -554,17 +597,40 @@ impl GnsscopeApp {
         }
     }
 
-    fn toggle_timeline_visibility(&mut self) {
-        self.timeline_visible = !self.timeline_visible;
-        if let Some(library) = &self.library {
-            let _ = library.set_preference(
-                "timeline_visible",
-                if self.timeline_visible {
-                    "true"
-                } else {
-                    "false"
+    fn set_interface_language(
+        &mut self,
+        language: InterfaceLanguage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.interface_language = language;
+        self.history_search.update(cx, |input, cx| {
+            input.set_placeholder(
+                match language {
+                    InterfaceLanguage::SimplifiedChinese => "搜索文件名或路径",
+                    InterfaceLanguage::English => "Search file name or path",
                 },
+                window,
+                cx,
             );
+        });
+        if let Some(library) = &self.library {
+            let _ = library.set_preference("interface_language", language.value());
+        }
+    }
+
+    fn localized(&self, simplified_chinese: &'static str, english: &'static str) -> &'static str {
+        match self.interface_language {
+            InterfaceLanguage::SimplifiedChinese => simplified_chinese,
+            InterfaceLanguage::English => english,
+        }
+    }
+
+    fn set_timeline_visibility(&mut self, visible: bool) {
+        self.timeline_visible = visible;
+        if let Some(library) = &self.library {
+            let _ =
+                library.set_preference("timeline_visible", if visible { "true" } else { "false" });
         }
     }
 
@@ -610,14 +676,19 @@ impl GnsscopeApp {
         .detach();
     }
 
-    fn apply_cttc_preset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.settings.iq_file_path.clone() else {
-            self.status_message = "请先选择 CTTC IQ 文件".to_string();
-            return;
+    fn reset_receiver_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let iq_file_path = self.settings.iq_file_path.clone();
+        self.settings = GuiProcessingSettings {
+            iq_file_path,
+            ..Default::default()
         };
-        self.settings = GuiProcessingSettings::cttc_spain(path);
         self.sync_setting_inputs(window, cx);
-        self.status_message = "已应用 CTTC Spain 4 Msps / Int16 预设".to_string();
+        self.status_message = self
+            .localized(
+                "接收机配置已恢复默认",
+                "Receiver settings restored to defaults",
+            )
+            .to_string();
     }
 
     fn apply_setting_text(&mut self, field: &'static str, value: &str) {
@@ -704,22 +775,7 @@ impl GnsscopeApp {
         }
     }
 
-    fn edit_selected_configuration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(settings) = self.selected_run().map(|run| run.settings.clone()) else {
-            return;
-        };
-        self.settings = settings;
-        self.selected_run_id = None;
-        self.selected_epoch = None;
-        self.follow_live = false;
-        self.sync_setting_inputs(window, cx);
-        self.status_message = "历史配置已复制为可编辑草稿".to_string();
-    }
-
     fn cycle_iq_format(&mut self) {
-        if self.selected_run_id.is_some() || self.active_run.is_some() {
-            return;
-        }
         self.settings.iq_format = match self.settings.iq_format {
             crate::GuiIqFormat::Int8Interleaved => crate::GuiIqFormat::Int16Interleaved,
             crate::GuiIqFormat::Int16Interleaved => crate::GuiIqFormat::Int8Interleaved,
@@ -727,9 +783,6 @@ impl GnsscopeApp {
     }
 
     fn toggle_setting(&mut self, field: &'static str) {
-        if self.selected_run_id.is_some() || self.active_run.is_some() {
-            return;
-        }
         match field {
             "average_doppler_over_pvt_epoch" => {
                 self.settings.average_doppler_over_pvt_epoch =
@@ -793,10 +846,6 @@ impl GnsscopeApp {
     }
 
     fn enqueue_selected_or_draft(&mut self) {
-        if let Some(settings) = self.selected_run().map(|run| run.settings.clone()) {
-            self.settings = settings;
-            self.setting_parse_errors.clear();
-        }
         self.enqueue();
     }
 
@@ -1097,6 +1146,16 @@ impl GnsscopeApp {
     }
 
     fn select_run(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(settings) = self
+            .active_run
+            .as_ref()
+            .filter(|run| run.id == id)
+            .or_else(|| self.history.iter().find(|run| run.id == id))
+            .map(|run| run.settings.clone())
+        {
+            self.settings = settings;
+            self.sync_setting_inputs(window, cx);
+        }
         self.selected_run_id = Some(id);
         self.follow_live = self.live_run_id == Some(id) && self.active_run.is_some();
         self.timeline.update(cx, |timeline, cx| {
@@ -1154,14 +1213,8 @@ impl GnsscopeApp {
         })
     }
 
-    fn display_settings(&self) -> &GuiProcessingSettings {
-        self.selected_run()
-            .map(|run| &run.settings)
-            .unwrap_or(&self.settings)
-    }
-
     fn settings_issues(&self) -> Vec<GuiSettingsIssue> {
-        crate::state::validate_settings(&self.display_settings().normalized_for_processing())
+        crate::state::validate_settings(&self.settings.normalized_for_processing())
     }
 
     fn can_enqueue(&self) -> bool {
@@ -1176,7 +1229,10 @@ impl GnsscopeApp {
             .or(self.settings.iq_file_path.as_ref())
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "未选择数据文件".to_string())
+            .unwrap_or_else(|| {
+                self.localized("未选择数据文件", "No data file selected")
+                    .to_string()
+            })
             .into()
     }
 
@@ -1251,7 +1307,7 @@ impl GnsscopeApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_active = self.active_run.is_some();
-        let settings = self.display_settings();
+        let settings = &self.settings;
         let source_summary = format!(
             "GPS L1 C/A  ·  {:.3} Msps  ·  IF {:.3} MHz  ·  {:?}",
             settings.sample_rate_hz / 1e6,
@@ -1298,7 +1354,7 @@ impl GnsscopeApp {
                             .ghost()
                             .text_color(palette.text)
                             .icon(IconName::FolderOpen)
-                            .tooltip("选择 IQ 文件")
+                            .tooltip(self.localized("选择 IQ 文件", "Select IQ file"))
                             .on_click(cx.listener(|this, _, _, cx| this.select_file(cx))),
                     )
                     .child(
@@ -1335,37 +1391,20 @@ impl GnsscopeApp {
                             .ghost()
                             .text_color(palette.accent)
                             .icon(IconName::Redo2)
-                            .tooltip("返回最新 epoch")
+                            .tooltip(self.localized("返回最新 epoch", "Return to latest epoch"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.return_to_live(window, cx);
                                 cx.notify();
                             }))
                     }))
                     .child(
-                        Button::new("timeline-visibility")
-                            .ghost()
-                            .text_color(palette.text)
-                            .icon(if self.timeline_visible {
-                                IconName::PanelBottom
-                            } else {
-                                IconName::PanelBottomOpen
-                            })
-                            .tooltip(if self.timeline_visible {
-                                "隐藏 epoch 时间轴"
-                            } else {
-                                "显示 epoch 时间轴"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_timeline_visibility();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
                         Button::new("settings")
                             .ghost()
                             .text_color(palette.text)
                             .icon(IconName::Settings2)
-                            .tooltip("接收机详细配置")
+                            .tooltip(
+                                self.localized("接收机详细配置", "Receiver processing settings"),
+                            )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.side_drawer =
                                     toggled_side_drawer(this.side_drawer, SideDrawer::Settings);
@@ -1376,19 +1415,24 @@ impl GnsscopeApp {
                         Button::new("cancel")
                             .danger()
                             .icon(IconName::CircleX)
-                            .tooltip("取消当前解算")
+                            .tooltip(self.localized("取消当前解算", "Cancel current solution"))
                             .on_click(cx.listener(|this, _, _, _| this.cancel_active()))
                     } else if self.selected_run_id.is_some() {
                         Button::new("run")
                             .primary()
                             .icon(IconName::Replace)
-                            .tooltip("按此配置重新解算")
+                            .tooltip(
+                                self.localized(
+                                    "按此配置重新解算",
+                                    "Reprocess with this configuration",
+                                ),
+                            )
                             .disabled(!self.can_enqueue())
                             .on_click(cx.listener(|this, _, _, _| this.enqueue_selected_or_draft()))
                     } else {
                         Button::new("run")
                             .primary()
-                            .label("开始解算")
+                            .label(self.localized("开始解算", "Start processing"))
                             .disabled(!self.can_enqueue())
                             .on_click(cx.listener(|this, _, _, _| this.enqueue_selected_or_draft()))
                     }),
@@ -1446,7 +1490,7 @@ impl GnsscopeApp {
                 this.w(px(258.)).min_w(px(220.)).h_full().border_r_1()
             })
             .when(stacked, |this| {
-                this.w_full().h(px(170.)).flex_shrink_0().border_b_1()
+                this.w_full().h(px(190.)).flex_shrink_0().border_b_1()
             })
             .bg(palette.sidebar)
             .border_color(palette.border)
@@ -1458,7 +1502,7 @@ impl GnsscopeApp {
                     .px(px(16.))
                     .flex()
                     .items_center()
-                    .justify_between()
+                    .justify_start()
                     .border_b_1()
                     .border_color(palette.border)
                     .child(
@@ -1476,22 +1520,12 @@ impl GnsscopeApp {
                                     .text_color(palette.muted)
                                     .child("GNSS SIGNAL LAB"),
                             ),
-                    )
-                    .child(
-                        Button::new("theme")
-                            .ghost()
-                            .text_color(palette.text)
-                            .icon(IconName::Palette)
-                            .tooltip(format!("主题：{}", self.theme_preference.label()))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.cycle_theme(window, cx);
-                                cx.notify();
-                            })),
                     ),
             )
             .child(
                 div()
                     .flex_1()
+                    .min_h_0()
                     .overflow_y_scrollbar()
                     .p(px(12.))
                     .child(
@@ -1499,7 +1533,7 @@ impl GnsscopeApp {
                             .text_size(px(10.))
                             .text_color(palette.muted)
                             .mb(px(7.))
-                            .child("当前任务"),
+                            .child(self.localized("当前任务", "Current task")),
                     )
                     .children(active)
                     .when(self.active_run.is_none(), |this| {
@@ -1508,7 +1542,7 @@ impl GnsscopeApp {
                                 .p(px(10.))
                                 .text_size(px(11.))
                                 .text_color(palette.muted)
-                                .child("暂无运行中的任务"),
+                                .child(self.localized("暂无运行中的任务", "No active task")),
                         )
                     })
                     .child(
@@ -1517,7 +1551,14 @@ impl GnsscopeApp {
                             .text_size(px(10.))
                             .text_color(palette.muted)
                             .mb(px(7.))
-                            .child(format!("等待队列  {}", self.queue.len())),
+                            .child(match self.interface_language {
+                                InterfaceLanguage::SimplifiedChinese => {
+                                    format!("等待队列  {}", self.queue.len())
+                                }
+                                InterfaceLanguage::English => {
+                                    format!("Queue  {}", self.queue.len())
+                                }
+                            }),
                     )
                     .children(self.queue.iter().enumerate().map(|(index, run)| {
                         let id = run.id;
@@ -1552,7 +1593,7 @@ impl GnsscopeApp {
                                         Button::new(SharedString::from(format!("queue-up-{id}")))
                                             .ghost()
                                             .icon(IconName::ChevronUp)
-                                            .tooltip("上移")
+                                            .tooltip(self.localized("上移", "Move up"))
                                             .disabled(index == 0)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.move_queued(id, -1);
@@ -1563,7 +1604,7 @@ impl GnsscopeApp {
                                         Button::new(SharedString::from(format!("queue-down-{id}")))
                                             .ghost()
                                             .icon(IconName::ChevronDown)
-                                            .tooltip("下移")
+                                            .tooltip(self.localized("下移", "Move down"))
                                             .disabled(index + 1 == self.queue.len())
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.move_queued(id, 1);
@@ -1576,7 +1617,7 @@ impl GnsscopeApp {
                                         )))
                                         .ghost()
                                         .icon(IconName::CircleX)
-                                        .tooltip("取消排队")
+                                        .tooltip(self.localized("取消排队", "Remove from queue"))
                                         .on_click(
                                             cx.listener(move |this, _, _, cx| {
                                                 this.cancel_queued(id);
@@ -1597,14 +1638,29 @@ impl GnsscopeApp {
                                 div()
                                     .text_size(px(10.))
                                     .text_color(palette.muted)
-                                    .child("历史记录"),
+                                    .child(self.localized("历史记录", "History")),
                             )
                             .child(
                                 Button::new("history-filter")
                                     .ghost()
                                     .icon(IconName::SortDescending)
-                                    .label(self.history_filter.label())
-                                    .tooltip("切换历史状态过滤")
+                                    .label(match (self.interface_language, self.history_filter) {
+                                        (InterfaceLanguage::SimplifiedChinese, filter) => {
+                                            filter.label()
+                                        }
+                                        (InterfaceLanguage::English, HistoryFilter::All) => "All",
+                                        (InterfaceLanguage::English, HistoryFilter::Completed) => {
+                                            "Completed"
+                                        }
+                                        (
+                                            InterfaceLanguage::English,
+                                            HistoryFilter::NeedsAttention,
+                                        ) => "Needs attention",
+                                    })
+                                    .tooltip(self.localized(
+                                        "切换历史状态过滤",
+                                        "Cycle history status filter",
+                                    ))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.history_filter = this.history_filter.next();
                                         cx.notify();
@@ -1649,6 +1705,7 @@ impl GnsscopeApp {
                                     })
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.page = AppPage::Workspace;
                                         this.select_run(id, window, cx);
                                         cx.notify();
                                     }))
@@ -1704,7 +1761,10 @@ impl GnsscopeApp {
                                                 .ghost()
                                                 .text_color(palette.muted)
                                                 .icon(IconName::FolderOpen)
-                                                .tooltip("在文件管理器中定位")
+                                                .tooltip(self.localized(
+                                                    "在文件管理器中定位",
+                                                    "Reveal in file manager",
+                                                ))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.reveal_source_file(id);
                                                     cx.notify();
@@ -1717,7 +1777,10 @@ impl GnsscopeApp {
                                                 .ghost()
                                                 .text_color(palette.muted)
                                                 .icon(IconName::Delete)
-                                                .tooltip("删除历史记录")
+                                                .tooltip(self.localized(
+                                                    "删除历史记录",
+                                                    "Delete history entry",
+                                                ))
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.delete_historical_run(id);
                                                     cx.notify();
@@ -1727,6 +1790,299 @@ impl GnsscopeApp {
                             }),
                     ),
             )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .border_t_1()
+                    .border_color(palette.border)
+                    .child(
+                        Button::new("interface-settings-page")
+                            .w_full()
+                            .ghost()
+                            .justify_start()
+                            .text_color(if self.page == AppPage::InterfaceSettings {
+                                palette.accent
+                            } else {
+                                palette.text
+                            })
+                            .bg(palette.sidebar)
+                            .icon(IconName::Settings2)
+                            .label(self.localized("界面设置", "Interface settings"))
+                            .tooltip(self.localized("打开界面设置", "Open interface settings"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.page = AppPage::InterfaceSettings;
+                                this.side_drawer = None;
+                                this.focused_plot = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+    }
+
+    fn render_interface_setting_section(
+        &self,
+        icon: IconName,
+        title: &'static str,
+        description: &'static str,
+        control: AnyElement,
+        palette: Palette,
+    ) -> impl IntoElement {
+        div()
+            .p(px(20.))
+            .rounded(px(8.))
+            .bg(palette.surface)
+            .border_1()
+            .border_color(palette.border)
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .size(px(34.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(7.))
+                            .bg(palette.accent.opacity(0.12))
+                            .text_color(palette.accent)
+                            .child(icon),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(palette.text)
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(4.))
+                                    .text_size(px(10.))
+                                    .text_color(palette.muted)
+                                    .child(description),
+                            ),
+                    ),
+            )
+            .child(div().mt(px(18.)).child(control))
+    }
+
+    fn render_interface_settings(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let language = self.interface_language;
+        let theme_control = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(8.))
+            .children(
+                [
+                    (ThemePreference::System, IconName::Palette, "系统", "System"),
+                    (ThemePreference::Light, IconName::Sun, "浅色", "Light"),
+                    (ThemePreference::Dark, IconName::Moon, "深色", "Dark"),
+                ]
+                .into_iter()
+                .map(|(preference, icon, chinese, english)| {
+                    let active = self.theme_preference == preference;
+                    let button = Button::new(SharedString::from(format!(
+                        "interface-theme-{}",
+                        preference.value()
+                    )))
+                    .icon(icon)
+                    .label(match language {
+                        InterfaceLanguage::SimplifiedChinese => chinese,
+                        InterfaceLanguage::English => english,
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_theme_preference(preference, window, cx);
+                        cx.notify();
+                    }));
+                    if active {
+                        button.primary()
+                    } else {
+                        button
+                            .ghost()
+                            .text_color(palette.text)
+                            .border_1()
+                            .border_color(palette.border)
+                    }
+                }),
+            )
+            .into_any_element();
+
+        let language_control = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(8.))
+            .children(
+                [
+                    (InterfaceLanguage::SimplifiedChinese, "简体中文"),
+                    (InterfaceLanguage::English, "English"),
+                ]
+                .into_iter()
+                .map(|(option, label)| {
+                    let active = language == option;
+                    let button = Button::new(SharedString::from(format!(
+                        "interface-language-{}",
+                        option.value()
+                    )))
+                    .icon(IconName::Globe)
+                    .label(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_interface_language(option, window, cx);
+                        cx.notify();
+                    }));
+                    if active {
+                        button.primary()
+                    } else {
+                        button
+                            .ghost()
+                            .text_color(palette.text)
+                            .border_1()
+                            .border_color(palette.border)
+                    }
+                }),
+            )
+            .into_any_element();
+
+        let timeline_control = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .p(px(12.))
+            .rounded(px(6.))
+            .bg(palette.surface_alt)
+            .border_1()
+            .border_color(palette.border)
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(palette.text)
+                    .child(self.localized(
+                        "在主界面底部固定显示 epoch 滑块",
+                        "Keep the epoch slider fixed at the bottom of the workspace",
+                    )),
+            )
+            .child(
+                Button::new("interface-timeline-visible")
+                    .icon(if self.timeline_visible {
+                        IconName::Eye
+                    } else {
+                        IconName::EyeOff
+                    })
+                    .label(if self.timeline_visible {
+                        self.localized("显示", "Visible")
+                    } else {
+                        self.localized("隐藏", "Hidden")
+                    })
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_timeline_visibility(!this.timeline_visible);
+                        cx.notify();
+                    })),
+            )
+            .into_any_element();
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(900.))
+                    .mx_auto()
+                    .px(px(28.))
+                    .py(px(30.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .child(
+                                        div()
+                                            .text_size(px(22.))
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(palette.text)
+                                            .child(self.localized(
+                                                "界面设置",
+                                                "Interface settings",
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt(px(6.))
+                                            .text_size(px(11.))
+                                            .text_color(palette.muted)
+                                            .child(self.localized(
+                                                "统一管理 GNSScope 的外观与工作区显示偏好",
+                                                "Manage GNSScope appearance and workspace display preferences",
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                Button::new("close-interface-settings")
+                                    .ghost()
+                                    .icon(IconName::ArrowLeft)
+                                    .tooltip(self.localized("返回工作台", "Back to workspace"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.page = AppPage::Workspace;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt(px(24.))
+                            .child(self.render_interface_setting_section(
+                                IconName::Palette,
+                                self.localized("外观主题", "Appearance theme"),
+                                self.localized(
+                                    "跟随系统，或固定使用浅色与深色主题。更改会立即应用。",
+                                    "Follow the system or use a fixed light or dark theme. Changes apply immediately.",
+                                ),
+                                theme_control,
+                                palette,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .mt(px(12.))
+                            .child(self.render_interface_setting_section(
+                                IconName::Globe,
+                                self.localized("界面语言", "Interface language"),
+                                self.localized(
+                                    "选择界面导航与设置页面使用的语言。",
+                                    "Choose the language used by interface navigation and settings.",
+                                ),
+                                language_control,
+                                palette,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .mt(px(12.))
+                            .child(self.render_interface_setting_section(
+                                IconName::PanelBottom,
+                                self.localized("Epoch 时间轴", "Epoch timeline"),
+                                self.localized(
+                                    "控制右侧主工作区底部的 epoch 选择滑块是否可见。",
+                                    "Control whether the epoch selection slider is visible at the bottom of the workspace.",
+                                ),
+                                timeline_control,
+                                palette,
+                            )),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_progress(&self, palette: Palette) -> impl IntoElement {
@@ -1849,9 +2205,7 @@ impl GnsscopeApp {
         compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let settings = self.display_settings();
         let issues = self.settings_issues();
-        let editable = self.selected_run_id.is_none() && self.active_run.is_none();
         let category = self.settings_category;
         let issue_count = issues.len() + self.setting_parse_errors.len();
         div()
@@ -1889,78 +2243,36 @@ impl GnsscopeApp {
                                             .mt(px(4.))
                                             .text_size(px(10.))
                                             .text_color(palette.muted)
-                                            .child(if editable {
-                                                "更改将作为下一次解算的配置快照"
-                                            } else {
-                                                "历史任务快照 · 只读"
-                                            }),
+                                            .child("直接修改 · 更改用于下一次解算"),
                                     ),
                             )
-                            .child(
-                                Button::new("close-settings-drawer")
-                                    .ghost()
-                                    .icon(IconName::CircleX)
-                                    .tooltip("关闭接收机配置")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.side_drawer = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mt(px(14.))
-                            .flex()
-                            .items_center()
-                            .justify_between()
                             .child(
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap(px(8.))
-                                    .text_size(px(11.))
-                                    .text_color(palette.text)
-                                    .child(IconName::Eye)
-                                    .child("epoch 时间轴"),
-                            )
-                            .child(
-                                Button::new("timeline-visibility-drawer")
-                                    .ghost()
-                                    .icon(if self.timeline_visible {
-                                        IconName::Eye
-                                    } else {
-                                        IconName::EyeOff
-                                    })
-                                    .tooltip(if self.timeline_visible {
-                                        "隐藏 epoch 时间轴"
-                                    } else {
-                                        "显示 epoch 时间轴"
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_timeline_visibility();
-                                        cx.notify();
-                                    })),
+                                    .gap(px(2.))
+                                    .child(
+                                        Button::new("reset-receiver-settings")
+                                            .ghost()
+                                            .icon(IconName::Undo2)
+                                            .tooltip("恢复默认配置")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.reset_receiver_settings(window, cx);
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("close-settings-drawer")
+                                            .ghost()
+                                            .icon(IconName::CircleX)
+                                            .tooltip("关闭接收机配置")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.side_drawer = None;
+                                                cx.notify();
+                                            })),
+                                    ),
                             ),
                     )
-                    .children((editable || self.selected_run_id.is_some()).then(|| {
-                        Button::new("cttc-preset")
-                            .mt(px(12.))
-                            .ghost()
-                            .icon(IconName::Star)
-                            .label(if editable {
-                                "应用 CTTC Spain 预设"
-                            } else {
-                                "复制为可编辑草稿"
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if this.selected_run_id.is_some() {
-                                    this.edit_selected_configuration(window, cx);
-                                } else {
-                                    this.apply_cttc_preset(window, cx);
-                                }
-                                cx.notify();
-                            }))
-                    }))
                     .children((issue_count > 0).then(|| {
                         div()
                             .mt(px(12.))
@@ -2048,13 +2360,10 @@ impl GnsscopeApp {
                     .overflow_y_scrollbar()
                     .px(px(18.))
                     .pb(px(20.))
-                    .child(if editable {
+                    .child(
                         self.render_settings_category_content(category, palette, cx)
-                            .into_any_element()
-                    } else {
-                        self.render_read_only_category(category, settings, palette)
-                            .into_any_element()
-                    }),
+                            .into_any_element(),
+                    ),
             )
             .child(
                 div()
@@ -2310,145 +2619,6 @@ impl GnsscopeApp {
             )
     }
 
-    fn render_read_only_category(
-        &self,
-        category: SettingsCategory,
-        settings: &GuiProcessingSettings,
-        palette: Palette,
-    ) -> impl IntoElement {
-        let rows: Vec<(&'static str, String)> = match category {
-            SettingsCategory::Input => vec![
-                (
-                    "采样率",
-                    format!("{:.3} Msps", settings.sample_rate_hz / 1e6),
-                ),
-                (
-                    "中频",
-                    format!("{:.3} MHz", settings.intermediate_frequency_hz / 1e6),
-                ),
-                ("IQ 格式", format!("{:?}", settings.iq_format)),
-                (
-                    "导航来源",
-                    if settings.rinex_nav_path.is_some() {
-                        "外部 RINEX"
-                    } else {
-                        "IQ-only"
-                    }
-                    .to_string(),
-                ),
-            ],
-            SettingsCategory::Acquisition => vec![
-                ("捕获窗口", format!("{} ms", settings.acquisition_window_ms)),
-                (
-                    "非相干累加",
-                    format!("{} 次", settings.acquisition_noncoherent_integrations),
-                ),
-                (
-                    "重捕获周期",
-                    format!("{} ms", settings.reacquisition_interval_ms),
-                ),
-                (
-                    "最大 PRN",
-                    settings.max_acquisition_prns_per_scan.to_string(),
-                ),
-            ],
-            SettingsCategory::Tracking => vec![
-                (
-                    "DLL / PLL",
-                    format!(
-                        "{:.1} / {:.1} Hz",
-                        settings.dll_bandwidth_hz, settings.pll_bandwidth_hz
-                    ),
-                ),
-                (
-                    "最低 C/N0",
-                    format!("{:.1} dB-Hz", settings.minimum_cn0_db_hz),
-                ),
-                (
-                    "PLL lock",
-                    format!("{:.2}", settings.minimum_pll_lock_metric),
-                ),
-            ],
-            SettingsCategory::Pvt => vec![
-                ("PVT epoch", format!("{} ms", settings.pvt_output_rate_ms)),
-                (
-                    "载波平滑",
-                    if settings.enable_carrier_smoothing {
-                        "开启"
-                    } else {
-                        "关闭"
-                    }
-                    .to_string(),
-                ),
-                (
-                    "Kalman",
-                    if settings.enable_kalman {
-                        "开启"
-                    } else {
-                        "关闭"
-                    }
-                    .to_string(),
-                ),
-                (
-                    "RAIM",
-                    if settings.enable_raim {
-                        "开启"
-                    } else {
-                        "关闭"
-                    }
-                    .to_string(),
-                ),
-            ],
-            SettingsCategory::Performance => vec![
-                (
-                    "并行捕获",
-                    if settings.parallel_acquisition {
-                        "开启"
-                    } else {
-                        "关闭"
-                    }
-                    .to_string(),
-                ),
-                (
-                    "并行跟踪",
-                    if settings.parallel_tracking {
-                        "开启"
-                    } else {
-                        "关闭"
-                    }
-                    .to_string(),
-                ),
-            ],
-        };
-        div()
-            .rounded(px(6.))
-            .border_1()
-            .border_color(palette.border)
-            .bg(palette.surface_alt)
-            .p(px(12.))
-            .children(rows.into_iter().map(|(label, value)| {
-                div()
-                    .py(px(9.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(palette.border.opacity(0.55))
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(palette.muted)
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(palette.text)
-                            .child(value),
-                    )
-            }))
-    }
-
     fn config_group_title(title: &'static str, palette: Palette) -> impl IntoElement {
         div()
             .mt(px(18.))
@@ -2484,30 +2654,9 @@ impl GnsscopeApp {
                     .child(label),
             )
             .child(
-                Button::new(SharedString::from(format!("{field}-toggle")))
-                    .ghost()
-                    .icon(if enabled {
-                        IconName::CircleCheck
-                    } else {
-                        IconName::Dash
-                    })
-                    .bg(if enabled {
-                        palette.healthy.opacity(0.12)
-                    } else {
-                        palette.surface_alt
-                    })
-                    .border_1()
-                    .border_color(if enabled {
-                        palette.healthy.opacity(0.35)
-                    } else {
-                        palette.border
-                    })
-                    .text_color(if enabled {
-                        palette.healthy
-                    } else {
-                        palette.muted
-                    })
-                    .label(if enabled { "开启" } else { "关闭" })
+                Switch::new(SharedString::from(format!("{field}-toggle")))
+                    .checked(enabled)
+                    .tooltip(if enabled { "已开启" } else { "已关闭" })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_setting(field);
                         cx.notify();
@@ -3074,8 +3223,11 @@ impl Render for GnsscopeApp {
                     .flex()
                     .when(stacked_sidebar, |this| this.flex_col())
                     .child(self.render_sidebar(palette, stacked_sidebar, cx))
-                    .child(
-                        div()
+                    .child(match self.page {
+                        AppPage::InterfaceSettings => self
+                            .render_interface_settings(palette, cx)
+                            .into_any_element(),
+                        AppPage::Workspace => div()
                             .flex_1()
                             .min_w_0()
                             .h_full()
@@ -3111,8 +3263,9 @@ impl Render for GnsscopeApp {
                                         .into_any_element(),
                                 ),
                                 None => None,
-                            }),
-                    ),
+                            })
+                            .into_any_element(),
+                    }),
             )
     }
 }
@@ -4022,7 +4175,10 @@ mod history_queue_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{epoch_index_for_percent, toggled_side_drawer, SettingsCategory, SideDrawer};
+    use super::{
+        epoch_index_for_percent, toggled_side_drawer, InterfaceLanguage, SettingsCategory,
+        SideDrawer, ThemePreference,
+    };
 
     #[test]
     fn timeline_percent_maps_to_shared_epoch_index() {
@@ -4064,5 +4220,14 @@ mod tests {
             SettingsCategory::ALL.map(SettingsCategory::label),
             ["输入", "捕获", "跟踪", "PVT", "性能"]
         );
+    }
+
+    #[test]
+    fn interface_preferences_use_stable_persistence_values() {
+        assert_eq!(ThemePreference::parse(None).value(), "system");
+        assert_eq!(ThemePreference::parse(Some("light")).value(), "light");
+        assert_eq!(ThemePreference::parse(Some("dark")).value(), "dark");
+        assert_eq!(InterfaceLanguage::parse(None).value(), "zh-CN");
+        assert_eq!(InterfaceLanguage::parse(Some("en")).value(), "en");
     }
 }
