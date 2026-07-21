@@ -9,7 +9,7 @@ This is the authoritative product roadmap. Detailed receiver evidence remains in
 - Streaming IQ, deterministic parallel acquisition/tracking, periodic reacquisition scheduling, continuous PVT, velocity/time output, editable configuration, history replay, and candidate persistence are implemented.
 - Raw / Smoothed / Kalman selected-epoch comparison is implemented as a read-only responsive drawer.
 - CTTC release GUI processing persists 810 epochs; targeted tests pass for `gnss-core` and `gnss-gui`.
-- The 2.67 GB LabSat Int8 I/Q capture at 10.23 Msps now has reader, multi-PRN acquisition, and production streaming-tracking regression coverage. Zero-IF acquisition automatically decimates by an exact integer factor while tracking retains the original sample rate.
+- The 2.67 GB LabSat signed Int8 I/Q capture at 10.23 Msps now has acquisition, tracking, navigation, PVT, velocity, and UTC regression coverage. Capture and tracking both retain the configured sample rate; an attempted automatic acquisition decimation was removed after real data showed degraded bit synchronization.
 
 ## Priority Roadmap
 
@@ -28,7 +28,8 @@ Regression command: `cargo test --release -p gnss-core --test streaming_runner_r
 
 ### 2. Accuracy and scenario coverage
 
-- Extend the LabSat `Int8` regression from acquisition/tracking through navigation decode and PVT, and add incomplete-final-1 ms epoch coverage.
+- Completed: the LabSat `Int8` regression now covers acquisition, tracking, navigation decode, position, velocity, and UTC output against the supplied coarse reference.
+- Add incomplete-final-1 ms epoch coverage.
 - Validate dynamic/high-rate PVT, rapid Doppler changes, shortened output epochs, and velocity recovery.
 - Add independent position/velocity/time comparisons and broaden beyond the five-PRN CTTC capture.
 - Exercise long captures across ephemeris changes, GPS week boundaries, and leap-second conversion boundaries.
@@ -71,4 +72,4 @@ These are intentionally after the priority roadmap:
 
 ## Current Next Action
 
-Priority 1 is complete. Continue with Priority 2 accuracy and scenario coverage by extending the verified LabSat `Int8` acquisition/tracking path through navigation/PVT and adding incomplete-final-epoch coverage before dynamic datasets.
+Priority 1 is complete. Continue with Priority 2 accuracy and scenario coverage by adding incomplete-final-epoch coverage, then dynamic datasets.

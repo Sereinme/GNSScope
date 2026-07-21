@@ -105,14 +105,14 @@ fn labsat_int8_iq_acquires_real_gps_l1_ca_signals() {
 
 #[test]
 #[ignore = "processes up to 90 seconds of real LabSat IQ in release mode"]
-fn labsat_int8_iq_reports_long_run_navigation_and_pvt_status() {
+fn labsat_int8_iq_produces_pvt() {
     let data_path = Path::new(DATA_FILE);
     if !data_path.exists() {
         eprintln!("SKIP: LabSat Int8 real IQ data not present");
         return;
     }
 
-    let fixed_prns = vec![2, 4, 10, 12, 16, 21, 22, 23, 24, 25, 28, 32];
+    let fixed_prns = vec![10, 12, 23, 24, 25, 28, 32];
     let mut config = StreamingPvtConfig::cttc_fixed_prns(fixed_prns.clone());
     config.iq_path = Some(data_path.to_path_buf());
     config.iq_format = IqFormat::Int8;
@@ -125,7 +125,7 @@ fn labsat_int8_iq_reports_long_run_navigation_and_pvt_status() {
     config.acquisition.cold_acq_interval_ms = 1;
     config.acquisition.reacq_interval_ms = 1_000;
     config.acquisition.max_acq_prns_per_scan = fixed_prns.len();
-    config.acquisition.doppler_step_hz = 500.0;
+    config.acquisition.doppler_step_hz = 250.0;
     config.acquisition.threshold = 3.0;
     config.acquisition_ring_ms = 10;
     config.channel_admission.probation_good_epochs = 1;
@@ -178,27 +178,28 @@ fn labsat_int8_iq_reports_long_run_navigation_and_pvt_status() {
         .iter()
         .filter(|output| output.quality.converged)
         .collect::<Vec<_>>();
-    if let Some(last) = converged.last() {
-        let velocity = last.velocity.as_ref().expect("LabSat velocity output");
-        eprintln!(
-            "LabSat final PVT: epoch={}, lat={:.8}, lon={:.8}, alt={:.3} m, speed={:.4} m/s, clock_drift={:.4} m/s, sats={:?}",
-            last.epoch_index,
-            last.lla_rad[0].to_degrees(),
-            last.lla_rad[1].to_degrees(),
-            last.lla_rad[2],
-            velocity.speed_mps,
-            velocity.clock_drift_mps,
-            last.quality.used_prns
-        );
-        eprintln!("LabSat final time: {:?}", last.time.utc);
-    } else {
-        let max_satellites = outputs
-            .iter()
-            .map(|output| output.quality.n_sats)
-            .max()
-            .unwrap_or(0);
-        eprintln!("LabSat produced no converged PVT; maximum usable satellites={max_satellites}");
-    }
+    let last = converged.last().expect("converged LabSat PVT output");
+    let velocity = last.velocity.as_ref().expect("LabSat velocity output");
+    let latitude_deg = last.lla_rad[0].to_degrees();
+    let longitude_deg = last.lla_rad[1].to_degrees();
+    eprintln!(
+        "LabSat final PVT: epoch={}, lat={:.8}, lon={:.8}, alt={:.3} m, speed={:.4} m/s, clock_drift={:.4} m/s, sats={:?}",
+        last.epoch_index,
+        latitude_deg,
+        longitude_deg,
+        last.lla_rad[2],
+        velocity.speed_mps,
+        velocity.clock_drift_mps,
+        last.quality.used_prns
+    );
+    eprintln!("LabSat final time: {:?}", last.time.utc);
+    assert!((latitude_deg - 40.00154).abs() < 0.001);
+    assert!((longitude_deg - 116.33028).abs() < 0.001);
+    assert!((last.lla_rad[2] - 95.0).abs() < 50.0);
+    assert!(velocity.speed_mps < 1.0);
+    let utc = last.time.utc.expect("LabSat UTC output");
+    assert_eq!((utc.year, utc.month, utc.day), (2023, 6, 20));
+    assert_eq!((utc.hour, utc.minute), (13, 55));
     assert!(summary.event_counts.nav_subframes > 0);
     assert!(summary.event_counts.pvt_outputs > 0);
 }
@@ -220,7 +221,7 @@ fn labsat_int8_iq_enters_streaming_tracking() {
     config.acquisition.acq_window_ms = 10;
     config.acquisition.noncoherent_integrations = 10;
     config.acquisition.cold_acq_interval_ms = 1;
-    config.acquisition.doppler_step_hz = 500.0;
+    config.acquisition.doppler_step_hz = 250.0;
     config.acquisition.threshold = 3.0;
     config.acquisition_ring_ms = 10;
     config.channel_admission.probation_good_epochs = 1;
