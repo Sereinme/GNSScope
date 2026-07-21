@@ -1,14 +1,15 @@
 # Receiver Readiness and Runtime Audit
 
-Date: 2026-07-20
+Date: 2026-07-21
 
 ## Verified Baseline
 
 - The production `StreamingPvtRunner` processes the 60 s CTTC capture in 14.39 s in a release build with parallel tracking, versus 37.98 s with serial tracking.
 - The parallel run acquires five PRNs, emits 299,955 tracking updates, decodes 32 navigation subframes, and produces 410 PVT outputs.
 - The final time is GPS week 1734, SOW 368663.029, or 2013-04-04 06:24:07.029 UTC.
-- The current targeted baseline passes 128 `gnss-core` library tests and 54 `gnss-gui` library tests. The complete CTTC GUI run persisted 810 epochs and 113 discrete acquisition, channel-state, and navigation events.
+- The current targeted baseline passes 129 `gnss-core` library tests and 56 `gnss-gui` library tests. The complete CTTC GUI run persisted 810 epochs and 113 discrete acquisition, channel-state, and navigation events.
 - The release-only CTTC PVT recovery regression forces G01/G11/G17 to `Lost` after converged epoch 79. Three subsequent PVT outputs are non-converged while fewer than four channels are eligible; all three PRNs are then reacquired and resume tracking, and converged PVT returns at epoch 85 with four satellites.
+- The new LabSat capture `Data202306202155(2).dat` is verified as 2,670,030,000 bytes of interleaved Int8 I/Q at 10.23 Msps, approximately 130.5 s. Its first 10 ms reliably acquires G11/G13/G24/G29, and the production streaming runner acquires and advances G11 into tracking. Zero-IF PCPS uses exact factor-5 boxcar decimation to 2.046 Msps for acquisition only; tracking remains at 10.23 Msps.
 
 This is a single-machine CTTC baseline, not a cross-platform benchmark. No CPU profiler or current peak-memory capture has been recorded, so the optimization list below is ranked from code inspection and must be measured before implementation. Product sequencing is maintained in `docs/roadmap.md`.
 
@@ -21,6 +22,7 @@ This is a single-machine CTTC baseline, not a cross-platform benchmark. No CPU p
 - Plot focus, sky-marker hover details, and shared sky/C/N0 PRN linking/pinning are implemented. Deterministic screenshot coverage includes `1440 x 900`, `1100 x 800`, and `800 x 720` workspaces, direct-edit receiver drawers, candidate comparison, and Chinese/dark plus English/light interface-settings pages; window-handle capture avoids occlusion from unrelated desktop windows.
 - The selected-epoch Raw/Smoothed/Kalman comparison drawer is implemented with structured candidate disposition, receiver-selected highlighting, position/velocity/clock/quality deltas, immutable historical behavior, and epoch-timeline synchronization. Candidate status and values survive SQLite JSON round trips; legacy rows infer conservative status from their existing candidate payloads.
 - The configuration redesign synchronizes `gpui-component` and custom plot themes, uses category-focused Input/Acquisition/Tracking/PVT/Performance pages with direct inputs and native switches, and adds a dedicated interface-settings page reached from a restrained lower-left sidebar item. Theme, language, and timeline visibility have no duplicate entry points.
+- A prominent New task action now appears before the active, queued, and historical runs in the left sidebar. It clears the current draft/result selection and opens the IQ picker. Selecting the LabSat `.dat` automatically reads its sibling `.ini`, applying 10.23 Msps, Int8 interleaved I/Q, zero IF, and the supplied coarse LLA without adding a dataset-specific preset button.
 The current worker owns `StreamingPvtRunner`, supports cooperative cancellation, maps discrete acquisition/reacquisition/channel-state/navigation events into GUI events, and persists them without forwarding every millisecond tracking update. Editable text is retained independently from the last valid typed value, so incomplete or malformed input remains visible with an inline error instead of being silently clamped. Queued and completed run snapshots remain immutable; selecting one seeds a separate directly editable next-run draft, and subsequent reprocessing uses those edits.
 
 ### Implemented candidate comparison
@@ -52,7 +54,8 @@ The candidate contract now distinguishes selected, available-but-lower-priority,
 - Automated serial-versus-parallel equality for the complete real-data PVT stream. Tracking-step equality is tested, and manual 60 s runs produced matching event counts and final time.
 - High-dynamics velocity, shortened PVT epochs, rapid Doppler changes, and loss/recovery behavior.
 - Long captures crossing ephemeris record changes, GPS week boundaries, or leap-second transitions. Time conversion boundaries have unit coverage, not end-to-end IQ coverage.
-- Real `Int8` IQ input and files ending with an incomplete 1 ms tracking epoch.
+- Full navigation/PVT and accuracy coverage for the verified LabSat `Int8` capture; reader, acquisition, and initial streaming tracking are covered.
+- Files ending with an incomplete 1 ms tracking epoch.
 - Peak working set/private bytes for the current bounded streaming implementation.
 - Position, velocity, clock drift, and time accuracy across front ends and datasets other than CTTC.
 

@@ -5,7 +5,72 @@ use gnss_core::pvt::{ContinuousPvtConfig, HatchConfig, IntegerMsAmbiguityConfig,
 use gnss_core::receiver::{AcquisitionSchedulerConfig, ChannelAdmissionConfig, StreamingPvtConfig};
 use gnss_core::tracking::TrackingConfig;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::path::{Path, PathBuf};
+
+const GPS_L1_CA_CARRIER_HZ: f64 = 1_575_420_000.0;
+
+#[derive(Debug, PartialEq)]
+struct LabSatMetadata {
+    sample_rate_hz: f64,
+    center_frequency_hz: f64,
+    initial_position_lla_deg_m: Option<[f64; 3]>,
+}
+
+impl LabSatMetadata {
+    fn parse(contents: &str) -> Option<Self> {
+        if !contents.lines().next()?.trim().starts_with("#LABSAT") {
+            return None;
+        }
+        let value = |key: &str| {
+            contents.lines().find_map(|line| {
+                let (candidate, value) = line.split_once('=')?;
+                candidate
+                    .trim()
+                    .eq_ignore_ascii_case(key)
+                    .then_some(value.trim())
+            })
+        };
+        if value("CHN")? != "1" || value("QUA")? != "3" {
+            return None;
+        }
+        let sample_rate_hz = value("SMP")?.parse().ok()?;
+        let center_frequency_hz = value("CFA")?.parse().ok()?;
+        let pvt_values = contents
+            .lines()
+            .skip_while(|line| !line.trim().eq_ignore_ascii_case("[PVT]"))
+            .skip(1)
+            .take(3)
+            .filter_map(|line| line.trim().parse::<f64>().ok())
+            .collect::<Vec<_>>();
+        let initial_position_lla_deg_m =
+            (pvt_values.len() == 3).then(|| [pvt_values[1], pvt_values[0], pvt_values[2]]);
+        Some(Self {
+            sample_rate_hz,
+            center_frequency_hz,
+            initial_position_lla_deg_m,
+        })
+    }
+
+    fn find_next_to(iq_path: &Path) -> Option<Self> {
+        let parent = iq_path.parent()?;
+        let mut ini_paths = fs::read_dir(parent)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("ini"))
+            })
+            .collect::<Vec<_>>();
+        ini_paths.sort();
+        ini_paths.into_iter().find_map(|path| {
+            fs::read_to_string(path)
+                .ok()
+                .and_then(|contents| Self::parse(&contents))
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GuiIqFormat {
@@ -96,6 +161,19 @@ impl Default for GuiProcessingSettings {
 }
 
 impl GuiProcessingSettings {
+    pub fn select_iq_file(&mut self, iq_path: PathBuf) -> bool {
+        let metadata = LabSatMetadata::find_next_to(&iq_path);
+        self.iq_file_path = Some(iq_path);
+        let Some(metadata) = metadata else {
+            return false;
+        };
+        self.sample_rate_hz = metadata.sample_rate_hz;
+        self.intermediate_frequency_hz = GPS_L1_CA_CARRIER_HZ - metadata.center_frequency_hz;
+        self.iq_format = GuiIqFormat::Int8Interleaved;
+        self.initial_position_lla_deg_m = metadata.initial_position_lla_deg_m;
+        true
+    }
+
     pub fn rinex_nav_config(&self) -> RinexNavConfig {
         RinexNavConfig {
             explicit_path: self.rinex_nav_path.clone(),
@@ -252,6 +330,41 @@ impl GuiProcessingSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_labsat_int8_capture_metadata() {
+        let metadata = LabSatMetadata::parse(
+            "#LABSAT3W config file\n[config]\nSMP=10230000\nQUA=3\nCHN=1\n[channel A]\nCFA=1575420000\n[PVT]\n116.33028\n40.00154\n95\n20230620 21:55\n",
+        )
+        .expect("LabSat metadata");
+
+        assert_eq!(metadata.sample_rate_hz, 10_230_000.0);
+        assert_eq!(metadata.center_frequency_hz, GPS_L1_CA_CARRIER_HZ);
+        assert_eq!(
+            metadata.initial_position_lla_deg_m,
+            Some([40.00154, 116.33028, 95.0])
+        );
+    }
+
+    #[test]
+    fn selects_real_labsat_capture_metadata_when_available() {
+        let iq_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data/202306202155/Data202306202155(2).dat");
+        if !iq_path.exists() {
+            return;
+        }
+        let mut settings = GuiProcessingSettings::default();
+
+        assert!(settings.select_iq_file(iq_path.clone()));
+        assert_eq!(settings.iq_file_path, Some(iq_path));
+        assert_eq!(settings.sample_rate_hz, 10_230_000.0);
+        assert_eq!(settings.intermediate_frequency_hz, 0.0);
+        assert_eq!(settings.iq_format, GuiIqFormat::Int8Interleaved);
+        assert_eq!(
+            settings.initial_position_lla_deg_m,
+            Some([40.00154, 116.33028, 95.0])
+        );
+    }
     #[test]
     fn test_settings_build_rinex_nav_config_for_gui_path() {
         let settings = GuiProcessingSettings {

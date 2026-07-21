@@ -447,6 +447,34 @@ fn limited(mut prns: Vec<u8>, max_len: usize) -> Vec<u8> {
     prns
 }
 
+const MIN_GPS_L1_CA_ACQUISITION_SAMPLE_RATE_HZ: f64 = 2_046_000.0;
+
+fn acquisition_decimation_factor(
+    sample_rate_hz: f64,
+    intermediate_frequency_hz: f64,
+    samples_per_ms: usize,
+) -> usize {
+    if intermediate_frequency_hz.abs() > f64::EPSILON {
+        return 1;
+    }
+    let max_factor = (sample_rate_hz / MIN_GPS_L1_CA_ACQUISITION_SAMPLE_RATE_HZ).floor() as usize;
+    (2..=max_factor)
+        .rev()
+        .find(|factor| samples_per_ms % factor == 0)
+        .unwrap_or(1)
+}
+
+fn decimate_boxcar_into(input: &[Complex<f64>], factor: usize, output: &mut Vec<Complex<f64>>) {
+    output.clear();
+    output.reserve(input.len() / factor);
+    let scale = 1.0 / factor as f64;
+    output.extend(
+        input
+            .chunks_exact(factor)
+            .map(|chunk| chunk.iter().copied().sum::<Complex<f64>>() * scale),
+    );
+}
+
 fn acquire_prns_sequential(
     config: PcpsConfig,
     prns: &[u8],
@@ -961,6 +989,7 @@ pub struct StreamingPvtRunner {
     acquisition_scheduler: AcquisitionScheduler,
     acquisition_ring: AcquisitionRingBuffer,
     acquisition_window_scratch: Vec<Complex<f64>>,
+    acquisition_decimated_scratch: Vec<Complex<f64>>,
     active_tracking: BTreeMap<u8, ActiveTrackingChannel>,
     nav_state: StreamingNavState,
     continuous_pvt: ContinuousPvtRunner,
@@ -978,6 +1007,7 @@ impl StreamingPvtRunner {
         let acquisition_scheduler = AcquisitionScheduler::new(config.acquisition.clone());
         let acquisition_ring = AcquisitionRingBuffer::new(config.acquisition_ring_samples(), 0);
         let acquisition_window_scratch = Vec::with_capacity(config.acquisition_window_samples());
+        let acquisition_decimated_scratch = Vec::new();
         let continuous_pvt = ContinuousPvtRunner::new(config.continuous_pvt.clone());
         let next_pvt_output_ms = config.pvt_output_rate_ms.max(1);
         let mut runner = Self {
@@ -986,6 +1016,7 @@ impl StreamingPvtRunner {
             acquisition_scheduler,
             acquisition_ring,
             acquisition_window_scratch,
+            acquisition_decimated_scratch,
             active_tracking: BTreeMap::new(),
             nav_state: StreamingNavState::default(),
             continuous_pvt,
@@ -1215,16 +1246,32 @@ impl StreamingPvtRunner {
         scan: &StreamingAcquisitionScan,
         now_ms: u64,
     ) -> Option<StreamingAcquisitionScanResult> {
+        let decimation_factor = acquisition_decimation_factor(
+            self.config.sample_rate_hz,
+            self.config.intermediate_frequency_hz,
+            self.config.samples_per_ms(),
+        );
+        let mut pcps_config = self.pcps_config();
+        pcps_config.fs /= decimation_factor as f64;
         let sample_index = self
             .acquisition_ring
             .copy_latest_window(scan.sample_count, &mut self.acquisition_window_scratch)?;
         if sample_index != scan.sample_index {
             return None;
         }
-        let window = self.acquisition_window_scratch.as_slice();
+        let window = if decimation_factor > 1 {
+            decimate_boxcar_into(
+                &self.acquisition_window_scratch,
+                decimation_factor,
+                &mut self.acquisition_decimated_scratch,
+            );
+            self.acquisition_decimated_scratch.as_slice()
+        } else {
+            self.acquisition_window_scratch.as_slice()
+        };
         let results = if self.config.parallel_acquisition && scan.plan.prns.len() > 1 {
             acquire_prns_parallel(
-                self.pcps_config(),
+                pcps_config,
                 &scan.plan.prns,
                 window,
                 sample_index,
@@ -1232,7 +1279,7 @@ impl StreamingPvtRunner {
             )
         } else {
             acquire_prns_sequential(
-                self.pcps_config(),
+                pcps_config,
                 &scan.plan.prns,
                 window,
                 sample_index,
@@ -1748,6 +1795,16 @@ mod tests {
             peak_to_mean: 20.0,
             detected: true,
         }
+    }
+
+    #[test]
+    fn zero_if_high_rate_acquisition_uses_exact_integer_decimation() {
+        assert_eq!(acquisition_decimation_factor(10_230_000.0, 0.0, 10_230), 5);
+        assert_eq!(acquisition_decimation_factor(4_000_000.0, 0.0, 4_000), 1);
+        assert_eq!(
+            acquisition_decimation_factor(10_230_000.0, 2_000_000.0, 10_230),
+            1
+        );
     }
 
     fn tracking_updates(events: &[StreamingPvtEvent]) -> Vec<&StreamingTrackingUpdate> {

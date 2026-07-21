@@ -660,13 +660,21 @@ impl GnsscopeApp {
             if let Ok(Ok(Some(paths))) = receiver.await {
                 if let (Some(this), Some(path)) = (this.upgrade(), paths.into_iter().next()) {
                     this.update(cx, |this, cx| {
-                        this.settings.iq_file_path = Some(path);
+                        let detected_labsat = this.settings.select_iq_file(path);
                         this.selected_run_id = None;
                         this.historical_epochs.clear();
                         this.historical_channels.clear();
                         this.historical_diagnostic_events.clear();
                         this.selected_epoch = None;
-                        this.status_message = "IQ 文件已就绪".to_string();
+                        this.status_message = if detected_labsat {
+                            this.localized(
+                                "已读取 LabSat 元数据：10.23 MHz · Int8 I/Q · 零中频",
+                                "LabSat metadata loaded: 10.23 MHz · Int8 I/Q · zero IF",
+                            )
+                        } else {
+                            this.localized("IQ 文件已就绪", "IQ file ready")
+                        }
+                        .to_string();
                         cx.notify();
                     })
                     .ok();
@@ -674,6 +682,27 @@ impl GnsscopeApp {
             }
         })
         .detach();
+    }
+
+    fn start_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings = GuiProcessingSettings::default();
+        self.selected_run_id = None;
+        self.historical_epochs.clear();
+        self.historical_channels.clear();
+        self.historical_diagnostic_events.clear();
+        self.selected_epoch = None;
+        self.follow_live = false;
+        self.page = AppPage::Workspace;
+        self.side_drawer = None;
+        self.focused_plot = None;
+        self.sync_setting_inputs(window, cx);
+        self.status_message = self
+            .localized(
+                "请选择 IQ 文件创建任务",
+                "Select an IQ file to create a task",
+            )
+            .to_string();
+        self.select_file(cx);
     }
 
     fn reset_receiver_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1405,9 +1434,13 @@ impl GnsscopeApp {
                             .tooltip(
                                 self.localized("接收机详细配置", "Receiver processing settings"),
                             )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_drawer =
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let side_drawer =
                                     toggled_side_drawer(this.side_drawer, SideDrawer::Settings);
+                                if side_drawer == Some(SideDrawer::Settings) {
+                                    this.sync_setting_inputs(window, cx);
+                                }
+                                this.side_drawer = side_drawer;
                                 cx.notify();
                             })),
                     )
@@ -1529,7 +1562,25 @@ impl GnsscopeApp {
                     .overflow_y_scrollbar()
                     .p(px(12.))
                     .child(
+                        Button::new("new-task")
+                            .w_full()
+                            .ghost()
+                            .justify_start()
+                            .text_color(palette.text)
+                            .icon(IconName::Plus)
+                            .label(self.localized("新建任务", "New task"))
+                            .tooltip(self.localized(
+                                "选择 IQ 文件并创建新的解算任务",
+                                "Select an IQ file and create a new processing task",
+                            ))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.start_new_task(window, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         div()
+                            .mt(px(14.))
                             .text_size(px(10.))
                             .text_color(palette.muted)
                             .mb(px(7.))
