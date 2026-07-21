@@ -1,5 +1,6 @@
 use gnss_core::acquisition::{PcpsAcquisition, PcpsConfig};
 use gnss_core::io::{IqFormat, IqReader};
+use gnss_core::pvt::IntegerMsAmbiguityConfig;
 use gnss_core::receiver::{StreamingPvtConfig, StreamingPvtEvent, StreamingPvtRunner};
 use gnss_data::gps_l1ca::PRN_COUNT;
 use num_complex::Complex;
@@ -77,7 +78,7 @@ fn labsat_int8_iq_acquires_real_gps_l1_ca_signals() {
     for result in results.iter().take(12) {
         eprintln!(
             "  G{:02}: metric={:.3}, doppler={:.0} Hz, code={:.3} chips, detected={}",
-            result.prn + 1,
+            result.prn,
             result.peak_to_mean,
             result.doppler_hz,
             result.code_phase_chips,
@@ -94,12 +95,112 @@ fn labsat_int8_iq_acquires_real_gps_l1_ca_signals() {
         "expected at least four GPS L1 C/A detections, got {}",
         detections.len()
     );
-    for expected_prn in [11, 13, 24, 29] {
+    for expected_prn in [10, 12, 23, 28] {
         assert!(
             detections.iter().any(|result| result.prn == expected_prn),
             "expected stable LabSat detection G{expected_prn:02}"
         );
     }
+}
+
+#[test]
+#[ignore = "processes up to 90 seconds of real LabSat IQ in release mode"]
+fn labsat_int8_iq_reports_long_run_navigation_and_pvt_status() {
+    let data_path = Path::new(DATA_FILE);
+    if !data_path.exists() {
+        eprintln!("SKIP: LabSat Int8 real IQ data not present");
+        return;
+    }
+
+    let fixed_prns = vec![2, 4, 10, 12, 16, 21, 22, 23, 24, 25, 28, 32];
+    let mut config = StreamingPvtConfig::cttc_fixed_prns(fixed_prns.clone());
+    config.iq_path = Some(data_path.to_path_buf());
+    config.iq_format = IqFormat::Int8;
+    config.sample_rate_hz = SAMPLE_RATE_HZ;
+    config.intermediate_frequency_hz = 0.0;
+    config.chunk_ms = 20;
+    config.pvt_output_rate_ms = 1_000;
+    config.acquisition.acq_window_ms = 10;
+    config.acquisition.noncoherent_integrations = 10;
+    config.acquisition.cold_acq_interval_ms = 1;
+    config.acquisition.reacq_interval_ms = 1_000;
+    config.acquisition.max_acq_prns_per_scan = fixed_prns.len();
+    config.acquisition.doppler_step_hz = 500.0;
+    config.acquisition.threshold = 3.0;
+    config.acquisition_ring_ms = 10;
+    config.channel_admission.probation_good_epochs = 1;
+    config.channel_admission.min_cn0_db_hz = 0.0;
+    config.channel_admission.min_pll_lock_metric = 0.0;
+    config.continuous_pvt.integer_ms_ambiguity = Some(IntegerMsAmbiguityConfig::default());
+    config.continuous_pvt.initial_position_lla_rad =
+        Some([40.00154_f64.to_radians(), 116.33028_f64.to_radians(), 95.0]);
+    config.continuous_pvt.gps_week_rollover_reference = Some(2_267);
+    config.continuous_pvt.wls.raim_max_exclusions = 0;
+
+    let max_ms = std::env::var("GNSSCOPE_LABSAT_TEST_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(90_000);
+    let mut outputs = Vec::new();
+    let mut runner = StreamingPvtRunner::new(config);
+    let summary = runner
+        .stream_iq_file_until_ms(max_ms, |step| {
+            outputs.extend(step.events.into_iter().filter_map(|event| {
+                let StreamingPvtEvent::PvtOutput(output) = event else {
+                    return None;
+                };
+                Some(*output)
+            }));
+        })
+        .expect("stream LabSat Int8 IQ through PVT");
+
+    eprintln!(
+        "LabSat active tracking PRNs: {:?}",
+        runner.active_tracking_prns()
+    );
+    for channel in runner.nav_state().channels.values() {
+        eprintln!(
+            "  G{:02}: subframes={}, last_tow={:?}",
+            channel.prn, channel.subframes_decoded, channel.last_tow_count
+        );
+    }
+    eprintln!(
+        "LabSat events: acquisition={}, tracking={}, bit_sync={}, nav_symbols={}, nav_subframes={}, pvt={}",
+        summary.event_counts.acquisition_scans_completed,
+        summary.event_counts.tracking_updates,
+        summary.event_counts.bit_sync_updates,
+        summary.event_counts.nav_symbols,
+        summary.event_counts.nav_subframes,
+        summary.event_counts.pvt_outputs
+    );
+
+    let converged = outputs
+        .iter()
+        .filter(|output| output.quality.converged)
+        .collect::<Vec<_>>();
+    if let Some(last) = converged.last() {
+        let velocity = last.velocity.as_ref().expect("LabSat velocity output");
+        eprintln!(
+            "LabSat final PVT: epoch={}, lat={:.8}, lon={:.8}, alt={:.3} m, speed={:.4} m/s, clock_drift={:.4} m/s, sats={:?}",
+            last.epoch_index,
+            last.lla_rad[0].to_degrees(),
+            last.lla_rad[1].to_degrees(),
+            last.lla_rad[2],
+            velocity.speed_mps,
+            velocity.clock_drift_mps,
+            last.quality.used_prns
+        );
+        eprintln!("LabSat final time: {:?}", last.time.utc);
+    } else {
+        let max_satellites = outputs
+            .iter()
+            .map(|output| output.quality.n_sats)
+            .max()
+            .unwrap_or(0);
+        eprintln!("LabSat produced no converged PVT; maximum usable satellites={max_satellites}");
+    }
+    assert!(summary.event_counts.nav_subframes > 0);
+    assert!(summary.event_counts.pvt_outputs > 0);
 }
 
 #[test]
@@ -110,7 +211,7 @@ fn labsat_int8_iq_enters_streaming_tracking() {
         return;
     }
 
-    let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![11]);
+    let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![10]);
     config.iq_path = Some(data_path.to_path_buf());
     config.iq_format = IqFormat::Int8;
     config.sample_rate_hz = SAMPLE_RATE_HZ;
@@ -137,10 +238,10 @@ fn labsat_int8_iq_enters_streaming_tracking() {
                         acquisition_detected |= scan
                             .results
                             .iter()
-                            .any(|result| result.prn == 11 && result.detected);
+                            .any(|result| result.prn == 10 && result.detected);
                     }
                     StreamingPvtEvent::TrackingBatch(updates) => {
-                        tracking_updated |= updates.iter().any(|update| update.prn == 11);
+                        tracking_updated |= updates.iter().any(|update| update.prn == 10);
                     }
                     _ => {}
                 }
@@ -148,7 +249,7 @@ fn labsat_int8_iq_enters_streaming_tracking() {
         })
         .expect("stream LabSat Int8 IQ");
 
-    assert!(acquisition_detected, "streaming runner did not acquire G11");
-    assert!(tracking_updated, "streaming runner did not track G11");
-    assert_eq!(runner.active_tracking_prns(), vec![11]);
+    assert!(acquisition_detected, "streaming runner did not acquire G10");
+    assert!(tracking_updated, "streaming runner did not track G10");
+    assert_eq!(runner.active_tracking_prns(), vec![10]);
 }
