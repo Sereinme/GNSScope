@@ -9,7 +9,7 @@ This is the authoritative product roadmap. Detailed receiver evidence remains in
 - Streaming IQ, deterministic parallel acquisition/tracking, periodic reacquisition scheduling, continuous PVT, velocity/time output, editable configuration, history replay, and candidate persistence are implemented.
 - Raw / Smoothed / Kalman selected-epoch comparison is implemented as a read-only responsive drawer.
 - CTTC release GUI processing persists 810 epochs; targeted tests pass for `gnss-core` and `gnss-gui`.
-- The 2.67 GB LabSat signed Int8 I/Q capture at 10.23 Msps now has acquisition, tracking, navigation, PVT, velocity, and UTC regression coverage. Capture and tracking both retain the configured sample rate; an attempted automatic acquisition decimation was removed after real data showed degraded bit synchronization.
+- The 2.67 GB LabSat signed Int8 I/Q capture at 10.23 Msps now has acquisition, tracking, navigation, PVT, velocity, and UTC regression coverage under the normal GUI admission profile. Capture and tracking both retain the configured sample rate; an attempted automatic acquisition decimation was removed after real data showed degraded bit synchronization. Costas-compatible carrier-lock detection, per-channel 2 s pull-in, and a GNSS-SDR-aligned 50-epoch code-lock failure allowance prevent premature channel removal.
 
 ## Priority Roadmap
 

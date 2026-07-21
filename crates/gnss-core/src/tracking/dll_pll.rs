@@ -390,19 +390,27 @@ impl DllPllTracking {
         self.cn0_smoothed_db_hz.unwrap_or(0.0)
     }
 
+    pub(crate) fn health_metrics_ready(&self) -> bool {
+        self.cn0_prompt_buffer.len() >= self.cn0_window_len()
+    }
+
     fn compute_pll_lock_metric(&self) -> f64 {
         let n = self.cn0_prompt_buffer.len();
         if n == 0 {
             return 0.0;
         }
 
-        let coherent_sum: Complex<f64> = self.cn0_prompt_buffer.iter().copied().sum();
+        let doubled_phase_sum: Complex<f64> = self
+            .cn0_prompt_buffer
+            .iter()
+            .map(|prompt| prompt * prompt)
+            .sum();
         let wideband_power: f64 = self.cn0_prompt_buffer.iter().map(|p| p.norm_sqr()).sum();
         if wideband_power <= 1e-30 {
             return 0.0;
         }
 
-        (coherent_sum.norm_sqr() / (n as f64 * wideband_power)).clamp(0.0, 1.0)
+        (doubled_phase_sum.norm() / wideband_power).clamp(0.0, 1.0)
     }
 
     fn compute_cn0_nwpr(&self) -> Option<f64> {
@@ -539,6 +547,7 @@ mod tests {
             ..Default::default()
         };
         let mut locked = DllPllTracking::new(0, 0.0, 0.0, config.clone(), 0);
+        let mut polarity_flipped = DllPllTracking::new(0, 0.0, 0.0, config.clone(), 0);
         let mut unlocked = DllPllTracking::new(0, 0.0, 0.0, config, 0);
 
         for _ in 0..20 {
@@ -546,11 +555,32 @@ mod tests {
         }
         for i in 0..20 {
             let sign = if i % 2 == 0 { 1.0 } else { -1.0 };
-            unlocked.update_cn0(Complex::new(sign, 0.0));
+            polarity_flipped.update_cn0(Complex::new(sign, 0.0));
+            let phase = TAU * i as f64 / 20.0;
+            unlocked.update_cn0(Complex::new(phase.cos(), phase.sin()));
         }
 
         assert!(locked.compute_pll_lock_metric() > 0.99);
+        assert!(polarity_flipped.compute_pll_lock_metric() > 0.99);
         assert!(unlocked.compute_pll_lock_metric() < 0.01);
+    }
+
+    #[test]
+    fn test_health_metrics_wait_for_complete_cn0_window() {
+        let config = TrackingConfig {
+            cn0_samples: 20,
+            cn0_smoother_alpha: 1.0,
+            ..Default::default()
+        };
+        let mut tracker = DllPllTracking::new(0, 0.0, 0.0, config, 0);
+
+        for _ in 0..19 {
+            tracker.update_cn0(Complex::new(1.0, 0.0));
+            assert!(!tracker.health_metrics_ready());
+        }
+        tracker.update_cn0(Complex::new(1.0, 0.0));
+
+        assert!(tracker.health_metrics_ready());
     }
 
     #[test]

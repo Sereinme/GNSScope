@@ -61,7 +61,7 @@ impl Default for ChannelAdmissionConfig {
         Self {
             probation_good_epochs: 3,
             suspect_bad_epochs: 2,
-            lost_bad_epochs: 5,
+            lost_bad_epochs: 50,
             min_pll_lock_metric: 0.65,
             min_cn0_db_hz: 25.0,
             max_abs_dll_error_chips: 0.25,
@@ -872,6 +872,7 @@ impl StreamingPvtEventCounts {
 
 struct ActiveTrackingChannel {
     tracker: DllPllTracking,
+    started_ms: u64,
     bit_sync: BitSynchronizer,
     nav: NavDecoder,
     collector: EphemerisCollector,
@@ -883,9 +884,10 @@ struct ActiveTrackingChannel {
 }
 
 impl ActiveTrackingChannel {
-    fn new(tracker: DllPllTracking) -> Self {
+    fn new(tracker: DllPllTracking, started_ms: u64) -> Self {
         Self {
             tracker,
+            started_ms,
             bit_sync: BitSynchronizer::new(),
             nav: NavDecoder::new(),
             collector: EphemerisCollector::new(),
@@ -895,6 +897,10 @@ impl ActiveTrackingChannel {
             previous_tracking_output: None,
             latest_tracking_output: None,
         }
+    }
+
+    fn pull_in_complete(&self, now_ms: u64, pull_in_ms: u64) -> bool {
+        now_ms.saturating_sub(self.started_ms) >= pull_in_ms
     }
 
     fn set_bit_boundary(&mut self, boundary: usize, sync_start_ms: u64) {
@@ -908,6 +914,7 @@ impl ActiveTrackingChannel {
 struct StreamingTrackingStepResult {
     prn: u8,
     output: TrackingOutput,
+    admission_ready: bool,
     pre_update_events: Vec<StreamingPvtEvent>,
     nav_events: Vec<StreamingPvtEvent>,
 }
@@ -1284,7 +1291,7 @@ impl StreamingPvtRunner {
                 result.sample_index,
             );
             self.active_tracking
-                .insert(result.prn, ActiveTrackingChannel::new(tracker));
+                .insert(result.prn, ActiveTrackingChannel::new(tracker, now_ms));
         }
         self.channels.accept_acquisition(result, now_ms);
     }
@@ -1356,14 +1363,17 @@ impl StreamingPvtRunner {
         for step in steps {
             events.extend(step.pre_update_events);
 
-            let observation = ChannelHealthObservation::from_tracking_output(
-                &step.output,
-                nav_time_available(step.prn),
-                ephemeris_available(step.prn),
-            );
-            let state = self
-                .channels
-                .observe_tracking(step.prn, observation, now_ms);
+            let state = if step.admission_ready {
+                let observation = ChannelHealthObservation::from_tracking_output(
+                    &step.output,
+                    nav_time_available(step.prn),
+                    ephemeris_available(step.prn),
+                );
+                self.channels
+                    .observe_tracking(step.prn, observation, now_ms)
+            } else {
+                self.channels.state(step.prn)
+            };
             if state == ReceiverChannelState::Lost {
                 lost_prns.push(step.prn);
             }
@@ -1550,10 +1560,12 @@ fn process_tracking_channel_step(
     doppler_window_samples: f64,
 ) -> StreamingTrackingStepResult {
     let output = active.tracker.process(samples);
+    let pull_in_complete = active.pull_in_complete(now_ms, bit_sync_start_ms);
+    let admission_ready = pull_in_complete && active.tracker.health_metrics_ready();
     let prompt_i = output.prompt.re;
     let mut pre_update_events = Vec::new();
 
-    if active.bit_boundary.is_none() && now_ms >= bit_sync_start_ms {
+    if active.bit_boundary.is_none() && pull_in_complete {
         if let Some(boundary) = active.bit_sync.update(prompt_i) {
             active.set_bit_boundary(boundary, bit_sync_start_ms);
             pre_update_events.push(StreamingPvtEvent::BitSyncUpdated(StreamingBitSyncUpdate {
@@ -1591,6 +1603,7 @@ fn process_tracking_channel_step(
     StreamingTrackingStepResult {
         prn,
         output,
+        admission_ready,
         pre_update_events,
         nav_events,
     }
@@ -1989,6 +2002,7 @@ mod tests {
         assert_eq!(config.chunk_ms, 1);
         assert_eq!(config.samples_per_ms(), 4_000);
         assert_eq!(config.chunk_samples(), 4_000);
+        assert_eq!(config.channel_admission.lost_bad_epochs, 50);
         assert_eq!(config.pvt_output_rate_ms, 100);
         assert!(config.average_doppler_over_pvt_epoch);
         assert_eq!(config.doppler_epoch_window_samples(), 400_000);
@@ -2078,6 +2092,41 @@ mod tests {
         assert_eq!(
             runner.channels().state(11),
             ReceiverChannelState::Reacquiring
+        );
+    }
+
+    #[test]
+    fn tracking_admission_waits_for_each_channels_pull_in_period() {
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![11]);
+        config.bit_sync_start_ms = 2_000;
+        config.channel_admission.lost_bad_epochs = 1;
+        let mut runner = StreamingPvtRunner::new(config);
+
+        runner.accept_acquisition(acq(11, 5_500.0), 100);
+        for now_ms in 101..=120 {
+            runner.process_tracking_ms(&[], now_ms, |_| false, |_| false);
+        }
+
+        let active = runner.active_tracking.get(&11).expect("active channel");
+        assert_eq!(active.started_ms, 100);
+        assert!(!active.pull_in_complete(2_099, 2_000));
+        assert_eq!(
+            runner.channels().state(11),
+            ReceiverChannelState::TrackingProbation
+        );
+
+        runner.process_tracking_ms(&[], 2_100, |_| false, |_| false);
+        assert_eq!(runner.channels().state(11), ReceiverChannelState::Lost);
+        assert!(!runner.active_tracking.contains_key(&11));
+
+        runner.accept_acquisition(acq(11, 5_500.0), 5_000);
+        let reacquired = runner.active_tracking.get(&11).expect("reacquired channel");
+        assert_eq!(reacquired.started_ms, 5_000);
+        assert!(!reacquired.pull_in_complete(6_999, 2_000));
+        assert!(reacquired.pull_in_complete(7_000, 2_000));
+        assert_eq!(
+            runner.channels().state(11),
+            ReceiverChannelState::TrackingProbation
         );
     }
 
@@ -2434,10 +2483,16 @@ mod tests {
         config.acquisition_ring_ms = 1;
         config.channel_admission.probation_good_epochs = 1;
         config.channel_admission.min_cn0_db_hz = 0.0;
+        config.channel_admission.min_pll_lock_metric = 0.0;
+        config.channel_admission.max_abs_dll_error_chips = f64::INFINITY;
+        config.channel_admission.max_doppler_jump_hz = f64::INFINITY;
+        config.tracking.cn0_samples = 2;
+        config.bit_sync_start_ms = 0;
         let mut runner = StreamingPvtRunner::new(config);
         runner.ingest_samples(&samples, 1);
 
-        let events = runner.process_tracking_ms(&samples, 2, |_| true, |_| true);
+        runner.process_tracking_ms(&samples, 2, |_| true, |_| true);
+        let events = runner.process_tracking_ms(&samples, 3, |_| true, |_| true);
 
         assert_eq!(events.len(), 1);
         let StreamingPvtEvent::TrackingBatch(updates) = &events[0] else {
@@ -2445,7 +2500,7 @@ mod tests {
         };
         let update = updates.first().expect("one tracking update");
         assert_eq!(update.prn, prn);
-        assert_eq!(update.now_ms, 2);
+        assert_eq!(update.now_ms, 3);
         assert!(update.output.pll_lock_metric > 0.0);
         assert_eq!(update.state, ReceiverChannelState::Healthy);
         assert_eq!(runner.channels().state(prn), ReceiverChannelState::Healthy);
@@ -2573,9 +2628,14 @@ mod tests {
         config.channel_admission.probation_good_epochs = 1;
         config.channel_admission.min_cn0_db_hz = 0.0;
         config.channel_admission.min_pll_lock_metric = 0.0;
+        config.channel_admission.max_abs_dll_error_chips = f64::INFINITY;
+        config.channel_admission.max_doppler_jump_hz = f64::INFINITY;
+        config.tracking.cn0_samples = 2;
+        config.bit_sync_start_ms = 0;
         let mut runner = StreamingPvtRunner::new(config);
         runner.ingest_samples(&samples, 1);
         runner.process_tracking_ms(&samples, 2, |_| true, |_| true);
+        runner.process_tracking_ms(&samples, 3, |_| true, |_| true);
         runner.record_nav_event(&StreamingPvtEvent::NavSymbolReady(StreamingNavSymbol {
             prn,
             now_ms: 6_000,

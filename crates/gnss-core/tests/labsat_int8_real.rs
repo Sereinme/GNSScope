@@ -4,6 +4,7 @@ use gnss_core::pvt::IntegerMsAmbiguityConfig;
 use gnss_core::receiver::{StreamingPvtConfig, StreamingPvtEvent, StreamingPvtRunner};
 use gnss_data::gps_l1ca::PRN_COUNT;
 use num_complex::Complex;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 const DATA_FILE: &str = "../../data/202306202155/Data202306202155(2).dat";
@@ -128,9 +129,6 @@ fn labsat_int8_iq_produces_pvt() {
     config.acquisition.doppler_step_hz = 250.0;
     config.acquisition.threshold = 3.0;
     config.acquisition_ring_ms = 10;
-    config.channel_admission.probation_good_epochs = 1;
-    config.channel_admission.min_cn0_db_hz = 0.0;
-    config.channel_admission.min_pll_lock_metric = 0.0;
     config.continuous_pvt.integer_ms_ambiguity = Some(IntegerMsAmbiguityConfig::default());
     config.continuous_pvt.initial_position_lla_rad =
         Some([40.00154_f64.to_radians(), 116.33028_f64.to_radians(), 95.0]);
@@ -142,15 +140,24 @@ fn labsat_int8_iq_produces_pvt() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(90_000);
     let mut outputs = Vec::new();
+    let mut latest_tracking = BTreeMap::new();
     let mut runner = StreamingPvtRunner::new(config);
     let summary = runner
         .stream_iq_file_until_ms(max_ms, |step| {
-            outputs.extend(step.events.into_iter().filter_map(|event| {
-                let StreamingPvtEvent::PvtOutput(output) = event else {
-                    return None;
-                };
-                Some(*output)
-            }));
+            for event in step.events {
+                match event {
+                    StreamingPvtEvent::PvtOutput(output) => outputs.push(*output),
+                    StreamingPvtEvent::TrackingBatch(updates) => {
+                        for update in updates {
+                            latest_tracking.insert(
+                                update.prn,
+                                (update.output.cn0_db_hz, update.output.pll_lock_metric),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
         })
         .expect("stream LabSat Int8 IQ through PVT");
 
@@ -163,6 +170,9 @@ fn labsat_int8_iq_produces_pvt() {
             "  G{:02}: subframes={}, last_tow={:?}",
             channel.prn, channel.subframes_decoded, channel.last_tow_count
         );
+    }
+    for (prn, (cn0_db_hz, pll_lock_metric)) in &latest_tracking {
+        eprintln!("  G{prn:02}: C/N0={cn0_db_hz:.2} dB-Hz, PLL lock={pll_lock_metric:.3}");
     }
     eprintln!(
         "LabSat events: acquisition={}, tracking={}, bit_sync={}, nav_symbols={}, nav_subframes={}, pvt={}",
