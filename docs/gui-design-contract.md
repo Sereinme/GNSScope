@@ -12,6 +12,7 @@ GNSScope uses a precise signal-laboratory visual language for technical desktop 
 - Semantic colors: green for healthy/valid, amber for acquiring/probation/suspect, red for lost/failed/excluded, and neutral gray for unavailable/absent.
 - Components use stable dimensions, 4-8 px radii, fine separators, and unframed full-width work areas where possible.
 - Numeric output uses tabular figures or a restrained monospace face so coordinates, time, speed, and percentages do not shift.
+- Interface typography uses `Segoe UI Variable Text` on Windows with compact technical labels and stronger title/value contrast; the application does not depend on a separately installed web font.
 - Motion is limited to progress, drawers, status transitions, chart cursors, and epoch interpolation, with reduced-motion behavior.
 
 Light and dark themes preserve identical information hierarchy and semantic meaning; theme is never used to hide controls or change status interpretation.
@@ -49,7 +50,7 @@ This vertical slice is usable. Remaining interaction work is explicit:
 
 The first GUI exposes only configuration fields that are implemented and behaviorally active in the receiver. Signal type currently offers only GPS L1 C/A. It does not expose a nonfunctional FLL-assist toggle or invented NWPR coherent/noncoherent counts; current C/N0 controls map to the implemented prompt-window length and smoothing factor. Planned receiver capabilities remain in development documentation until their backend behavior and tests exist.
 
-All current `GuiProcessingSettings` fields are editable in a draft. The main command header directly edits sample rate in Msps and IF in MHz and selects IQ format; the detailed drawer exposes the remaining numeric, path, PRN-list, prior-position, policy, filter, and parallelism controls in domain groups. Numeric text is parsed into the field's concrete Rust type without implicit clamping. Malformed text and receiver-domain validation are reported separately and both disable queue creation. Historical snapshots are read-only until explicitly copied into a new draft, preserving run reproducibility.
+All current `GuiProcessingSettings` fields are editable in a draft. The compact command title bar shows the selected source and its sample-rate, IF, and IQ-format summary; editing is centralized in the detailed drawer, which exposes one focused category at a time: Input, Acquisition, Tracking, PVT, or Performance. Numeric text is parsed into the field's concrete Rust type without implicit clamping. Malformed text and receiver-domain validation are reported separately in Simplified Chinese and both disable queue creation. Historical snapshots are read-only until explicitly copied into a new draft, preserving run reproducibility.
 
 ## Processing Run Library
 
@@ -136,9 +137,9 @@ A run receives an immutable processing-configuration snapshot when it is queued.
 
 Application display preferences such as light/dark theme are not processing configuration and are not stored in the run snapshot. Changing defaults affects only future drafts, never queued or historical runs.
 
-Primary settings stay in the main workspace beside the run command: source IQ file, signal type, sample rate, intermediate frequency, and the essential start/queue action. Secondary settings open in a `440-520 px` right-side drawer so the technical workspace remains visible.
+The custom window title bar and task toolbar form one compact command surface. It contains product identity, source selection and summary, live/timeline/settings actions, the essential start or cancel command, and the native minimize/maximize/close controls. Historical reprocessing uses an icon-only command with a hover hint. Receiver settings open in a responsive `360-500 px` right-side drawer so the technical workspace remains visible and the title bar never becomes a form row.
 
-The secondary-settings drawer groups controls by input/sampling, acquisition, tracking loops, lock/channel admission, C/N0 estimation, navigation/external ephemeris, PVT/filtering, and performance/parallelism. Groups are independently collapsible; labels expose units, defaults, and concise parameter impact through tooltips. Editable drafts have persistent apply/cancel actions. Queued and historical snapshots reuse the same drawer in read-only mode with a command to duplicate the configuration into a new draft.
+The secondary-settings drawer uses a fixed header, compact category navigation, one scrollable category body, and a fixed draft-status footer. Input contains sampling, IQ, navigation, and prior position; Acquisition contains search and reacquisition scheduling; Tracking contains DLL/PLL, C/N0, and channel admission; PVT contains output cadence, smoothing, Kalman, integer-ms ambiguity, and RAIM; Performance contains parallel scheduling. Queued and historical snapshots reuse the same categories in read-only mode with a command to duplicate the configuration into a new draft.
 
 Standard mode exposes the commonly useful controls in those groups: IQ/chunk settings, acquisition integration and threshold, DLL/PLL bandwidth, lock and minimum C/N0 thresholds, C/N0 window/smoothing, PVT epoch and Doppler averaging, RINEX policy, Hatch/Kalman/integer-ms toggles, and parallel acquisition/tracking. Expert mode additionally exposes Doppler search details, acquisition/reacquisition scheduling, correlator/loop details, full channel-admission thresholds, WLS/RAIM and sigma calibration, Hatch/Kalman internals, GPS-week reference, and navigation timing parameters.
 
@@ -194,7 +195,7 @@ The drawer presents Raw, Smoothed, and Kalman as aligned comparison columns or r
 
 The drawer never changes a completed result's selected solution. A future manual candidate preference, if required, belongs to processing configuration and creates a new run; it must not mutate historical output. Default position, altitude, velocity, and clock plots continue to show only the receiver-selected series.
 
-`scripts/capture-gui-layouts.ps1` exercises the drawer at `1440 x 900` and `1100 x 800` using deterministic preview data, in addition to the settings-drawer and narrow workspace layouts. The preview hook is environment-only and does not alter the production receiver or run library.
+`scripts/capture-gui-layouts.ps1` exercises dark and light settings, a dense Tracking category, candidate comparison at `1440 x 900` and `1100 x 800`, and the narrow workspace using deterministic preview data. The preview hook is environment-only and does not alter the production receiver or run library.
 
 Sky markers expose hover detail for PRN, C/N0, azimuth, elevation, residual, and PVT use. Clicking a sky marker or healthy C/N0 column pins the PRN and links its highlight across both panels. Every plot panel supports a full-width focus mode with an icon-only enter/exit control.
 

@@ -21,7 +21,7 @@ Complete the first production-facing GUI pass before broad performance work:
 - Completed: a release-only real-IQ stress regression forces G01/G11/G17 to `Lost` after converged epoch 79, records three non-converged PVT outputs, reacquires and restores all three channels, and resumes converged PVT at epoch 85 with four satellites.
 - Keep the GUI read-only for completed results; visual polish must not change receiver selection or persisted values.
 
-**Acceptance:** the forced-loss PVT recovery evidence is complete. Priority 1 remains open only for the GUI visual-polish pass and its stable desktop, compact, narrow, and comparison screenshots.
+**Acceptance:** complete. The forced-loss PVT recovery evidence passes; the GUI now has synchronized component/custom light-dark themes, category-focused receiver configuration, localized validation, compact narrow-screen history, and stable desktop, compact, tracking, light-theme, narrow, and comparison screenshots.
 
 Regression command: `cargo test --release -p gnss-core --test streaming_runner_real test_streaming_runner_real_data_resumes_pvt_after_multi_channel_reacquisition -- --ignored --nocapture`.
 
@@ -70,4 +70,4 @@ These are intentionally after the priority roadmap:
 
 ## Current Next Action
 
-Continue with GUI visual polish under Priority 1. The forced-loss/reacquisition PVT recovery regression is complete; do not begin long-term capabilities or unmeasured optimization before the remaining Priority 1 screenshot and interaction review is complete.
+Priority 1 is complete. Continue with Priority 2 accuracy and scenario coverage, beginning with real `Int8` IQ and incomplete-final-epoch coverage before dynamic/high-rate datasets.

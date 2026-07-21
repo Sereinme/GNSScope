@@ -16,7 +16,7 @@ use gpui_component::{
     progress::Progress,
     scroll::ScrollableElement,
     slider::{Slider, SliderEvent, SliderState},
-    ActiveTheme, Disableable, IconName, TitleBar,
+    ActiveTheme, Disableable, IconName, Theme, ThemeMode, TitleBar,
 };
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
@@ -151,6 +151,65 @@ enum SideDrawer {
     CandidateComparison,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsCategory {
+    Input,
+    Acquisition,
+    Tracking,
+    Pvt,
+    Performance,
+}
+
+impl SettingsCategory {
+    const ALL: [Self; 5] = [
+        Self::Input,
+        Self::Acquisition,
+        Self::Tracking,
+        Self::Pvt,
+        Self::Performance,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Input => "输入",
+            Self::Acquisition => "捕获",
+            Self::Tracking => "跟踪",
+            Self::Pvt => "PVT",
+            Self::Performance => "性能",
+        }
+    }
+
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("acquisition") => Self::Acquisition,
+            Some("tracking") => Self::Tracking,
+            Some("pvt") => Self::Pvt,
+            Some("performance") => Self::Performance,
+            _ => Self::Input,
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Input => "采样、IQ 与导航来源",
+            Self::Acquisition => "冷启动与周期性重捕",
+            Self::Tracking => "环路、锁定与信号质量",
+            Self::Pvt => "输出、滤波与完整性",
+            Self::Performance => "并行处理策略",
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::Input => IconName::FolderOpen,
+            Self::Acquisition => IconName::Search,
+            Self::Tracking => IconName::Inspector,
+            Self::Pvt => IconName::ChartPie,
+            Self::Performance => IconName::LayoutDashboard,
+        }
+    }
+}
+
 impl PlotFocus {
     fn id(self) -> &'static str {
         match self {
@@ -233,31 +292,31 @@ struct Palette {
 impl Palette {
     fn light() -> Self {
         Self {
-            background: color(0xf4f6f8),
-            sidebar: color(0xe9edf1),
-            surface: color(0xffffff),
-            surface_alt: color(0xf8fafb),
-            border: color(0xd7dde3),
-            text: color(0x17212b),
-            muted: color(0x64717d),
-            accent: color(0x087ea4),
-            healthy: color(0x16845b),
-            warning: color(0xc27b15),
-            danger: color(0xc33b3b),
+            background: color(0xf1f4f5),
+            sidebar: color(0xe5ebed),
+            surface: color(0xfbfcfc),
+            surface_alt: color(0xf3f7f7),
+            border: color(0xcdd8dc),
+            text: color(0x152027),
+            muted: color(0x667780),
+            accent: color(0x147d99),
+            healthy: color(0x137653),
+            warning: color(0xb46e12),
+            danger: color(0xb9363e),
         }
     }
 
     fn dark() -> Self {
         Self {
-            background: color(0x111315),
-            sidebar: color(0x181b1e),
-            surface: color(0x1d2124),
-            surface_alt: color(0x24292d),
-            border: color(0x343b40),
-            text: color(0xe8edf0),
-            muted: color(0x98a4ac),
-            accent: color(0x35b4d6),
-            healthy: color(0x46b887),
+            background: color(0x0f1417),
+            sidebar: color(0x151b1f),
+            surface: color(0x1a2126),
+            surface_alt: color(0x202930),
+            border: color(0x303c44),
+            text: color(0xecf2f4),
+            muted: color(0x91a0a9),
+            accent: color(0x4bb6d0),
+            healthy: color(0x4db98d),
             warning: color(0xe0a044),
             danger: color(0xe56a6a),
         }
@@ -294,6 +353,7 @@ pub struct GnsscopeApp {
     theme_preference: ThemePreference,
     system_dark: bool,
     side_drawer: Option<SideDrawer>,
+    settings_category: SettingsCategory,
     timeline_visible: bool,
     status_message: String,
 }
@@ -319,6 +379,11 @@ impl GnsscopeApp {
             .as_deref()
             .map(|value| ThemePreference::parse(Some(value)))
             .unwrap_or_else(|| ThemePreference::parse(stored_theme.as_deref()));
+        match theme_preference {
+            ThemePreference::System => Theme::sync_system_appearance(Some(window), cx),
+            ThemePreference::Light => Theme::change(ThemeMode::Light, Some(window), cx),
+            ThemePreference::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
+        }
         let timeline_visible = library
             .as_ref()
             .and_then(|library| library.preference("timeline_visible").ok().flatten())
@@ -438,6 +503,9 @@ impl GnsscopeApp {
             } else {
                 None
             },
+            settings_category: SettingsCategory::parse(
+                std::env::var("GNSSCOPE_SETTINGS_CATEGORY").ok().as_deref(),
+            ),
             timeline_visible,
             status_message: "请选择 IQ 文件开始解算".to_string(),
         };
@@ -473,8 +541,14 @@ impl GnsscopeApp {
         }
     }
 
-    fn cycle_theme(&mut self) {
+    fn cycle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.theme_preference = self.theme_preference.next();
+        match self.theme_preference {
+            ThemePreference::System => Theme::sync_system_appearance(Some(window), cx),
+            ThemePreference::Light => Theme::change(ThemeMode::Light, Some(window), cx),
+            ThemePreference::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
+        }
+        self.system_dark = cx.theme().mode.is_dark();
         if let Some(library) = &self.library {
             let _ = library.set_preference("theme", self.theme_preference.value());
         }
@@ -1170,7 +1244,21 @@ impl GnsscopeApp {
             )
     }
 
-    fn render_title_bar(&self, palette: Palette) -> impl IntoElement {
+    fn render_title_bar(
+        &self,
+        palette: Palette,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_active = self.active_run.is_some();
+        let settings = self.display_settings();
+        let source_summary = format!(
+            "GPS L1 C/A  ·  {:.3} Msps  ·  IF {:.3} MHz  ·  {:?}",
+            settings.sample_rate_hz / 1e6,
+            settings.intermediate_frequency_hz / 1e6,
+            settings.iq_format
+        );
+
         TitleBar::new()
             .bg(palette.sidebar)
             .border_color(palette.border)
@@ -1178,22 +1266,132 @@ impl GnsscopeApp {
             .child(
                 div()
                     .h_full()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
-                    .child(IconName::Map)
+                    .gap(px(6.))
                     .child(
                         div()
-                            .text_size(px(11.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("GNSScope"),
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .flex_shrink_0()
+                            .child(IconName::Map)
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("GNSScope"),
+                            ),
                     )
                     .child(
                         div()
+                            .mx(px(3.))
+                            .h(px(16.))
+                            .w(px(1.))
+                            .flex_shrink_0()
+                            .bg(palette.border),
+                    )
+                    .child(
+                        Button::new("file")
+                            .ghost()
+                            .text_color(palette.text)
+                            .icon(IconName::FolderOpen)
+                            .tooltip("选择 IQ 文件")
+                            .on_click(cx.listener(|this, _, _, cx| this.select_file(cx))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_size(px(9.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(palette.text)
+                            .child(self.file_label()),
+                    )
+                    .children((!compact).then(|| {
+                        div()
+                            .max_w(px(320.))
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
                             .text_size(px(9.))
                             .text_color(palette.muted)
-                            .child("GNSS signal processing workspace"),
-                    ),
+                            .child(source_summary)
+                    }))
+                    .child(
+                        div()
+                            .mx(px(3.))
+                            .h(px(16.))
+                            .w(px(1.))
+                            .flex_shrink_0()
+                            .bg(palette.border),
+                    )
+                    .children((is_active && !self.follow_live).then(|| {
+                        Button::new("return-live")
+                            .ghost()
+                            .text_color(palette.accent)
+                            .icon(IconName::Redo2)
+                            .tooltip("返回最新 epoch")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.return_to_live(window, cx);
+                                cx.notify();
+                            }))
+                    }))
+                    .child(
+                        Button::new("timeline-visibility")
+                            .ghost()
+                            .text_color(palette.text)
+                            .icon(if self.timeline_visible {
+                                IconName::PanelBottom
+                            } else {
+                                IconName::PanelBottomOpen
+                            })
+                            .tooltip(if self.timeline_visible {
+                                "隐藏 epoch 时间轴"
+                            } else {
+                                "显示 epoch 时间轴"
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_timeline_visibility();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("settings")
+                            .ghost()
+                            .text_color(palette.text)
+                            .icon(IconName::Settings2)
+                            .tooltip("接收机详细配置")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.side_drawer =
+                                    toggled_side_drawer(this.side_drawer, SideDrawer::Settings);
+                                cx.notify();
+                            })),
+                    )
+                    .child(if is_active {
+                        Button::new("cancel")
+                            .danger()
+                            .icon(IconName::CircleX)
+                            .tooltip("取消当前解算")
+                            .on_click(cx.listener(|this, _, _, _| this.cancel_active()))
+                    } else if self.selected_run_id.is_some() {
+                        Button::new("run")
+                            .primary()
+                            .icon(IconName::Replace)
+                            .tooltip("按此配置重新解算")
+                            .disabled(!self.can_enqueue())
+                            .on_click(cx.listener(|this, _, _, _| this.enqueue_selected_or_draft()))
+                    } else {
+                        Button::new("run")
+                            .primary()
+                            .label("开始解算")
+                            .disabled(!self.can_enqueue())
+                            .on_click(cx.listener(|this, _, _, _| this.enqueue_selected_or_draft()))
+                    }),
             )
     }
 
@@ -1248,7 +1446,7 @@ impl GnsscopeApp {
                 this.w(px(258.)).min_w(px(220.)).h_full().border_r_1()
             })
             .when(stacked, |this| {
-                this.w_full().h(px(210.)).flex_shrink_0().border_b_1()
+                this.w_full().h(px(170.)).flex_shrink_0().border_b_1()
             })
             .bg(palette.sidebar)
             .border_color(palette.border)
@@ -1285,8 +1483,8 @@ impl GnsscopeApp {
                             .text_color(palette.text)
                             .icon(IconName::Palette)
                             .tooltip(format!("主题：{}", self.theme_preference.label()))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.cycle_theme();
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.cycle_theme(window, cx);
                                 cx.notify();
                             })),
                     ),
@@ -1531,171 +1729,6 @@ impl GnsscopeApp {
             )
     }
 
-    fn render_header(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let is_active = self.active_run.is_some();
-        let settings = self.display_settings();
-        let editable = self.selected_run_id.is_none() && self.active_run.is_none();
-        div()
-            .px(px(22.))
-            .py(px(14.))
-            .bg(palette.surface)
-            .border_b_1()
-            .border_color(palette.border)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(
-                        Button::new("file")
-                            .icon(IconName::FolderOpen)
-                            .tooltip("选择 IQ 文件")
-                            .on_click(cx.listener(|this, _, _, cx| this.select_file(cx))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(palette.text)
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .child(self.file_label()),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(2.))
-                                    .text_size(px(10.))
-                                    .text_color(palette.muted)
-                                    .child(format!(
-                                        "GPS L1 C/A  ·  {:.3} Msps  ·  IF {:.3} MHz  ·  {:?}",
-                                        settings.sample_rate_hz / 1e6,
-                                        settings.intermediate_frequency_hz / 1e6,
-                                        settings.iq_format
-                                    )),
-                            )
-                            .children(editable.then(|| {
-                                div()
-                                    .mt(px(9.))
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap(px(8.))
-                                    .child(self.render_primary_setting_input(
-                                        "采样率",
-                                        "sample_rate_hz",
-                                        "Msps",
-                                        palette,
-                                    ))
-                                    .child(self.render_primary_setting_input(
-                                        "中频",
-                                        "intermediate_frequency_hz",
-                                        "MHz",
-                                        palette,
-                                    ))
-                                    .child(
-                                        div()
-                                            .w(px(124.))
-                                            .child(
-                                                div()
-                                                    .text_size(px(9.))
-                                                    .text_color(palette.muted)
-                                                    .child("信号"),
-                                            )
-                                            .child(
-                                                Button::new("signal-type")
-                                                    .mt(px(3.))
-                                                    .w_full()
-                                                    .label("GPS L1 C/A")
-                                                    .disabled(true),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(150.))
-                                            .child(
-                                                div()
-                                                    .text_size(px(9.))
-                                                    .text_color(palette.muted)
-                                                    .child("IQ 格式"),
-                                            )
-                                            .child(
-                                                Button::new("iq-format")
-                                                    .mt(px(3.))
-                                                    .w_full()
-                                                    .label(format!("{:?}", self.settings.iq_format))
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.cycle_iq_format();
-                                                        cx.notify();
-                                                    })),
-                                            ),
-                                    )
-                            })),
-                    )
-                    .children((is_active && !self.follow_live).then(|| {
-                        Button::new("return-live")
-                            .ghost()
-                            .text_color(palette.accent)
-                            .icon(IconName::Redo2)
-                            .tooltip("返回最新 epoch")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.return_to_live(window, cx);
-                                cx.notify();
-                            }))
-                    }))
-                    .child(
-                        Button::new("timeline-visibility")
-                            .ghost()
-                            .text_color(palette.text)
-                            .icon(if self.timeline_visible {
-                                IconName::PanelBottom
-                            } else {
-                                IconName::PanelBottomOpen
-                            })
-                            .tooltip(if self.timeline_visible {
-                                "隐藏 epoch 时间轴"
-                            } else {
-                                "显示 epoch 时间轴"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_timeline_visibility();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("settings")
-                            .ghost()
-                            .text_color(palette.text)
-                            .icon(IconName::Settings2)
-                            .tooltip("接收机详细配置")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_drawer =
-                                    toggled_side_drawer(this.side_drawer, SideDrawer::Settings);
-                                cx.notify();
-                            })),
-                    )
-                    .child(if is_active {
-                        Button::new("cancel")
-                            .danger()
-                            .icon(IconName::CircleX)
-                            .tooltip("取消当前解算")
-                            .on_click(cx.listener(|this, _, _, _| this.cancel_active()))
-                    } else {
-                        Button::new("run")
-                            .primary()
-                            .label(if self.selected_run_id.is_some() {
-                                "按此配置重算"
-                            } else {
-                                "开始解算"
-                            })
-                            .disabled(!self.can_enqueue())
-                            .on_click(cx.listener(|this, _, _, _| this.enqueue_selected_or_draft()))
-                    }),
-            )
-    }
-
     fn render_progress(&self, palette: Palette) -> impl IntoElement {
         let run = self.active_run.as_ref().or_else(|| {
             self.selected_run_id
@@ -1776,33 +1809,6 @@ impl GnsscopeApp {
         })
     }
 
-    fn render_primary_setting_input(
-        &self,
-        label: &'static str,
-        field: &'static str,
-        unit: &'static str,
-        palette: Palette,
-    ) -> impl IntoElement {
-        let input = self.setting_inputs.get(field).expect("setting input");
-        let invalid = self.setting_issue_message(field).is_some();
-        div()
-            .w(px(124.))
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .text_size(px(9.))
-                    .text_color(if invalid {
-                        palette.danger
-                    } else {
-                        palette.muted
-                    })
-                    .child(label)
-                    .child(unit),
-            )
-            .child(div().mt(px(3.)).h(px(32.)).child(Input::new(input)))
-    }
-
     fn render_setting_input(
         &self,
         label: &'static str,
@@ -1842,425 +1848,604 @@ impl GnsscopeApp {
         palette: Palette,
         compact: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let settings = self.display_settings();
         let issues = self.settings_issues();
         let editable = self.selected_run_id.is_none() && self.active_run.is_none();
-        let has_parse_errors = editable && !self.setting_parse_errors.is_empty();
+        let category = self.settings_category;
+        let issue_count = issues.len() + self.setting_parse_errors.len();
         div()
-            .w(if compact { px(340.) } else { px(470.) })
+            .w(if compact { px(360.) } else { px(500.) })
             .flex_shrink_0()
             .h_full()
-            .overflow_y_scrollbar()
+            .flex()
+            .flex_col()
             .bg(palette.surface)
             .border_l_1()
             .border_color(palette.border)
             .shadow_lg()
-            .p(px(20.))
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(16.))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(palette.text)
-                            .child("接收机详细配置"),
-                    )
-                    .child(
-                        Button::new("close-settings-drawer")
-                            .ghost()
-                            .text_color(palette.muted)
-                            .icon(IconName::CircleX)
-                            .tooltip("关闭详细配置")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_drawer = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .mt(px(6.))
-                    .text_size(px(11.))
-                    .text_color(palette.muted)
-                    .child(if self.selected_run_id.is_some() {
-                        "历史任务配置快照（只读）"
-                    } else {
-                        "任务入队后配置快照冻结"
-                    }),
-            )
-            .children(self.selected_run_id.is_none().then(|| {
-                Button::new("cttc-preset")
-                    .mt(px(14.))
-                    .label("应用 CTTC Spain 预设")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.apply_cttc_preset(window, cx);
-                        cx.notify();
-                    }))
-            }))
-            .children(self.selected_run_id.is_some().then(|| {
-                Button::new("edit-selected-settings")
-                    .mt(px(14.))
-                    .icon(IconName::Copy)
-                    .label("复制为可编辑草稿")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.edit_selected_configuration(window, cx);
-                        cx.notify();
-                    }))
-            }))
-            .children((!issues.is_empty() || has_parse_errors).then(|| {
-                div()
-                    .mt(px(14.))
-                    .p(px(10.))
-                    .rounded(px(5.))
-                    .border_1()
-                    .border_color(palette.danger)
-                    .children(issues.iter().map(|issue| {
-                        div()
-                            .text_size(px(10.))
-                            .text_color(palette.danger)
-                            .child(format!("{}: {}", issue.field, issue.message))
-                    }))
-                    .children(
-                        editable
-                            .then(|| {
-                                self.setting_parse_errors.iter().map(|(field, message)| {
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(palette.danger)
-                                        .child(format!("{field}: {message}"))
-                                })
-                            })
-                            .into_iter()
-                            .flatten(),
-                    )
-            }))
-            .child(
-                div()
-                    .mt(px(14.))
-                    .h(px(34.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(palette.text)
-                            .child("底部 epoch 时间轴"),
-                    )
-                    .child(
-                        Button::new("timeline-visibility-drawer")
-                            .ghost()
-                            .icon(if self.timeline_visible {
-                                IconName::Eye
-                            } else {
-                                IconName::EyeOff
-                            })
-                            .tooltip(if self.timeline_visible {
-                                "隐藏 epoch 时间轴"
-                            } else {
-                                "显示 epoch 时间轴"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_timeline_visibility();
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .children(
-                [
-                    (
-                        "输入与采样",
-                        format!("{:?} · chunk {} ms", settings.iq_format, settings.chunk_ms),
-                    ),
-                    (
-                        "捕获",
-                        format!(
-                            "{} ms × {} · threshold {:.2}",
-                            settings.acquisition_window_ms,
-                            settings.acquisition_noncoherent_integrations,
-                            settings.acquisition_threshold
-                        ),
-                    ),
-                    (
-                        "跟踪",
-                        format!(
-                            "DLL {:.1} Hz · PLL {:.1} Hz",
-                            settings.dll_bandwidth_hz, settings.pll_bandwidth_hz
-                        ),
-                    ),
-                    (
-                        "锁定判据",
-                        format!(
-                            "PLL {:.2} · C/N0 {:.1} dB-Hz",
-                            settings.minimum_pll_lock_metric, settings.minimum_cn0_db_hz
-                        ),
-                    ),
-                    (
-                        "C/N0",
-                        format!(
-                            "{} samples · α {:.2}",
-                            settings.cn0_samples, settings.cn0_smoother_alpha
-                        ),
-                    ),
-                    (
-                        "PVT",
-                        format!(
-                            "{} ms · epoch Doppler average · RAIM {}",
-                            settings.pvt_output_rate_ms,
-                            if settings.enable_raim { "on" } else { "off" }
-                        ),
-                    ),
-                    (
-                        "性能",
-                        format!(
-                            "acq {} · tracking {}",
-                            settings.parallel_acquisition, settings.parallel_tracking
-                        ),
-                    ),
-                ]
-                .into_iter()
-                .filter(move |_| !editable)
-                .map(|(label, value)| {
-                    div()
-                        .mt(px(16.))
-                        .pb(px(12.))
-                        .border_b_1()
-                        .border_color(palette.border)
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(palette.text)
-                                .child(label),
-                        )
-                        .child(
-                            div()
-                                .mt(px(4.))
-                                .text_size(px(11.))
-                                .text_color(palette.muted)
-                                .child(value),
-                        )
-                }),
-            )
-            .children(editable.then(|| {
-                div()
-                    .mt(px(20.))
-                    .pt(px(14.))
-                    .border_t_1()
+                    .flex_shrink_0()
+                    .p(px(18.))
+                    .border_b_1()
                     .border_color(palette.border)
-                    .child(Self::config_group_title("输入格式", palette))
-                    .child(self.render_setting_input("读取 chunk", "chunk_ms", "ms", palette))
                     .child(
                         div()
-                            .mt(px(10.))
+                            .flex()
+                            .items_start()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .child(
+                                        div()
+                                            .text_size(px(17.))
+                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .text_color(palette.text)
+                                            .child("接收机配置"),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt(px(4.))
+                                            .text_size(px(10.))
+                                            .text_color(palette.muted)
+                                            .child(if editable {
+                                                "更改将作为下一次解算的配置快照"
+                                            } else {
+                                                "历史任务快照 · 只读"
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                Button::new("close-settings-drawer")
+                                    .ghost()
+                                    .icon(IconName::CircleX)
+                                    .tooltip("关闭接收机配置")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.side_drawer = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .mt(px(14.))
                             .flex()
                             .items_center()
                             .justify_between()
                             .child(
                                 div()
-                                    .text_size(px(10.))
-                                    .text_color(palette.muted)
-                                    .child("IQ 格式"),
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .text_size(px(11.))
+                                    .text_color(palette.text)
+                                    .child(IconName::Eye)
+                                    .child("epoch 时间轴"),
                             )
                             .child(
-                                Button::new("drawer-iq-format")
-                                    .label(format!("{:?}", self.settings.iq_format))
+                                Button::new("timeline-visibility-drawer")
+                                    .ghost()
+                                    .icon(if self.timeline_visible {
+                                        IconName::Eye
+                                    } else {
+                                        IconName::EyeOff
+                                    })
+                                    .tooltip(if self.timeline_visible {
+                                        "隐藏 epoch 时间轴"
+                                    } else {
+                                        "显示 epoch 时间轴"
+                                    })
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.cycle_iq_format();
+                                        this.toggle_timeline_visibility();
                                         cx.notify();
                                     })),
                             ),
                     )
-                    .child(Self::config_group_title("导航与先验", palette))
-                    .child(self.render_setting_input(
-                        "外部 RINEX 导航文件",
-                        "rinex_nav_path",
-                        "路径；留空为无",
-                        palette,
-                    ))
-                    .child(self.render_setting_toggle(
-                        "允许环境变量导航文件",
-                        self.settings.use_rinex_nav_environment,
-                        "use_rinex_nav_environment",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_toggle(
-                        "自动发现同目录导航文件",
-                        self.settings.auto_discover_colocated_nav,
-                        "auto_discover_colocated_nav",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_input(
-                        "初始位置",
-                        "initial_position_lla_deg_m",
-                        "纬度, 经度, 高程",
-                        palette,
-                    ))
-                    .child(Self::config_group_title("捕获与重捕获", palette))
-                    .child(self.render_setting_input(
-                        "捕获窗口",
-                        "acquisition_window_ms",
-                        "ms",
-                        palette,
-                    ))
-                    .child(self.render_setting_input(
-                        "非相干累加",
-                        "acquisition_noncoherent_integrations",
-                        "次",
-                        palette,
-                    ))
-                    .child(self.render_setting_input(
-                        "捕获阈值",
-                        "acquisition_threshold",
-                        "",
-                        palette,
-                    ))
-                    .child(self.render_setting_input(
-                        "冷启动扫描周期",
-                        "cold_acquisition_interval_ms",
-                        "ms",
-                        palette,
-                    ))
-                    .child(self.render_setting_input(
-                        "最大多普勒",
-                        "acquisition_doppler_max_hz",
-                        "Hz",
-                        palette,
-                    ))
-                    .child(self.render_setting_input(
-                        "多普勒步进",
-                        "acquisition_doppler_step_hz",
-                        "Hz",
-                        palette,
-                    ))
-                    .child(self.render_setting_input(
-                        "重捕获周期",
-                        "reacquisition_interval_ms",
-                        "ms",
-                        palette,
-                    ))
-                    .child(self.render_setting_input(
-                        "单次最大 PRN",
-                        "max_acquisition_prns_per_scan",
-                        "1-32",
-                        palette,
-                    ))
-                    .child(self.render_setting_input(
-                        "固定 PRN",
-                        "fixed_prns",
-                        "逗号分隔；留空为 1-32",
-                        palette,
-                    ))
-                    .child(Self::config_group_title("跟踪环", palette))
-                    .child(self.render_setting_input("DLL 带宽", "dll_bandwidth_hz", "Hz", palette))
-                    .child(self.render_setting_input("PLL 带宽", "pll_bandwidth_hz", "Hz", palette))
-                    .child(self.render_setting_input(
-                        "早迟间距",
-                        "early_late_spacing_chips",
-                        "chips",
-                        palette,
-                    ))
-                    .child(self.render_setting_toggle(
-                        "载波辅助码环",
-                        self.settings.carrier_aiding,
-                        "carrier_aiding",
-                        palette,
-                        cx,
-                    ))
-                    .child(Self::config_group_title("C/N0 与通道准入", palette))
-                    .child(self.render_setting_input(
-                        "C/N0 窗长",
-                        "cn0_samples",
-                        "samples",
-                        palette,
-                    ))
-                    .child(self.render_setting_input(
-                        "C/N0 平滑系数",
-                        "cn0_smoother_alpha",
-                        "0-1",
-                        palette,
-                    ))
-                    .child(self.render_setting_input(
-                        "PLL lock 阈值",
-                        "minimum_pll_lock_metric",
-                        "0-1",
-                        palette,
-                    ))
-                    .child(self.render_setting_input(
-                        "最低 C/N0",
-                        "minimum_cn0_db_hz",
-                        "dB-Hz",
-                        palette,
-                    ))
-                    .child(self.render_setting_input(
-                        "准入观察期",
-                        "probation_good_epochs",
-                        "epochs",
-                        palette,
-                    ))
-                    .child(Self::config_group_title("PVT 与滤波", palette))
-                    .child(self.render_setting_input(
-                        "PVT 输出 epoch",
-                        "pvt_output_rate_ms",
-                        "ms",
-                        palette,
-                    ))
-                    .child(self.render_setting_toggle(
-                        "epoch 多普勒平均",
-                        self.settings.average_doppler_over_pvt_epoch,
-                        "average_doppler_over_pvt_epoch",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_toggle(
-                        "载波平滑",
-                        self.settings.enable_carrier_smoothing,
-                        "enable_carrier_smoothing",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_toggle(
-                        "Kalman",
-                        self.settings.enable_kalman,
-                        "enable_kalman",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_toggle(
-                        "整数毫秒模糊度解算",
-                        self.settings.enable_integer_ms_ambiguity_resolution,
-                        "enable_integer_ms_ambiguity_resolution",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_toggle(
-                        "RAIM 故障检测与排除",
-                        self.settings.enable_raim,
-                        "enable_raim",
-                        palette,
-                        cx,
-                    ))
-                    .child(Self::config_group_title("性能", palette))
-                    .child(self.render_setting_toggle(
-                        "并行捕获",
-                        self.settings.parallel_acquisition,
-                        "parallel_acquisition",
-                        palette,
-                        cx,
-                    ))
-                    .child(self.render_setting_toggle(
-                        "并行跟踪",
-                        self.settings.parallel_tracking,
-                        "parallel_tracking",
-                        palette,
-                        cx,
-                    ))
+                    .children((editable || self.selected_run_id.is_some()).then(|| {
+                        Button::new("cttc-preset")
+                            .mt(px(12.))
+                            .ghost()
+                            .icon(IconName::Star)
+                            .label(if editable {
+                                "应用 CTTC Spain 预设"
+                            } else {
+                                "复制为可编辑草稿"
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if this.selected_run_id.is_some() {
+                                    this.edit_selected_configuration(window, cx);
+                                } else {
+                                    this.apply_cttc_preset(window, cx);
+                                }
+                                cx.notify();
+                            }))
+                    }))
+                    .children((issue_count > 0).then(|| {
+                        div()
+                            .mt(px(12.))
+                            .p(px(9.))
+                            .rounded(px(5.))
+                            .flex()
+                            .items_start()
+                            .gap(px(8.))
+                            .bg(palette.danger.opacity(0.10))
+                            .border_1()
+                            .border_color(palette.danger.opacity(0.45))
+                            .text_size(px(10.))
+                            .text_color(palette.danger)
+                            .child(IconName::TriangleAlert)
+                            .child(format!(
+                                "{issue_count} 项配置需要处理{}",
+                                issues
+                                    .first()
+                                    .map(|issue| format!(" · {}", issue.message))
+                                    .unwrap_or_default()
+                            ))
+                    })),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px(px(14.))
+                    .py(px(10.))
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(6.))
+                    .border_b_1()
+                    .border_color(palette.border)
+                    .children(SettingsCategory::ALL.into_iter().map(|candidate| {
+                        let selected = category == candidate;
+                        Button::new(SharedString::from(format!(
+                            "settings-category-{:?}",
+                            candidate
+                        )))
+                        .ghost()
+                        .icon(candidate.icon())
+                        .label(candidate.label())
+                        .text_color(if selected {
+                            palette.accent
+                        } else {
+                            palette.muted
+                        })
+                        .when(selected, |button| {
+                            button
+                                .bg(palette.accent.opacity(0.12))
+                                .border_1()
+                                .border_color(palette.accent.opacity(0.35))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.settings_category = candidate;
+                            cx.notify();
+                        }))
+                    })),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px(px(18.))
+                    .pt(px(14.))
+                    .pb(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(palette.text)
+                            .child(category.label()),
+                    )
+                    .child(
+                        div()
+                            .mt(px(3.))
+                            .text_size(px(10.))
+                            .text_color(palette.muted)
+                            .child(category.description()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .px(px(18.))
+                    .pb(px(20.))
+                    .child(if editable {
+                        self.render_settings_category_content(category, palette, cx)
+                            .into_any_element()
+                    } else {
+                        self.render_read_only_category(category, settings, palette)
+                            .into_any_element()
+                    }),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px(px(18.))
+                    .py(px(10.))
+                    .border_t_1()
+                    .border_color(palette.border)
+                    .text_size(px(9.))
+                    .text_color(palette.muted)
+                    .child("草稿即时验证 · 入队后配置冻结"),
+            )
+            .into_any_element()
+    }
+
+    fn render_settings_category_content(
+        &self,
+        category: SettingsCategory,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match category {
+            SettingsCategory::Input => self.render_input_settings(palette, cx).into_any_element(),
+            SettingsCategory::Acquisition => {
+                self.render_acquisition_settings(palette).into_any_element()
+            }
+            SettingsCategory::Tracking => self
+                .render_tracking_settings(palette, cx)
+                .into_any_element(),
+            SettingsCategory::Pvt => self.render_pvt_settings(palette, cx).into_any_element(),
+            SettingsCategory::Performance => self
+                .render_performance_settings(palette, cx)
+                .into_any_element(),
+        }
+    }
+
+    fn render_input_settings(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .child(Self::config_group_title("采样", palette))
+            .child(self.render_setting_input("采样率", "sample_rate_hz", "Msps", palette))
+            .child(self.render_setting_input("中频", "intermediate_frequency_hz", "MHz", palette))
+            .child(self.render_setting_input("读取 chunk", "chunk_ms", "ms", palette))
+            .child(
+                div()
+                    .mt(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(palette.muted)
+                            .child("IQ 格式"),
+                    )
+                    .child(
+                        Button::new("drawer-iq-format")
+                            .ghost()
+                            .icon(IconName::Replace)
+                            .label(format!("{:?}", self.settings.iq_format))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.cycle_iq_format();
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(Self::config_group_title("导航来源", palette))
+            .child(self.render_setting_input(
+                "RINEX 导航文件",
+                "rinex_nav_path",
+                "可选路径",
+                palette,
+            ))
+            .child(self.render_setting_toggle(
+                "允许环境变量导航文件",
+                self.settings.use_rinex_nav_environment,
+                "use_rinex_nav_environment",
+                palette,
+                cx,
+            ))
+            .child(self.render_setting_toggle(
+                "自动发现同目录导航文件",
+                self.settings.auto_discover_colocated_nav,
+                "auto_discover_colocated_nav",
+                palette,
+                cx,
+            ))
+            .child(self.render_setting_input(
+                "初始位置",
+                "initial_position_lla_deg_m",
+                "纬度, 经度, 高程",
+                palette,
+            ))
+    }
+
+    fn render_acquisition_settings(&self, palette: Palette) -> impl IntoElement {
+        div()
+            .child(Self::config_group_title("搜索窗口", palette))
+            .child(self.render_setting_input("捕获窗口", "acquisition_window_ms", "ms", palette))
+            .child(self.render_setting_input(
+                "非相干累加",
+                "acquisition_noncoherent_integrations",
+                "次",
+                palette,
+            ))
+            .child(self.render_setting_input("捕获阈值", "acquisition_threshold", "", palette))
+            .child(self.render_setting_input(
+                "最大多普勒",
+                "acquisition_doppler_max_hz",
+                "Hz",
+                palette,
+            ))
+            .child(self.render_setting_input(
+                "多普勒步进",
+                "acquisition_doppler_step_hz",
+                "Hz",
+                palette,
+            ))
+            .child(Self::config_group_title("调度策略", palette))
+            .child(self.render_setting_input(
+                "冷启动扫描周期",
+                "cold_acquisition_interval_ms",
+                "ms",
+                palette,
+            ))
+            .child(self.render_setting_input(
+                "重捕获周期",
+                "reacquisition_interval_ms",
+                "ms",
+                palette,
+            ))
+            .child(self.render_setting_input(
+                "单次最大 PRN",
+                "max_acquisition_prns_per_scan",
+                "1-32",
+                palette,
+            ))
+            .child(self.render_setting_input("固定 PRN", "fixed_prns", "逗号分隔", palette))
+    }
+
+    fn render_tracking_settings(
+        &self,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .child(Self::config_group_title("环路参数", palette))
+            .child(self.render_setting_input("DLL 带宽", "dll_bandwidth_hz", "Hz", palette))
+            .child(self.render_setting_input("PLL 带宽", "pll_bandwidth_hz", "Hz", palette))
+            .child(self.render_setting_input(
+                "早迟间距",
+                "early_late_spacing_chips",
+                "chips",
+                palette,
+            ))
+            .child(self.render_setting_toggle(
+                "载波辅助码环",
+                self.settings.carrier_aiding,
+                "carrier_aiding",
+                palette,
+                cx,
+            ))
+            .child(Self::config_group_title("锁定与准入", palette))
+            .child(self.render_setting_input(
+                "PLL lock 阈值",
+                "minimum_pll_lock_metric",
+                "0-1",
+                palette,
+            ))
+            .child(self.render_setting_input("最低 C/N0", "minimum_cn0_db_hz", "dB-Hz", palette))
+            .child(self.render_setting_input(
+                "准入观察期",
+                "probation_good_epochs",
+                "epochs",
+                palette,
+            ))
+            .child(Self::config_group_title("C/N0 估计", palette))
+            .child(self.render_setting_input("C/N0 窗长", "cn0_samples", "samples", palette))
+            .child(self.render_setting_input("C/N0 平滑系数", "cn0_smoother_alpha", "0-1", palette))
+    }
+
+    fn render_pvt_settings(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .child(Self::config_group_title("输出节奏", palette))
+            .child(self.render_setting_input("PVT 输出 epoch", "pvt_output_rate_ms", "ms", palette))
+            .child(self.render_setting_toggle(
+                "epoch 多普勒平均",
+                self.settings.average_doppler_over_pvt_epoch,
+                "average_doppler_over_pvt_epoch",
+                palette,
+                cx,
+            ))
+            .child(Self::config_group_title("滤波与完整性", palette))
+            .child(self.render_setting_toggle(
+                "载波平滑",
+                self.settings.enable_carrier_smoothing,
+                "enable_carrier_smoothing",
+                palette,
+                cx,
+            ))
+            .child(self.render_setting_toggle(
+                "Kalman",
+                self.settings.enable_kalman,
+                "enable_kalman",
+                palette,
+                cx,
+            ))
+            .child(self.render_setting_toggle(
+                "整数毫秒模糊度解算",
+                self.settings.enable_integer_ms_ambiguity_resolution,
+                "enable_integer_ms_ambiguity_resolution",
+                palette,
+                cx,
+            ))
+            .child(self.render_setting_toggle(
+                "RAIM 故障检测与排除",
+                self.settings.enable_raim,
+                "enable_raim",
+                palette,
+                cx,
+            ))
+    }
+
+    fn render_performance_settings(
+        &self,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .child(Self::config_group_title("并行处理", palette))
+            .child(self.render_setting_toggle(
+                "并行捕获",
+                self.settings.parallel_acquisition,
+                "parallel_acquisition",
+                palette,
+                cx,
+            ))
+            .child(self.render_setting_toggle(
+                "并行跟踪",
+                self.settings.parallel_tracking,
+                "parallel_tracking",
+                palette,
+                cx,
+            ))
+            .child(
+                div()
+                    .mt(px(14.))
+                    .p(px(11.))
+                    .rounded(px(5.))
+                    .bg(palette.surface_alt)
+                    .text_size(px(10.))
+                    .text_color(palette.muted)
+                    .child("并行处理只影响计算调度，不改变确定性的 PRN 合并顺序。"),
+            )
+    }
+
+    fn render_read_only_category(
+        &self,
+        category: SettingsCategory,
+        settings: &GuiProcessingSettings,
+        palette: Palette,
+    ) -> impl IntoElement {
+        let rows: Vec<(&'static str, String)> = match category {
+            SettingsCategory::Input => vec![
+                (
+                    "采样率",
+                    format!("{:.3} Msps", settings.sample_rate_hz / 1e6),
+                ),
+                (
+                    "中频",
+                    format!("{:.3} MHz", settings.intermediate_frequency_hz / 1e6),
+                ),
+                ("IQ 格式", format!("{:?}", settings.iq_format)),
+                (
+                    "导航来源",
+                    if settings.rinex_nav_path.is_some() {
+                        "外部 RINEX"
+                    } else {
+                        "IQ-only"
+                    }
+                    .to_string(),
+                ),
+            ],
+            SettingsCategory::Acquisition => vec![
+                ("捕获窗口", format!("{} ms", settings.acquisition_window_ms)),
+                (
+                    "非相干累加",
+                    format!("{} 次", settings.acquisition_noncoherent_integrations),
+                ),
+                (
+                    "重捕获周期",
+                    format!("{} ms", settings.reacquisition_interval_ms),
+                ),
+                (
+                    "最大 PRN",
+                    settings.max_acquisition_prns_per_scan.to_string(),
+                ),
+            ],
+            SettingsCategory::Tracking => vec![
+                (
+                    "DLL / PLL",
+                    format!(
+                        "{:.1} / {:.1} Hz",
+                        settings.dll_bandwidth_hz, settings.pll_bandwidth_hz
+                    ),
+                ),
+                (
+                    "最低 C/N0",
+                    format!("{:.1} dB-Hz", settings.minimum_cn0_db_hz),
+                ),
+                (
+                    "PLL lock",
+                    format!("{:.2}", settings.minimum_pll_lock_metric),
+                ),
+            ],
+            SettingsCategory::Pvt => vec![
+                ("PVT epoch", format!("{} ms", settings.pvt_output_rate_ms)),
+                (
+                    "载波平滑",
+                    if settings.enable_carrier_smoothing {
+                        "开启"
+                    } else {
+                        "关闭"
+                    }
+                    .to_string(),
+                ),
+                (
+                    "Kalman",
+                    if settings.enable_kalman {
+                        "开启"
+                    } else {
+                        "关闭"
+                    }
+                    .to_string(),
+                ),
+                (
+                    "RAIM",
+                    if settings.enable_raim {
+                        "开启"
+                    } else {
+                        "关闭"
+                    }
+                    .to_string(),
+                ),
+            ],
+            SettingsCategory::Performance => vec![
+                (
+                    "并行捕获",
+                    if settings.parallel_acquisition {
+                        "开启"
+                    } else {
+                        "关闭"
+                    }
+                    .to_string(),
+                ),
+                (
+                    "并行跟踪",
+                    if settings.parallel_tracking {
+                        "开启"
+                    } else {
+                        "关闭"
+                    }
+                    .to_string(),
+                ),
+            ],
+        };
+        div()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(palette.border)
+            .bg(palette.surface_alt)
+            .p(px(12.))
+            .children(rows.into_iter().map(|(label, value)| {
+                div()
+                    .py(px(9.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(palette.border.opacity(0.55))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(palette.muted)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(palette.text)
+                            .child(value),
+                    )
             }))
     }
 
@@ -2285,10 +2470,13 @@ impl GnsscopeApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         div()
-            .mt(px(10.))
+            .mt(px(8.))
+            .min_h(px(38.))
             .flex()
             .items_center()
             .justify_between()
+            .border_b_1()
+            .border_color(palette.border.opacity(0.45))
             .child(
                 div()
                     .text_size(px(10.))
@@ -2298,6 +2486,22 @@ impl GnsscopeApp {
             .child(
                 Button::new(SharedString::from(format!("{field}-toggle")))
                     .ghost()
+                    .icon(if enabled {
+                        IconName::CircleCheck
+                    } else {
+                        IconName::Dash
+                    })
+                    .bg(if enabled {
+                        palette.healthy.opacity(0.12)
+                    } else {
+                        palette.surface_alt
+                    })
+                    .border_1()
+                    .border_color(if enabled {
+                        palette.healthy.opacity(0.35)
+                    } else {
+                        palette.border
+                    })
                     .text_color(if enabled {
                         palette.healthy
                     } else {
@@ -2859,10 +3063,10 @@ impl Render for GnsscopeApp {
             .size_full()
             .bg(palette.background)
             .text_color(palette.text)
-            .font_family("Segoe UI")
+            .font_family("Segoe UI Variable Text")
             .flex()
             .flex_col()
-            .child(self.render_title_bar(palette))
+            .child(self.render_title_bar(palette, compact, cx))
             .child(
                 div()
                     .flex_1()
@@ -2884,7 +3088,6 @@ impl Render for GnsscopeApp {
                                     .h_full()
                                     .flex()
                                     .flex_col()
-                                    .child(self.render_header(palette, cx))
                                     .child(
                                         div()
                                             .flex_1()
@@ -3819,7 +4022,7 @@ mod history_queue_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{epoch_index_for_percent, toggled_side_drawer, SideDrawer};
+    use super::{epoch_index_for_percent, toggled_side_drawer, SettingsCategory, SideDrawer};
 
     #[test]
     fn timeline_percent_maps_to_shared_epoch_index() {
@@ -3846,6 +4049,20 @@ mod tests {
                 SideDrawer::CandidateComparison
             ),
             None
+        );
+    }
+
+    #[test]
+    fn settings_category_environment_values_are_stable() {
+        assert_eq!(SettingsCategory::parse(None), SettingsCategory::Input);
+        assert_eq!(
+            SettingsCategory::parse(Some("tracking")),
+            SettingsCategory::Tracking
+        );
+        assert_eq!(SettingsCategory::ALL.len(), 5);
+        assert_eq!(
+            SettingsCategory::ALL.map(SettingsCategory::label),
+            ["输入", "捕获", "跟踪", "PVT", "性能"]
         );
     }
 }

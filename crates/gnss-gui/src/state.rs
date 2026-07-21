@@ -189,87 +189,61 @@ pub fn validate_settings(settings: &GuiProcessingSettings) -> Vec<GuiSettingsIss
     let mut issues = Vec::new();
     let mut issue = |field, message| issues.push(GuiSettingsIssue { field, message });
     match settings.iq_file_path.as_deref() {
-        Some(path) if path.as_os_str().is_empty() => issue("iq_file_path", "Select an IQ file"),
-        Some(path) if !looks_like_local_path(path) => {
-            issue("iq_file_path", "IQ file path is invalid")
-        }
-        None => issue("iq_file_path", "Select an IQ file"),
+        Some(path) if path.as_os_str().is_empty() => issue("iq_file_path", "请选择 IQ 文件"),
+        Some(path) if !looks_like_local_path(path) => issue("iq_file_path", "IQ 文件路径无效"),
+        None => issue("iq_file_path", "请选择 IQ 文件"),
         _ => {}
     }
     if !settings.sample_rate_hz.is_finite() || settings.sample_rate_hz <= 0.0 {
-        issue("sample_rate_hz", "Sample rate must be positive");
+        issue("sample_rate_hz", "采样率必须大于 0");
     }
     if !settings.intermediate_frequency_hz.is_finite() {
-        issue(
-            "intermediate_frequency_hz",
-            "Intermediate frequency must be finite",
-        );
+        issue("intermediate_frequency_hz", "中频必须是有限数值");
     } else if settings.sample_rate_hz.is_finite()
         && settings.sample_rate_hz > 0.0
         && settings.intermediate_frequency_hz.abs() > settings.sample_rate_hz / 2.0
     {
-        issue(
-            "intermediate_frequency_hz",
-            "Intermediate frequency must be within Nyquist",
-        );
+        issue("intermediate_frequency_hz", "中频必须位于奈奎斯特范围内");
     }
     if settings
         .rinex_nav_path
         .as_deref()
         .is_some_and(|path| path.as_os_str().is_empty())
     {
-        issue("rinex_nav_path", "Navigation file path is invalid");
+        issue("rinex_nav_path", "导航文件路径无效");
     }
     if settings.chunk_ms == 0 || settings.chunk_ms > 1_000 {
-        issue("chunk_ms", "Chunk duration must be 1-1000 ms");
+        issue("chunk_ms", "读取 chunk 必须为 1-1000 ms");
     }
     if settings.pvt_output_rate_ms == 0 || settings.pvt_output_rate_ms > 60_000 {
-        issue("pvt_output_rate_ms", "PVT epoch must be 1-60000 ms");
+        issue("pvt_output_rate_ms", "PVT epoch 必须为 1-60000 ms");
     } else if settings.chunk_ms > 0 && settings.pvt_output_rate_ms < settings.chunk_ms as u64 {
-        issue(
-            "pvt_output_rate_ms",
-            "PVT epoch cannot be shorter than the input chunk",
-        );
+        issue("pvt_output_rate_ms", "PVT epoch 不能短于读取 chunk");
     }
     if settings.acquisition_window_ms == 0 || settings.acquisition_window_ms > 1_000 {
-        issue(
-            "acquisition_window_ms",
-            "Acquisition window must be 1-1000 ms",
-        );
+        issue("acquisition_window_ms", "捕获窗口必须为 1-1000 ms");
     }
     if settings.acquisition_noncoherent_integrations == 0
         || settings.acquisition_noncoherent_integrations > 1_000
     {
         issue(
             "acquisition_noncoherent_integrations",
-            "Noncoherent integrations must be 1-1000",
+            "非相干累加次数必须为 1-1000",
         );
     }
     if !settings.acquisition_threshold.is_finite() || settings.acquisition_threshold <= 0.0 {
-        issue(
-            "acquisition_threshold",
-            "Acquisition threshold must be positive",
-        );
+        issue("acquisition_threshold", "捕获阈值必须大于 0");
     }
     if settings.cold_acquisition_interval_ms == 0 {
-        issue(
-            "cold_acquisition_interval_ms",
-            "Cold acquisition interval must be nonzero",
-        );
+        issue("cold_acquisition_interval_ms", "冷启动扫描周期必须大于 0");
     }
     if settings.reacquisition_interval_ms == 0 {
-        issue(
-            "reacquisition_interval_ms",
-            "Reacquisition interval must be nonzero",
-        );
+        issue("reacquisition_interval_ms", "重捕获周期必须大于 0");
     }
     if !settings.acquisition_doppler_max_hz.is_finite()
         || settings.acquisition_doppler_max_hz <= 0.0
     {
-        issue(
-            "acquisition_doppler_max_hz",
-            "Maximum Doppler must be positive",
-        );
+        issue("acquisition_doppler_max_hz", "最大多普勒必须大于 0");
     }
     if !settings.acquisition_doppler_step_hz.is_finite()
         || settings.acquisition_doppler_step_hz <= 0.0
@@ -278,69 +252,51 @@ pub fn validate_settings(settings: &GuiProcessingSettings) -> Vec<GuiSettingsIss
     {
         issue(
             "acquisition_doppler_step_hz",
-            "Doppler step must be positive and no larger than the search span",
+            "多普勒步进必须大于 0 且不超过搜索范围",
         );
     }
     if !(1..=32).contains(&settings.max_acquisition_prns_per_scan) {
         issue(
             "max_acquisition_prns_per_scan",
-            "PRNs per scan must be 1-32",
+            "单次扫描 PRN 数必须为 1-32",
         );
     }
     if !settings.dll_bandwidth_hz.is_finite() || settings.dll_bandwidth_hz <= 0.0 {
-        issue("dll_bandwidth_hz", "DLL bandwidth must be positive");
+        issue("dll_bandwidth_hz", "DLL 带宽必须大于 0");
     }
     if !settings.pll_bandwidth_hz.is_finite() || settings.pll_bandwidth_hz <= 0.0 {
-        issue("pll_bandwidth_hz", "PLL bandwidth must be positive");
+        issue("pll_bandwidth_hz", "PLL 带宽必须大于 0");
     } else if settings.dll_bandwidth_hz.is_finite()
         && settings.dll_bandwidth_hz > settings.pll_bandwidth_hz
     {
-        issue(
-            "dll_bandwidth_hz",
-            "DLL bandwidth cannot exceed PLL bandwidth",
-        );
+        issue("dll_bandwidth_hz", "DLL 带宽不能超过 PLL 带宽");
     }
     if !settings.early_late_spacing_chips.is_finite()
         || !(0.0..=1.0).contains(&settings.early_late_spacing_chips)
         || settings.early_late_spacing_chips == 0.0
     {
-        issue(
-            "early_late_spacing_chips",
-            "Early/late spacing must be within (0, 1] chips",
-        );
+        issue("early_late_spacing_chips", "早迟间距必须位于 (0, 1] chips");
     }
     if settings.cn0_samples == 0 || settings.cn0_samples > 10_000 {
-        issue("cn0_samples", "C/N0 window must be 1-10000 samples");
+        issue("cn0_samples", "C/N0 窗长必须为 1-10000 samples");
     }
     if !settings.cn0_smoother_alpha.is_finite()
         || !(0.0..=1.0).contains(&settings.cn0_smoother_alpha)
     {
-        issue(
-            "cn0_smoother_alpha",
-            "C/N0 smoothing alpha must be within 0-1",
-        );
+        issue("cn0_smoother_alpha", "C/N0 平滑系数必须位于 0-1");
     }
     if !settings.minimum_pll_lock_metric.is_finite()
         || !(0.0..=1.0).contains(&settings.minimum_pll_lock_metric)
     {
-        issue(
-            "minimum_pll_lock_metric",
-            "PLL lock threshold must be within 0-1",
-        );
+        issue("minimum_pll_lock_metric", "PLL lock 阈值必须位于 0-1");
     }
     if !settings.minimum_cn0_db_hz.is_finite()
         || !(0.0..=80.0).contains(&settings.minimum_cn0_db_hz)
     {
-        issue(
-            "minimum_cn0_db_hz",
-            "Minimum C/N0 must be within 0-80 dB-Hz",
-        );
+        issue("minimum_cn0_db_hz", "最低 C/N0 必须位于 0-80 dB-Hz");
     }
     if settings.probation_good_epochs == 0 || settings.probation_good_epochs > 10_000 {
-        issue(
-            "probation_good_epochs",
-            "Probation length must be 1-10000 epochs",
-        );
+        issue("probation_good_epochs", "准入观察期必须为 1-10000 epochs");
     }
     if let Some(prns) = settings.fixed_prns.as_deref() {
         let mut seen = [false; 33];
@@ -351,7 +307,7 @@ pub fn validate_settings(settings: &GuiProcessingSettings) -> Vec<GuiSettingsIss
         {
             issue(
                 "fixed_prns",
-                "Fixed PRNs must be unique GPS PRNs in the range 1-32",
+                "固定 PRN 必须是 1-32 范围内且不重复的 GPS PRN",
             );
         }
     }
@@ -359,19 +315,19 @@ pub fn validate_settings(settings: &GuiProcessingSettings) -> Vec<GuiSettingsIss
         if !latitude.is_finite() || !(-90.0..=90.0).contains(&latitude) {
             issue(
                 "initial_position_lla_deg_m",
-                "Latitude must be within -90 to 90 degrees",
+                "初始纬度必须位于 -90 到 90 度",
             );
         }
         if !longitude.is_finite() || !(-180.0..=180.0).contains(&longitude) {
             issue(
                 "initial_position_lla_deg_m",
-                "Longitude must be within -180 to 180 degrees",
+                "初始经度必须位于 -180 到 180 度",
             );
         }
         if !altitude.is_finite() || !(-1_000.0..=100_000.0).contains(&altitude) {
             issue(
                 "initial_position_lla_deg_m",
-                "Altitude prior must be within -1000 to 100000 m",
+                "初始高程必须位于 -1000 到 100000 m",
             );
         }
     }
