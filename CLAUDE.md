@@ -1,107 +1,111 @@
-# CLAUDE.md
+# GNSScope
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+GNSScope is an offline GPS L1 C/A software receiver and analysis desktop application written in Rust. It processes recorded Int8 or Int16 interleaved IQ files through acquisition, tracking, navigation-message decoding, observables, continuous PVT, and GUI persistence/visualization. "Streaming" in this repository means bounded, single-pass processing of a file; live SDR input is not implemented.
 
-## Project
+The main reference capture is GNSS-SDR's `2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN` at 4 Msps, zero IF, Int16 interleaved I/Q. A second LabSat capture exercises signed Int8 I/Q at 10.23 Msps. Both datasets are gitignored and live under `data/` when available.
 
-GNSScope is an **offline GPS L1 C/A software receiver** written in Rust. It reads raw IQ captures from a local file and runs the full receive chain: acquisition → tracking → nav-message decoding → PVT. There is no live/streaming SDR frontend; everything is post-processing of a recorded file.
+Algorithm implementations deliberately follow GNSS-SDR where noted. When behavior is unclear, compare with the corresponding implementation under `reference/gnss-sdr/` rather than inferring from an old progress note.
 
-The reference dataset and ground truth is GNSS-SDR's `2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN` (100 s GPS L1 C/A, 4 Msps, zero-IF, int16 interleaved I/Q). Reference position: 41.2747°N, 1.9875°E, ~52 m.
+## Current State
 
-Algorithm implementations are **deliberate ports of GNSS-SDR** (acquisition `pcps_acquisition.cc`, tracking `Tracking_FLL_PLL_filter`, telemetry `gps_l1_ca_telemetry_decoder_gs.cc`). When in doubt about intended behavior, compare against the `reference/gnss-sdr` tree.
+M0-M2 are implemented. The production path includes streaming IQ input, deterministic parallel acquisition/tracking, channel admission and periodic reacquisition, GPS NAV decoding, optional RINEX navigation fallback, continuous Raw/Smoothed/Kalman PVT, Doppler velocity, GPS/UTC time, a real GPUI worker, editable configuration, SQLite processing-run persistence, history replay, and candidate comparison.
+
+`docs/roadmap.md` is the authoritative source for current priority and completion status. `docs/receiver-readiness-audit.md` records detailed real-data and performance evidence. `docs/M1-PROGRESS.md`, `docs/M2-PROGRESS.md`, and the PVT research documents are historical investigation records; their open-problem sections have been superseded by later fixes unless the roadmap or readiness audit repeats them.
+
+The current roadmap priority is accuracy and scenario coverage: incomplete final 1 ms epochs, dynamic/high-rate PVT and rapid Doppler changes, independent reference comparisons, ephemeris/GPS-week/leap-second boundaries, and complete real-data serial-versus-parallel equality. Runtime and memory measurement comes before additional optimization.
 
 ## Commands
 
-Workspace with three crates: `gnss-core` (signal processing), `gnss-data` (static tables, zero deps), `gnss-gui` (placeholder stub; depends on `gnss-core` but gpui integration not yet wired).
-
 ```bash
-cargo test                                    # all unit + integration tests
-cargo test -p gnss-core                       # core only
-cargo test -p gnss-core --test pvt_e2e        # a single integration test
-cargo test -p gnss-core --test pvt_e2e -- --nocapture  # see eprintln diagnostics
-cargo test -p gnss-core --test pvt_e2e --release -- --nocapture  # fast RED loop (~45s)
-cargo build -p gnss-core
-cargo fmt --all
-cargo clippy --all-targets
+cargo run -p gnss-gui
+cargo test --workspace
+cargo test -p gnss-core --lib
+cargo test -p gnss-gui --lib
+cargo test --release -p gnss-core --test pvt_e2e -- --nocapture
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-### Integration test files
-
-| Test file | What it exercises |
-|---|---|
-| `pvt_e2e.rs` | Full pipeline: acq → tracking → nav decode → PVT on real data. **Primary integration test.** |
-| `real_data.rs` | Acquisition-only on CTTC Spain (M0 verification). |
-| `real_tracking.rs` | Acquisition + tracking loop on real data. |
-| `m0_acquisition.rs` | M0 milestone: ≥4 satellites detected. |
-| `m1_tracking.rs` | M1 milestone: tracking + nav decode. |
-| `doppler_verify.rs` | Doppler consistency checks. |
-| `bit_sync_analysis.rs` | Bit synchronizer diagnostics. |
-| `diagnose.rs` | Ad-hoc diagnosis harness (not a formal test). |
-| `filter_test.rs` | Loop filter unit-level verification. |
-
-### Real-data tests silently skip without the dataset
-
-Integration tests under `crates/gnss-core/tests/` (`real_data.rs`, `real_tracking.rs`, `pvt_e2e.rs`, `doppler_verify.rs`, …) require the CTTC Spain IQ file. They `return` early (not fail) when the file is missing, so a green `cargo test` does **not** mean the receiver works end-to-end. To actually exercise them:
+Long real-data regressions marked `#[ignore]` must be selected explicitly. For example:
 
 ```bash
-tar -xzf data/cttc_spain.tar.gz -C data/   # produces data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/*.dat
+cargo test --release -p gnss-core --test streaming_runner_real test_streaming_runner_real_data_resumes_pvt_after_multi_channel_reacquisition -- --ignored --nocapture
+cargo test --release -p gnss-core --test labsat_int8_real -- --ignored --nocapture
 ```
 
-`data/` is gitignored, so the dataset is never committed. Tests locate it via the relative path `../../data/...` (run from the crate dir, as `cargo test` does).
+Many real-data tests return early when their gitignored dataset is absent, so a green default test run does not prove end-to-end receiver behavior. Check test output and dataset presence before citing real-data verification.
 
-### Regenerating PRN codes
-
-`crates/gnss-data/src/prn_codes.inl` is generated by `scripts/gen_prn_codes.py` and `include!`d into `gps_l1ca.rs`. Edit the script, not the `.inl` file:
+Regenerate PRN data through its source script:
 
 ```bash
-python scripts/gen_prn_codes.py   # rewrites crates/gnss-data/src/prn_codes.inl
+python scripts/gen_prn_codes.py
 ```
 
-## Architecture
+Do not manually edit `crates/gnss-data/src/prn_codes.inl`.
 
-### Streaming pipeline (ADR-0001)
+## Workspace
 
-The receiver is a **single-pass chunked pipeline**. The IQ file is read in fixed chunks (1 ms = one C/A code period, ~4000 samples at 4 Msps). State lives per-channel and is carried across chunk boundaries — the code NCO and carrier NCO phase must be inherited exactly between chunks, or tracking breaks. See `docs/adr/0001-streaming-pipeline.md`.
+### `gnss-data`
 
-In the integration tests this manifests as a per-ms loop: read 1 ms, call `trk.process(&signal[ms*spm..(ms+1)*spm])` on every channel, push the prompt value, run bit sync, and feed 20 ms coherent sums to the nav decoder. There is not yet a higher-level orchestrator — `pvt_e2e.rs` is the de-facto reference for how the pieces compose.
+Zero-dependency static GPS L1 C/A data. `gps_l1ca.rs` exposes the generated `PRN_CODES: [[i8; 1023]; 32]` table.
 
-### Signal-processing stages (`gnss-core`)
+### `gnss-core`
 
-- **`acquisition/pcps.rs`** — Parallel Code Phase Search. FFT-based circular cross-correlation of the local PRN against the input, swept over Doppler bins. CFAR detection via peak/mean ratio. **Code-phase convention**: the IFFT peak is the shift on the *local* code; the reported `code_phase_chips = (1023 − raw_phase) % 1023`. This convention matters downstream — see M2 notes below.
-- **`tracking/dll_pll.rs`** — 3rd-order Costas PLL + carrier-aided DLL, exact port of GNSS-SDR's `Tracking_FLL_PLL_filter`. `code_phase_chips` here is a **code NCO accumulator** (`+= code_freq × t`, mod 1023), *not* the signal's true code phase. This distinction is the central open issue (below). Outputs per-ms: prompt, early/late magnitudes, code phase, Doppler, C/N₀.
-- **`tracking/bit_sync.rs`** — histogram bit synchronizer; finds the 20 ms bit boundary.
-- **`nav/decoder.rs`** — GPS NAV parity (GNSS-SDR `gps_word_parityCheck`), preamble sync (threshold 7/8), subframe assembly, HOW TOW parse. Maintains `tow_at_current_symbol_ms` (GNSS-SDR `d_TOW_at_current_symbol_ms` pattern): set to HOW TOW × 1000 on a valid decode, then `+20` per symbol.
-- **`nav/ephemeris.rs`** — subframe 1–3 → `Ephemeris` (IS-GPS-200 bit offsets, IODC/IODE check), subframe 4 → Klobuchar iono. `EphemerisCollector::feed` accumulates words and returns a complete ephemeris when ready.
-- **`io/`** — `reader.rs` (`IqReader` with `IqFormat::Int8`/`Int16` support, `BufReader`-backed sequential read), `resample.rs` (`decimate_by_2` averaging anti-alias filter for sample rate conversion).
-- **`pvt/`** — `coords.rs` (WGS84 ECEF↔LLA via Bowring iteration), `satpos.rs` (Kepler + relativistic clock + TGD), `atmosphere.rs` (Klobuchar iono + Saastamoinen trop), `pseudorange.rs`, `solver.rs` (iterative WLS, C/N₀-weighted, Sagnac Earth-rotation correction). State is `[x,y,z,clk_bias]`; velocity is a future extension.
+- `io/`: sequential Int8/Int16 interleaved IQ reading and resampling helpers.
+- `acquisition/`: FFT-based PCPS acquisition with Doppler search and noncoherent integration.
+- `tracking/`: DLL/Costas PLL tracking, carrier aiding, lock/C/N0 metrics, and bit synchronization.
+- `nav/`: GPS NAV parity/subframe decoding, ephemeris and ionosphere parsing, and optional RINEX navigation sources.
+- `pvt/`: observables, pseudorange formation, satellite state, atmospheric corrections, WLS/RAIM, Hatch smoothing, Kalman filtering, velocity, coordinates, and time conversion.
+- `receiver/`: `StreamingPvtRunner`, channel health/admission, fair cold-acquisition and reacquisition scheduling, deterministic tracking merge, navigation state, PVT cadence, events, and acquisition buffering.
 
-### Static data (`gnss-data`)
+`receiver/mod.rs` is the production orchestration path. Preserve absolute sample stamps, common receive epochs, channel-local temporal order, NCO continuity, and deterministic PRN ordering when changing it.
 
-Zero-dependency crate. Contains the `include!`d PRN code table (`prn_codes.inl`, generated by `scripts/gen_prn_codes.py`) exposed as `const PRN_CODES: [[i8; 1023]; 32]`. Rebuild with `python scripts/gen_prn_codes.py`.
+### `gnss-gui`
 
-### Trait abstraction (ADR-0002, deferred)
+The GPUI application is fully wired, not a placeholder. It includes a background file-processing worker, receiver configuration and validation, task queue controls, SQLite run persistence, crash-to-interrupted recovery, historical epoch replay, responsive light/dark layouts, custom GNSS plots, and read-only Raw/Smoothed/Kalman candidate comparison.
 
-ADR-0002 specifies a `SignalSpec`/`Acquisition``Tracking`/`NavDecoder` trait layer to allow future signals (L1C/L2C/L5). **This is not yet implemented** — current code uses concrete GPS L1 C/A types. Per M2 progress notes, keep concrete types through M2 and introduce the trait layer afterward. Do not prematurely abstract.
+Completed processing-run snapshots are immutable. Reprocessing creates a new processing run with a new configuration snapshot. The active processing run and selected processing run are separate concepts; browsing history must not stop background processing.
 
-## Current state and the open PVT issue
+## Architecture Constraints
 
-M0 (acquisition) and M1 (tracking + nav decode) are complete and verified on real data. M2 (PVT) is end-to-end working but **inaccurate**: latitude is correct (~33 m error) while longitude/altitude are off by ~5 km.
+### Streaming pipeline
 
-Root cause is documented in `docs/M2-PROGRESS.md` and is the most important context for any PVT work: **`DllPllTracking.code_phase_chips` is a code NCO accumulator, not the signal's true code phase.** Its absolute value carries an initialization offset from acquisition; only its *relative* differences between satellites partially encode range differences, which is why latitude (relative geometry) comes out right but absolute range is wrong.
+ADR-0001 defines a bounded, single-pass file-processing pipeline. IQ is read in configurable chunks and subdivided into 1 ms GPS L1 C/A tracking steps. Acquisition can integrate multiple milliseconds. Acquisition and active tracking can run in parallel, while results are merged by PRN before shared receiver state changes and PVT epochs advance serially.
 
-The planned fix (per M2-PROGRESS.md "待修复") is the GNSS-SDR approach: add a sample counter and sub-sample residual code phase to tracking, compute receive time as `(sample_counter + rem_code_phase_samples) / fs`, and form pseudorange as `c × (T_rx − TOW_tx)` instead of using the NCO accumulator directly. Do **not** "fix" pseudorange by tweaking the NCO formula — multiple alternatives have been tried and regress (see the "尝试过的方法" table in M2-PROGRESS.md).
+### Signal abstraction
 
-Other known gaps: Klobuchar iono is implemented but not applied (`iono.valid = false` until subframe-4 page 18 is decoded); almanac decoding is intentionally out of scope.
+ADR-0002 accepts `SignalSpec`/`Acquisition`/`Tracking`/`NavDecoder` traits as the intended extension design, but these traits are not implemented. Current production code uses concrete GPS L1 C/A types. Treat multi-signal and multi-constellation support as future work and do not add speculative seams until a second implementation needs them.
+
+### Persistence and GUI
+
+ADR-0003 selects a versioned SQLite processing-run library under the user's application-data directory. It stores derived results and source metadata, not IQ file contents. ADR-0004 assigns standard controls to `gpui-component` and domain plots to native GPUI drawing; compatible GPUI dependency revisions must move together.
+
+## Verification Guidance
+
+- Unit tests live beside implementations; integration and real-data tests live under `crates/gnss-core/tests/` and in the GUI worker module.
+- `pvt_e2e.rs` exercises the full CTTC receive chain; `streaming_runner_real.rs` exercises the production runner and recovery; `labsat_int8_real.rs` covers the LabSat format and long PVT path.
+- Preserve serial/parallel numerical equivalence and deterministic event order.
+- Do not weaken quality gates or replace unavailable/non-converged candidate values with zeros to make GUI or tests pass.
+- Position, velocity, time, and performance claims should identify the dataset, duration, build profile, and whether an ignored regression actually ran.
 
 ## Conventions
 
-- **Ubiquitous language**: `CONTEXT.md` defines the canonical domain terms (Chinese). Code, docs, and issues must use these terms and not synonyms — e.g. "pseudorange" not "pseudo-range", "acquisition" not "capture" for the acquisition stage.
-- **GNSS-SDR as reference**: Algorithm modules cite their GNSS-SDR source in the doc header. When porting or fixing, verify against the corresponding `.cc`/`.h` in `reference/gnss-sdr` rather than reinventing.
-- **Tests**: unit tests live inline (`#[cfg(test)]`); end-to-end / milestone verification lives in `crates/gnss-core/tests/` (`m0_acquisition.rs`, `m1_tracking.rs`, `pvt_e2e.rs`, …). Use `--nocapture` to read the `eprintln` diagnostics these tests emit.
-- **Issue tracker**: specs and tickets live as markdown under `.scratch/<feature-slug>/` (see `docs/agents/issue-tracker.md`, `docs/agents/triage-labels.md`). Triage labels use the canonical strings verbatim.
-- **ADRs** live in `docs/adr/`; milestone progress summaries in `docs/M{n}-PROGRESS.md`. Read the relevant ADR before changing pipeline or trait architecture.
-- **Research docs**:
-  - `docs/debug-pvt-pseudorange-research.md` — deep-dive on GNSS-SDR's pseudorange formula, IS-GPS-200, and RTKLIB references.
-  - `docs/pvt-pseudorange-fix-analysis.md` — comprehensive fix analysis: root cause confirmation, all attempted approaches and their outcomes, GNSS-SDR code-phase handoff investigation, recommended observables-layer approach.
-  Read both before touching pseudorange computation.
-- **`AGENTS.md`** is a sibling Claude config (not the same as this file); it references the issue tracker and domain docs but is stale. This file (`CLAUDE.md`) is authoritative.
+- `CONTEXT.md` defines the canonical domain vocabulary. Use those terms in code, docs, and issues.
+- Read the relevant ADR before changing pipeline, persistence, GUI, or signal-extension design. Surface conflicts explicitly.
+- `docs/roadmap.md` owns priorities; do not create a competing backlog in progress or audit documents.
+- The generated PRN table is derived output; change `scripts/gen_prn_codes.py` and regenerate it.
+- Keep edits scoped and preserve user changes in the worktree.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as markdown files under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: one `CONTEXT.md` plus `docs/adr/` at the repo root. See `docs/agents/domain.md`.

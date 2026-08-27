@@ -126,8 +126,8 @@ impl Default for GuiProcessingSettings {
             intermediate_frequency_hz: 0.0,
             iq_format: GuiIqFormat::Int16Interleaved,
             rinex_nav_path: None,
-            use_rinex_nav_environment: true,
-            auto_discover_colocated_nav: true,
+            use_rinex_nav_environment: false,
+            auto_discover_colocated_nav: false,
             enable_carrier_smoothing: true,
             enable_kalman: true,
             enable_integer_ms_ambiguity_resolution: true,
@@ -254,9 +254,9 @@ impl GuiProcessingSettings {
             doppler_max_hz: self.acquisition_doppler_max_hz,
             doppler_step_hz: self.acquisition_doppler_step_hz,
             reacq_interval_ms: self.reacquisition_interval_ms.max(1),
+            reacq_doppler_max_offset_hz: 10_000.0,
             max_acq_prns_per_scan: self.max_acquisition_prns_per_scan.max(1),
             fixed_prns: self.fixed_prns.clone(),
-            ..Default::default()
         };
         let tracking = TrackingConfig {
             fs: self.sample_rate_hz,
@@ -330,6 +330,15 @@ impl GuiProcessingSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_settings_use_navigation_messages_without_rinex_fallback() {
+        let settings = GuiProcessingSettings::default();
+
+        assert!(settings.rinex_nav_path.is_none());
+        assert!(!settings.use_rinex_nav_environment);
+        assert!(!settings.auto_discover_colocated_nav);
+    }
 
     #[test]
     fn parses_labsat_int8_capture_metadata() {

@@ -198,7 +198,13 @@ fn test_pvt_e2e() {
     // Per-ms tracking loop: track all channels, record prompt_i, run bit sync,
     // and at each bit boundary feed the 20 ms coherent sum to NavDecoder.
     let mut ephemerides: EphemerisMap = EphemerisMap::new();
-    let iono_fallback = load_optional_rinex_iono(data_path, &RinexNavConfig::default());
+    let iono_fallback = load_optional_rinex_iono(
+        data_path,
+        &RinexNavConfig {
+            auto_discover_colocated: true,
+            ..Default::default()
+        },
+    );
     let mut iono = iono_fallback
         .as_ref()
         .map(|fallback| fallback.iono.clone())

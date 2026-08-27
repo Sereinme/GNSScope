@@ -18,7 +18,7 @@ pub use events::GuiReceiverEvent;
 pub use layout::{GuiPanel, GuiPanelKind, ReceiverWorkspaceLayout};
 pub use nav_status::{GuiNavSourceKind, GuiNavSourceStatus};
 pub use renderer::render_workspace_snapshot;
-pub use run_library::{ProcessingRun, RunLibrary, RunStatus, StoredEpoch};
+pub use run_library::{ProcessingRun, RunLibrary, RunPersistenceWriter, RunStatus, StoredEpoch};
 pub use sample::sample_pvt_view_model;
 pub use screen::{
     build_receiver_workspace_screen, GuiMetric, GuiScreenSection, GuiSettingControl,
@@ -32,4 +32,5 @@ pub use view_model::{
 };
 pub use worker::{
     spawn_streaming_worker, ActiveWorker, GuiDiagnosticEvent, GuiDiagnosticEventKind, WorkerEvent,
+    WORKER_EVENT_CAPACITY,
 };

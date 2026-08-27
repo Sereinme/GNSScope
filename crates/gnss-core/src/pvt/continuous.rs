@@ -183,7 +183,7 @@ pub enum PvtCandidateDisposition {
     Unavailable,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PvtTimeOutput {
     pub gps_week: Option<u16>,
     pub receiver_time_sow: Option<f64>,
@@ -196,7 +196,7 @@ pub struct PvtTimeOutput {
     pub receiver_clock_drift_sps: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PvtVelocityOutput {
     pub ecef_velocity_mps: Ecef,
     pub enu_velocity_mps: Ecef,
@@ -210,7 +210,7 @@ pub struct PvtVelocityOutput {
     pub used_prns: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PvtQualityOutput {
     pub converged: bool,
     pub n_sats: usize,
@@ -230,7 +230,7 @@ pub struct PvtQualityOutput {
     pub velocity_sigma_mps: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PvtSatelliteOutput {
     pub prn: u8,
     pub azimuth_rad: f64,
@@ -242,7 +242,7 @@ pub struct PvtSatelliteOutput {
     pub raim_excluded: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PvtCandidateOutput {
     pub solution_kind: PvtEpochSolutionKind,
     pub ecef: Ecef,
@@ -259,7 +259,7 @@ pub struct PvtCandidateStatusOutput {
     pub disposition: PvtCandidateDisposition,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PvtEpochOutput {
     pub epoch_index: usize,
     pub solution_kind: PvtEpochSolutionKind,

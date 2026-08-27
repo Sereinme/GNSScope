@@ -36,9 +36,9 @@ impl Default for RinexNavConfig {
     fn default() -> Self {
         Self {
             explicit_path: None,
-            use_environment: true,
+            use_environment: false,
             environment_variable: DEFAULT_RINEX_NAV_ENV.to_string(),
-            auto_discover_colocated: true,
+            auto_discover_colocated: false,
             colocated_filenames: vec![
                 "brdc0940.13n".to_string(),
                 "BRDC00IGS_R_20130940000_01D_MN.rnx".to_string(),
@@ -87,10 +87,45 @@ impl RinexNavConfig {
                         source_label: "rinex-nav-colocated".to_string(),
                     });
                 }
+                for path in discover_colocated_rinex_nav_paths(parent) {
+                    if candidates.iter().any(|candidate| candidate.path == path) {
+                        continue;
+                    }
+                    candidates.push(RinexNavCandidate {
+                        path,
+                        source_kind: RinexNavSourceKind::Colocated,
+                        source_label: "rinex-nav-colocated".to_string(),
+                    });
+                }
             }
         }
         candidates
     }
+}
+
+fn discover_colocated_rinex_nav_paths(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_uncompressed_rinex_nav_path(path))
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
+fn is_uncompressed_rinex_nav_path(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    let extension = extension.to_ascii_lowercase();
+    extension == "nav"
+        || extension == "rnx"
+        || (extension.len() == 3
+            && extension.as_bytes()[..2].iter().all(u8::is_ascii_digit)
+            && extension.ends_with('n'))
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +217,7 @@ mod tests {
         let config = RinexNavConfig {
             explicit_path: Some(PathBuf::from("manual.13n")),
             environment_variable: "GNSSCOPE_TEST_RINEX_NAV_MISSING".to_string(),
+            auto_discover_colocated: true,
             colocated_filenames: vec!["brdc0940.13n".to_string()],
             ..Default::default()
         };
@@ -209,6 +245,68 @@ mod tests {
         assert!(config
             .candidates_for_iq_path(Path::new("signal.dat"))
             .is_empty());
+    }
+
+    #[test]
+    fn test_rinex_nav_config_defaults_to_navigation_message_only() {
+        let directory = env::temp_dir().join(format!(
+            "gnsscope-rinex-default-{}-{}",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        fs::create_dir(&directory).expect("create temporary RINEX directory");
+        let iq_path = directory.join("capture.dat");
+        fs::write(&iq_path, []).expect("write temporary IQ placeholder");
+        fs::write(directory.join("broadcast.rnx"), []).expect("write colocated RINEX placeholder");
+
+        let candidates = RinexNavConfig::default().candidates_for_iq_path(&iq_path);
+
+        let _ = fs::remove_dir_all(&directory);
+        assert!(
+            candidates.is_empty(),
+            "default receiver should derive navigation data from the signal"
+        );
+    }
+
+    #[test]
+    fn test_rinex_nav_config_discovers_standard_colocated_nav_files() {
+        let directory = env::temp_dir().join(format!(
+            "gnsscope-rinex-discovery-{}-{}",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        fs::create_dir(&directory).expect("create temporary RINEX directory");
+        let iq_path = directory.join("capture.dat");
+        let rinex_path = directory.join("BRDC00IGS_R_20231710000_01D_MN.rnx");
+        fs::write(&iq_path, []).expect("write temporary IQ placeholder");
+        fs::write(
+            &rinex_path,
+            "\
+     3.04           N: GNSS NAV DATA    M: MIXED            RINEX VERSION / TYPE
+GPSA   1.7695E-08  2.2352E-08 -1.1921E-07 -1.1921E-07       IONOSPHERIC CORR
+GPSB   1.2288E+05  1.6384E+05 -1.9661E+05 -2.6214E+05       IONOSPHERIC CORR
+                                                            END OF HEADER
+",
+        )
+        .expect("write temporary RINEX nav");
+        fs::write(directory.join("notes.txt"), []).expect("write unrelated placeholder");
+        let config = RinexNavConfig {
+            use_environment: false,
+            auto_discover_colocated: true,
+            colocated_filenames: Vec::new(),
+            ..Default::default()
+        };
+
+        let candidates = config.candidates_for_iq_path(&iq_path);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, rinex_path);
+        assert_eq!(candidates[0].source_kind, RinexNavSourceKind::Colocated);
+
+        let loaded = load_optional_rinex_nav_capabilities(&iq_path, &config)
+            .expect("discovered colocated RINEX nav should load");
+        let _ = fs::remove_dir_all(&directory);
+        assert!(loaded.iono.expect("GPS ionosphere should be present").valid);
     }
 
     #[test]

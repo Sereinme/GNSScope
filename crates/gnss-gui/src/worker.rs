@@ -5,10 +5,12 @@ use num_complex::Complex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc::Sender,
+    mpsc::SyncSender,
     Arc,
 };
 use std::thread::{self, JoinHandle};
+
+pub const WORKER_EVENT_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuiDiagnosticEventKind {
@@ -65,7 +67,7 @@ pub enum WorkerEvent {
         phase: String,
     },
     Epoch {
-        pvt: GuiPvtViewModel,
+        pvt: Box<GuiPvtViewModel>,
         channels: Vec<GuiChannelStatus>,
     },
     Channels(Vec<GuiChannelStatus>),
@@ -103,7 +105,7 @@ impl Drop for ActiveWorker {
 
 pub fn spawn_streaming_worker(
     settings: GuiProcessingSettings,
-    sender: Sender<WorkerEvent>,
+    sender: SyncSender<WorkerEvent>,
 ) -> ActiveWorker {
     let cancel = Arc::new(AtomicBool::new(false));
     let worker_cancel = Arc::clone(&cancel);
@@ -117,7 +119,7 @@ pub fn spawn_streaming_worker(
 fn run_streaming_worker(
     settings: GuiProcessingSettings,
     cancel: Arc<AtomicBool>,
-    sender: Sender<WorkerEvent>,
+    sender: SyncSender<WorkerEvent>,
 ) {
     let config = settings.streaming_pvt_config();
     let Some(path) = config.iq_path.clone() else {
@@ -241,7 +243,7 @@ fn run_streaming_worker(
                 StreamingPvtEvent::PvtOutput(output) => {
                     pvt_epochs += 1;
                     let _ = sender.send(WorkerEvent::Epoch {
-                        pvt: GuiPvtViewModel::from_epoch_output(&output),
+                        pvt: Box::new(GuiPvtViewModel::from_epoch_output(&output)),
                         channels: channels.values().cloned().collect(),
                     });
                 }
@@ -291,7 +293,8 @@ fn run_streaming_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::GuiIqFormat;
+    use crate::{GuiIqFormat, RunLibrary, RunStatus};
+    use gnss_core::pvt::PvtEpochSolutionKind;
     use std::io::Write;
     use std::sync::mpsc;
     use uuid::Uuid;
@@ -310,7 +313,7 @@ mod tests {
             acquisition_window_ms: 10,
             ..Default::default()
         };
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(WORKER_EVENT_CAPACITY);
         let worker = spawn_streaming_worker(settings, sender);
         let events: Vec<_> = receiver.iter().collect();
         drop(worker);
@@ -329,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "processes real LabSat IQ through the GUI worker until PVT converges"]
+    #[ignore = "processes real LabSat IQ to first PVT, or the full file with GNSSCOPE_LABSAT_FULL_FILE"]
     fn real_labsat_gui_settings_acquire_full_constellation_and_produce_pvt() {
         let iq_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../data/202306202155/Data202306202155(2).dat");
@@ -339,13 +342,21 @@ mod tests {
         }
         let mut settings = GuiProcessingSettings::default();
         assert!(settings.select_iq_file(iq_path));
+        if let Some(path) = std::env::var_os("GNSSCOPE_LABSAT_RINEX_NAV") {
+            settings.rinex_nav_path = Some(path.into());
+        }
+        if std::env::var_os("GNSSCOPE_PARALLEL_TRACKING").as_deref() == Some("0".as_ref()) {
+            settings.parallel_tracking = false;
+        }
         let settings = settings.normalized_for_processing();
         assert!(settings.fixed_prns.is_none());
+        let process_full_file = std::env::var_os("GNSSCOPE_LABSAT_FULL_FILE").is_some();
 
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(WORKER_EVENT_CAPACITY);
         let worker = spawn_streaming_worker(settings, sender);
         let mut acquired_prns = BTreeSet::new();
-        let mut converged_pvt = None;
+        let mut converged_pvts = Vec::new();
+        let mut completed = false;
         while let Ok(event) = receiver.recv() {
             match event {
                 WorkerEvent::Diagnostic(event)
@@ -354,26 +365,214 @@ mod tests {
                     acquired_prns.extend(event.prn);
                 }
                 WorkerEvent::Epoch { pvt, .. } if pvt.quality.converged => {
-                    converged_pvt = Some(pvt);
-                    worker.cancel();
+                    converged_pvts.push(pvt);
+                    if !process_full_file {
+                        worker.cancel();
+                    }
                 }
-                WorkerEvent::Cancelled { .. } | WorkerEvent::Completed { .. } => break,
+                WorkerEvent::Completed { .. } => {
+                    completed = true;
+                    break;
+                }
+                WorkerEvent::Cancelled { .. } => break,
                 WorkerEvent::Failed(message) => panic!("GUI worker failed: {message}"),
                 _ => {}
             }
         }
 
-        let pvt = converged_pvt.expect("converged GUI PVT output");
+        let pvt = converged_pvts.last().expect("converged GUI PVT output");
         eprintln!(
-            "GUI LabSat PVT: acquired={acquired_prns:?}, lat={:.8}, lon={:.8}, alt={:.3} m, sats={:?}",
+            "GUI LabSat final PVT: acquired={acquired_prns:?}, lat={:.8}, lon={:.8}, alt={:.3} m, sats={:?}",
             pvt.latitude_deg,
             pvt.longitude_deg,
             pvt.altitude_m,
             pvt.quality.used_prns
         );
+        if process_full_file {
+            assert!(completed, "full-file LabSat worker did not complete");
+            let altitudes = converged_pvts
+                .iter()
+                .map(|pvt| pvt.altitude_m)
+                .collect::<Vec<_>>();
+            let altitude_mean = altitudes.iter().sum::<f64>() / altitudes.len() as f64;
+            let altitude_sigma = (altitudes
+                .iter()
+                .map(|altitude| (altitude - altitude_mean).powi(2))
+                .sum::<f64>()
+                / altitudes.len() as f64)
+                .sqrt();
+            let tail = &altitudes[altitudes.len().saturating_sub(20)..];
+            let tail_mean = tail.iter().sum::<f64>() / tail.len() as f64;
+            let tail_sigma = (tail
+                .iter()
+                .map(|altitude| (altitude - tail_mean).powi(2))
+                .sum::<f64>()
+                / tail.len() as f64)
+                .sqrt();
+            let altitude_min = altitudes.iter().copied().fold(f64::INFINITY, f64::min);
+            let altitude_max = altitudes.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            eprintln!(
+                "GUI LabSat altitude: converged={}, mean={altitude_mean:.3} m, sigma={altitude_sigma:.3} m, range={altitude_min:.3}..{altitude_max:.3} m; last {} mean={tail_mean:.3} m, sigma={tail_sigma:.3} m, reference=95.000 m",
+                altitudes.len(),
+                tail.len()
+            );
+            for kind in [
+                PvtEpochSolutionKind::Raw,
+                PvtEpochSolutionKind::Smoothed,
+                PvtEpochSolutionKind::Kalman,
+            ] {
+                let candidate_altitudes = converged_pvts
+                    .iter()
+                    .filter_map(|pvt| pvt.candidate(kind))
+                    .filter(|candidate| candidate.quality.converged)
+                    .map(|candidate| (candidate.altitude_m, candidate.quality.residual_rms_m))
+                    .collect::<Vec<_>>();
+                let candidate_tail =
+                    &candidate_altitudes[candidate_altitudes.len().saturating_sub(20)..];
+                let candidate_altitude_mean = candidate_tail
+                    .iter()
+                    .map(|(altitude, _)| altitude)
+                    .sum::<f64>()
+                    / candidate_tail.len() as f64;
+                let candidate_altitude_sigma = (candidate_tail
+                    .iter()
+                    .map(|(altitude, _)| (altitude - candidate_altitude_mean).powi(2))
+                    .sum::<f64>()
+                    / candidate_tail.len() as f64)
+                    .sqrt();
+                let candidate_residual_mean = candidate_tail
+                    .iter()
+                    .map(|(_, residual_rms)| residual_rms)
+                    .sum::<f64>()
+                    / candidate_tail.len() as f64;
+                eprintln!(
+                    "GUI LabSat candidate {kind:?}: converged={}, tail={}, altitude_mean={candidate_altitude_mean:.3} m, altitude_sigma={candidate_altitude_sigma:.3} m, residual_rms_mean={candidate_residual_mean:.3} m",
+                    candidate_altitudes.len(),
+                    candidate_tail.len()
+                );
+            }
+            let mut residuals_by_prn = BTreeMap::<u8, (f64, f64, usize)>::new();
+            for pvt in &converged_pvts[converged_pvts.len().saturating_sub(20)..] {
+                for satellite in pvt
+                    .satellites
+                    .iter()
+                    .filter(|satellite| satellite.used_in_solution)
+                {
+                    let entry = residuals_by_prn.entry(satellite.prn).or_default();
+                    entry.0 += satellite.residual_m;
+                    entry.1 += satellite.elevation_deg;
+                    entry.2 += 1;
+                }
+            }
+            for (prn, (residual_sum, elevation_sum, count)) in residuals_by_prn {
+                eprintln!(
+                    "GUI LabSat satellite G{prn:02}: residual_mean={:.3} m, elevation_mean={:.3} deg, epochs={count}",
+                    residual_sum / count as f64,
+                    elevation_sum / count as f64
+                );
+            }
+        }
         assert!(acquired_prns.len() >= 4, "acquired PRNs: {acquired_prns:?}");
         assert!(pvt.quality.n_sats >= 4);
         assert!((pvt.latitude_deg - 40.00154).abs() < 0.01);
         assert!((pvt.longitude_deg - 116.33028).abs() < 0.01);
+    }
+
+    #[test]
+    #[ignore = "processes and persists the complete real CTTC capture"]
+    fn real_cttc_gui_worker_persists_complete_run_in_background() {
+        let iq_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat",
+        );
+        if !iq_path.exists() {
+            eprintln!("SKIP: CTTC Int16 real IQ data not present");
+            return;
+        }
+        let database_path =
+            std::env::temp_dir().join(format!("gnsscope-cttc-worker-{}.sqlite3", Uuid::new_v4()));
+        let library = RunLibrary::open(&database_path).expect("open temporary run library");
+        let settings = GuiProcessingSettings::cttc_spain(iq_path).normalized_for_processing();
+        let run = library.create_run(&settings).expect("create CTTC run");
+        let writer = library
+            .spawn_persistence_writer()
+            .expect("spawn persistence writer");
+        let (sender, receiver) = mpsc::sync_channel(WORKER_EVENT_CAPACITY);
+        let worker = spawn_streaming_worker(settings, sender);
+        let mut processed_samples = 0;
+        let mut total_samples = 0;
+        let mut epoch_count = 0;
+        let mut event_count = 0;
+
+        while let Ok(event) = receiver.recv() {
+            match event {
+                WorkerEvent::Started {
+                    total_samples: total,
+                } => total_samples = total,
+                WorkerEvent::Progress {
+                    processed_samples: processed,
+                    total_samples: total,
+                    phase,
+                } => {
+                    processed_samples = processed;
+                    total_samples = total;
+                    writer
+                        .update_progress(
+                            run.id,
+                            RunStatus::Processing,
+                            processed,
+                            total,
+                            epoch_count,
+                            phase,
+                        )
+                        .expect("queue progress");
+                }
+                WorkerEvent::Epoch { pvt, channels } => {
+                    writer
+                        .append_epoch(run.id, epoch_count, *pvt, channels)
+                        .expect("queue epoch");
+                    epoch_count += 1;
+                }
+                WorkerEvent::Diagnostic(event) => {
+                    writer
+                        .append_event(run.id, event_count, event)
+                        .expect("queue diagnostic event");
+                    event_count += 1;
+                }
+                WorkerEvent::Completed {
+                    processed_samples: processed,
+                    total_samples: total,
+                } => {
+                    processed_samples = processed;
+                    total_samples = total;
+                    break;
+                }
+                WorkerEvent::Cancelled { .. } => panic!("CTTC worker was unexpectedly cancelled"),
+                WorkerEvent::Failed(message) => panic!("CTTC worker failed: {message}"),
+                WorkerEvent::Channels(_) => {}
+            }
+        }
+        writer
+            .finalize(
+                run.id,
+                RunStatus::Completed,
+                processed_samples,
+                total_samples,
+                epoch_count,
+                "complete",
+            )
+            .expect("flush and finalize CTTC run");
+        drop(worker);
+
+        let stored_run = library.list_runs().expect("load persisted run").remove(0);
+        assert_eq!(stored_run.status, RunStatus::Completed);
+        assert_eq!(stored_run.pvt_epoch_count, epoch_count);
+        assert_eq!(library.epochs(run.id).expect("load CTTC epochs").len(), 810);
+        assert_eq!(
+            library.events(run.id).expect("load CTTC events").len(),
+            event_count
+        );
+        drop(writer);
+        drop(library);
+        let _ = std::fs::remove_file(database_path);
     }
 }

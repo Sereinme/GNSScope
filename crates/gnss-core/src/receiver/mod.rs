@@ -15,8 +15,9 @@ use crate::pvt::{
     PseudorangeEpoch, PvtEpochOutput, TowSample, TrackingChannelSnapshot,
 };
 use crate::tracking::{BitSynchronizer, DllPllTracking, TrackingConfig, TrackingOutput};
+use gnss_data::gps_l1ca::PRN_COUNT;
 use num_complex::Complex;
-use rayon::prelude::*;
+use rayon::{prelude::*, ThreadPool, ThreadPoolBuilder};
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -47,6 +48,7 @@ pub struct ChannelAdmissionConfig {
     pub probation_good_epochs: usize,
     pub suspect_bad_epochs: usize,
     pub lost_bad_epochs: usize,
+    pub min_reacquisition_peak_to_mean: f64,
     pub min_pll_lock_metric: f64,
     pub min_cn0_db_hz: f64,
     pub max_abs_dll_error_chips: f64,
@@ -62,6 +64,7 @@ impl Default for ChannelAdmissionConfig {
             probation_good_epochs: 3,
             suspect_bad_epochs: 2,
             lost_bad_epochs: 50,
+            min_reacquisition_peak_to_mean: 0.0,
             min_pll_lock_metric: 0.65,
             min_cn0_db_hz: 25.0,
             max_abs_dll_error_chips: 0.25,
@@ -111,6 +114,7 @@ pub struct ReceiverChannel {
     pub last_update_ms: Option<u64>,
     good_epochs: usize,
     bad_epochs: usize,
+    has_been_healthy: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,6 +137,7 @@ impl ReceiverChannel {
             last_update_ms: None,
             good_epochs: 0,
             bad_epochs: 0,
+            has_been_healthy: false,
         }
     }
 
@@ -219,9 +224,9 @@ impl ChannelManager {
         let channel = self.ensure_channel(prn);
         let healthy = channel_observation_is_healthy(channel, observation, &admission);
         channel.last_update_ms = Some(now_ms);
-        channel.last_doppler_hz = Some(observation.doppler_hz);
 
         if healthy {
+            channel.last_doppler_hz = Some(observation.doppler_hz);
             channel.good_epochs += 1;
             channel.bad_epochs = 0;
             if (channel.state == ReceiverChannelState::TrackingProbation
@@ -229,12 +234,20 @@ impl ChannelManager {
                 || channel.state == ReceiverChannelState::Suspect
             {
                 channel.state = ReceiverChannelState::Healthy;
+                channel.has_been_healthy = true;
             }
         } else {
             channel.bad_epochs += 1;
             channel.good_epochs = 0;
             if channel.bad_epochs >= admission.lost_bad_epochs {
-                channel.state = ReceiverChannelState::Lost;
+                let strong_acquisition = channel.last_acquisition.as_ref().is_some_and(|result| {
+                    result.peak_to_mean >= admission.min_reacquisition_peak_to_mean
+                });
+                channel.state = if channel.has_been_healthy || strong_acquisition {
+                    ReceiverChannelState::Lost
+                } else {
+                    ReceiverChannelState::Absent
+                };
             } else if channel.state == ReceiverChannelState::Healthy
                 && channel.bad_epochs >= admission.suspect_bad_epochs
             {
@@ -316,6 +329,7 @@ fn channel_observation_is_healthy(
 pub struct AcquisitionSchedulerConfig {
     pub cold_acq_interval_ms: u64,
     pub reacq_interval_ms: u64,
+    pub reacq_doppler_max_offset_hz: f64,
     pub max_acq_prns_per_scan: usize,
     pub acq_window_ms: usize,
     pub doppler_max_hz: f64,
@@ -330,6 +344,7 @@ impl Default for AcquisitionSchedulerConfig {
         Self {
             cold_acq_interval_ms: 10_000,
             reacq_interval_ms: 1_000,
+            reacq_doppler_max_offset_hz: 10_000.0,
             max_acq_prns_per_scan: 4,
             acq_window_ms: 10,
             doppler_max_hz: 10_000.0,
@@ -347,12 +362,25 @@ pub enum AcquisitionScanKind {
     Reacquisition,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AcquisitionDopplerSearch {
+    pub center_hz: f64,
+    pub max_offset_hz: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AcquisitionScanPlan {
     pub kind: AcquisitionScanKind,
     pub prns: Vec<u8>,
     pub window_ms: usize,
     pub noncoherent_integrations: usize,
+    doppler_searches: BTreeMap<u8, AcquisitionDopplerSearch>,
+}
+
+impl AcquisitionScanPlan {
+    pub fn doppler_search(&self, prn: u8) -> Option<AcquisitionDopplerSearch> {
+        self.doppler_searches.get(&prn).copied()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -399,7 +427,7 @@ impl AcquisitionScheduler {
             if !prns.is_empty() {
                 self.reacq_scan_cursor = next_prn_after(*prns.last().expect("non-empty batch"));
                 self.last_reacq_scan_ms = Some(now_ms);
-                return Some(self.plan(AcquisitionScanKind::Reacquisition, prns));
+                return Some(self.plan(AcquisitionScanKind::Reacquisition, prns, manager));
             }
         }
 
@@ -426,7 +454,7 @@ impl AcquisitionScheduler {
                     self.cold_scan_cursor = 1;
                     self.last_cold_scan_ms = Some(now_ms);
                 }
-                return Some(self.plan(AcquisitionScanKind::Cold, prns));
+                return Some(self.plan(AcquisitionScanKind::Cold, prns, manager));
             }
             self.cold_scan_cursor = 1;
             self.cold_scan_round_active = false;
@@ -448,12 +476,47 @@ impl AcquisitionScheduler {
         }
     }
 
-    fn plan(&self, kind: AcquisitionScanKind, prns: Vec<u8>) -> AcquisitionScanPlan {
+    fn plan(
+        &self,
+        kind: AcquisitionScanKind,
+        prns: Vec<u8>,
+        manager: &ChannelManager,
+    ) -> AcquisitionScanPlan {
+        let doppler_searches = prns
+            .iter()
+            .copied()
+            .map(|prn| {
+                let search = match kind {
+                    AcquisitionScanKind::Cold => AcquisitionDopplerSearch {
+                        center_hz: 0.0,
+                        max_offset_hz: self.config.doppler_max_hz,
+                    },
+                    AcquisitionScanKind::Reacquisition => AcquisitionDopplerSearch {
+                        center_hz: if self.config.reacq_doppler_max_offset_hz
+                            >= self.config.doppler_max_hz
+                        {
+                            0.0
+                        } else {
+                            manager
+                                .channel(prn)
+                                .and_then(|channel| channel.last_doppler_hz)
+                                .unwrap_or(0.0)
+                        },
+                        max_offset_hz: self
+                            .config
+                            .reacq_doppler_max_offset_hz
+                            .min(self.config.doppler_max_hz),
+                    },
+                };
+                (prn, search)
+            })
+            .collect();
         AcquisitionScanPlan {
             kind,
             prns,
             window_ms: self.config.acq_window_ms,
             noncoherent_integrations: self.config.noncoherent_integrations,
+            doppler_searches,
         }
     }
 
@@ -468,6 +531,16 @@ fn sorted_unique(mut prns: Vec<u8>) -> Vec<u8> {
     prns.sort_unstable();
     prns.dedup();
     prns
+}
+
+fn prn_availability(prns: impl IntoIterator<Item = u8>) -> [bool; PRN_COUNT + 1] {
+    let mut availability = [false; PRN_COUNT + 1];
+    for prn in prns {
+        if let Some(slot) = availability.get_mut(prn as usize).filter(|_| prn > 0) {
+            *slot = true;
+        }
+    }
+    availability
 }
 
 fn limited_rotating(prns: Vec<u8>, max_len: usize, cursor: u8) -> Vec<u8> {
@@ -490,14 +563,15 @@ fn next_prn_after(prn: u8) -> u8 {
 
 fn acquire_prns_sequential(
     config: PcpsConfig,
-    prns: &[u8],
+    plan: &AcquisitionScanPlan,
     window: &[Complex<f64>],
     sample_index: u64,
     noncoherent_integrations: usize,
 ) -> Vec<AcquisitionResult> {
-    let mut acquisition = PcpsAcquisition::new(config);
-    prns.iter()
+    plan.prns
+        .iter()
         .map(|&prn| {
+            let mut acquisition = PcpsAcquisition::new(pcps_config_for_prn(config, plan, prn));
             acquisition.acquire_noncoherent_at_sample(
                 (prn - 1) as usize,
                 window,
@@ -509,34 +583,62 @@ fn acquire_prns_sequential(
 }
 
 fn acquire_prns_parallel(
+    parallel_pool: &ThreadPool,
     config: PcpsConfig,
-    prns: &[u8],
+    plan: &AcquisitionScanPlan,
     window: &[Complex<f64>],
     sample_index: u64,
     noncoherent_integrations: usize,
 ) -> Vec<AcquisitionResult> {
-    let mut results = std::thread::scope(|scope| {
-        prns.iter()
-            .map(|&prn| {
-                scope.spawn(move || {
-                    let mut acquisition = PcpsAcquisition::new(config);
-                    acquisition.acquire_noncoherent_at_sample(
-                        (prn - 1) as usize,
-                        window,
-                        sample_index,
-                        noncoherent_integrations,
-                    )
-                })
-            })
-            .map(|handle| {
-                handle
-                    .join()
-                    .expect("PCPS acquisition worker should not panic")
+    let groups = acquisition_groups(config, plan);
+    let grouped_results = parallel_pool.install(|| {
+        groups
+            .par_iter()
+            .map(|(group_config, prns)| {
+                let mut acquisition = PcpsAcquisition::new(*group_config);
+                let prn_indexes = prns
+                    .iter()
+                    .map(|prn| (prn - 1) as usize)
+                    .collect::<Vec<_>>();
+                acquisition.acquire_many_noncoherent_at_sample(
+                    &prn_indexes,
+                    window,
+                    sample_index,
+                    noncoherent_integrations,
+                )
             })
             .collect::<Vec<_>>()
     });
+    let mut results = grouped_results.into_iter().flatten().collect::<Vec<_>>();
     results.sort_by_key(|result| result.prn);
     results
+}
+
+fn acquisition_groups(
+    config: PcpsConfig,
+    plan: &AcquisitionScanPlan,
+) -> Vec<(PcpsConfig, Vec<u8>)> {
+    let mut groups = BTreeMap::<(u64, u64), (PcpsConfig, Vec<u8>)>::new();
+    for &prn in &plan.prns {
+        let prn_config = pcps_config_for_prn(config, plan, prn);
+        groups
+            .entry((
+                prn_config.doppler_center_hz.to_bits(),
+                prn_config.doppler_max.to_bits(),
+            ))
+            .or_insert_with(|| (prn_config, Vec::new()))
+            .1
+            .push(prn);
+    }
+    groups.into_values().collect()
+}
+
+fn pcps_config_for_prn(mut config: PcpsConfig, plan: &AcquisitionScanPlan, prn: u8) -> PcpsConfig {
+    if let Some(search) = plan.doppler_search(prn) {
+        config.doppler_center_hz = search.center_hz;
+        config.doppler_max = search.max_offset_hz;
+    }
+    config
 }
 
 #[derive(Debug, Clone)]
@@ -553,6 +655,7 @@ pub struct StreamingPvtConfig {
     pub acquisition: AcquisitionSchedulerConfig,
     pub parallel_acquisition: bool,
     pub parallel_tracking: bool,
+    pub parallel_worker_threads: Option<usize>,
     pub channel_admission: ChannelAdmissionConfig,
     pub tracking: TrackingConfig,
     pub continuous_pvt: ContinuousPvtConfig,
@@ -579,6 +682,7 @@ impl Default for StreamingPvtConfig {
             acquisition,
             parallel_acquisition: true,
             parallel_tracking: true,
+            parallel_worker_threads: None,
             channel_admission: ChannelAdmissionConfig::default(),
             tracking: TrackingConfig::default(),
             continuous_pvt: ContinuousPvtConfig::default(),
@@ -662,6 +766,11 @@ impl StreamingPvtConfig {
 
     pub fn with_chunk_ms(mut self, chunk_ms: usize) -> Self {
         self.chunk_ms = chunk_ms.max(1);
+        self
+    }
+
+    pub fn with_parallel_worker_threads(mut self, worker_threads: usize) -> Self {
+        self.parallel_worker_threads = Some(worker_threads.max(1));
         self
     }
 }
@@ -952,6 +1061,66 @@ impl ActiveTrackingChannel {
     }
 }
 
+#[derive(Default)]
+struct ActiveTrackingChannels {
+    entries: Vec<(u8, ActiveTrackingChannel)>,
+}
+
+impl ActiveTrackingChannels {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn prns(&self) -> impl Iterator<Item = u8> + '_ {
+        self.entries.iter().map(|(prn, _)| *prn)
+    }
+
+    fn get(&self, prn: &u8) -> Option<&ActiveTrackingChannel> {
+        self.index_of(*prn).ok().map(|index| &self.entries[index].1)
+    }
+
+    fn get_mut(&mut self, prn: &u8) -> Option<&mut ActiveTrackingChannel> {
+        self.index_of(*prn)
+            .ok()
+            .map(|index| &mut self.entries[index].1)
+    }
+
+    fn insert(&mut self, prn: u8, channel: ActiveTrackingChannel) -> Option<ActiveTrackingChannel> {
+        match self.index_of(prn) {
+            Ok(index) => Some(std::mem::replace(&mut self.entries[index].1, channel)),
+            Err(index) => {
+                self.entries.insert(index, (prn, channel));
+                None
+            }
+        }
+    }
+
+    fn remove(&mut self, prn: &u8) -> Option<ActiveTrackingChannel> {
+        self.index_of(*prn)
+            .ok()
+            .map(|index| self.entries.remove(index).1)
+    }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = (u8, &mut ActiveTrackingChannel)> {
+        self.entries
+            .iter_mut()
+            .map(|(prn, channel)| (*prn, channel))
+    }
+
+    fn par_iter_mut(
+        &mut self,
+    ) -> impl IndexedParallelIterator<Item = (u8, &mut ActiveTrackingChannel)> {
+        self.entries
+            .par_iter_mut()
+            .map(|(prn, channel)| (*prn, channel))
+    }
+
+    fn index_of(&self, prn: u8) -> Result<usize, usize> {
+        self.entries
+            .binary_search_by_key(&prn, |(entry_prn, _)| *entry_prn)
+    }
+}
+
 struct StreamingTrackingStepResult {
     prn: u8,
     output: TrackingOutput,
@@ -1009,7 +1178,8 @@ pub struct StreamingPvtRunner {
     acquisition_scheduler: AcquisitionScheduler,
     acquisition_ring: AcquisitionRingBuffer,
     acquisition_window_scratch: Vec<Complex<f64>>,
-    active_tracking: BTreeMap<u8, ActiveTrackingChannel>,
+    parallel_pool: ThreadPool,
+    active_tracking: ActiveTrackingChannels,
     nav_state: StreamingNavState,
     continuous_pvt: ContinuousPvtRunner,
     next_pvt_output_ms: u64,
@@ -1026,6 +1196,17 @@ impl StreamingPvtRunner {
         let acquisition_scheduler = AcquisitionScheduler::new(config.acquisition.clone());
         let acquisition_ring = AcquisitionRingBuffer::new(config.acquisition_ring_samples(), 0);
         let acquisition_window_scratch = Vec::with_capacity(config.acquisition_window_samples());
+        let available_threads = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        let parallel_worker_threads = config.parallel_worker_threads.unwrap_or_else(|| {
+            available_threads.min(config.acquisition.max_acq_prns_per_scan.max(4))
+        });
+        let parallel_pool = ThreadPoolBuilder::new()
+            .num_threads(parallel_worker_threads.max(1))
+            .thread_name(|index| format!("gnsscope-dsp-{index}"))
+            .build()
+            .expect("GNSScope DSP worker pool should start");
         let continuous_pvt = ContinuousPvtRunner::new(config.continuous_pvt.clone());
         let next_pvt_output_ms = config.pvt_output_rate_ms.max(1);
         let mut runner = Self {
@@ -1034,7 +1215,8 @@ impl StreamingPvtRunner {
             acquisition_scheduler,
             acquisition_ring,
             acquisition_window_scratch,
-            active_tracking: BTreeMap::new(),
+            parallel_pool,
+            active_tracking: ActiveTrackingChannels::default(),
             nav_state: StreamingNavState::default(),
             continuous_pvt,
             next_pvt_output_ms,
@@ -1069,7 +1251,7 @@ impl StreamingPvtRunner {
     }
 
     pub fn active_tracking_prns(&self) -> Vec<u8> {
-        self.active_tracking.keys().copied().collect()
+        self.active_tracking.prns().collect()
     }
 
     pub fn nav_state(&self) -> &StreamingNavState {
@@ -1272,8 +1454,9 @@ impl StreamingPvtRunner {
         let window = self.acquisition_window_scratch.as_slice();
         let results = if self.config.parallel_acquisition && scan.plan.prns.len() > 1 {
             acquire_prns_parallel(
+                &self.parallel_pool,
                 self.pcps_config(),
-                &scan.plan.prns,
+                &scan.plan,
                 window,
                 sample_index,
                 scan.plan.noncoherent_integrations,
@@ -1281,7 +1464,7 @@ impl StreamingPvtRunner {
         } else {
             acquire_prns_sequential(
                 self.pcps_config(),
-                &scan.plan.prns,
+                &scan.plan,
                 window,
                 sample_index,
                 scan.plan.noncoherent_integrations,
@@ -1362,44 +1545,34 @@ impl StreamingPvtRunner {
         let nav_tow_tag_latency_ms = self.config.nav_tow_tag_latency_ms;
         let samples_per_ms = self.config.samples_per_ms();
         let doppler_window_samples = self.config.doppler_epoch_window_samples() as f64;
-        let mut steps = if self.config.parallel_tracking && self.active_tracking.len() > 1 {
-            self.active_tracking
-                .par_iter_mut()
-                .map(|(&prn, active)| {
-                    process_tracking_channel_step(
-                        prn,
-                        active,
-                        samples,
-                        now_ms,
-                        bit_sync_start_ms,
-                        nav_tow_tag_latency_ms,
-                        samples_per_ms,
-                        doppler_window_samples,
-                    )
-                })
-                .collect::<Vec<_>>()
+        let step_context = TrackingStepContext {
+            now_ms,
+            bit_sync_start_ms,
+            nav_tow_tag_latency_ms,
+            samples_per_ms,
+            doppler_window_samples,
+        };
+        let steps = if self.config.parallel_tracking && self.active_tracking.len() > 1 {
+            self.parallel_pool.install(|| {
+                self.active_tracking
+                    .par_iter_mut()
+                    .map(|(prn, active)| {
+                        process_tracking_channel_step(prn, active, samples, step_context)
+                    })
+                    .collect::<Vec<_>>()
+            })
         } else {
             self.active_tracking
                 .iter_mut()
-                .map(|(&prn, active)| {
-                    process_tracking_channel_step(
-                        prn,
-                        active,
-                        samples,
-                        now_ms,
-                        bit_sync_start_ms,
-                        nav_tow_tag_latency_ms,
-                        samples_per_ms,
-                        doppler_window_samples,
-                    )
+                .map(|(prn, active)| {
+                    process_tracking_channel_step(prn, active, samples, step_context)
                 })
                 .collect::<Vec<_>>()
         };
-        steps.sort_by_key(|step| step.prn);
         let mut events = Vec::with_capacity(steps.len());
         let mut tracking_updates = Vec::with_capacity(steps.len());
         let mut nav_events = Vec::new();
-        let mut lost_prns = Vec::new();
+        let mut stopped_prns = Vec::new();
 
         for step in steps {
             events.extend(step.pre_update_events);
@@ -1415,8 +1588,11 @@ impl StreamingPvtRunner {
             } else {
                 self.channels.state(step.prn)
             };
-            if state == ReceiverChannelState::Lost {
-                lost_prns.push(step.prn);
+            if matches!(
+                state,
+                ReceiverChannelState::Lost | ReceiverChannelState::Absent
+            ) {
+                stopped_prns.push(step.prn);
             }
             tracking_updates.push(StreamingTrackingUpdate {
                 prn: step.prn,
@@ -1434,7 +1610,7 @@ impl StreamingPvtRunner {
         }
         events.extend(nav_events);
 
-        for prn in lost_prns {
+        for prn in stopped_prns {
             self.active_tracking.remove(&prn);
         }
 
@@ -1555,33 +1731,34 @@ impl StreamingPvtRunner {
 
             events.extend(self.ingest_samples(chunk, now_ms));
             if chunk.len() == samples_per_ms {
-                let nav_available = self.nav_available_prns();
-                let ephemeris_available = self.ephemeris_available_prns();
+                let nav_available = self.nav_availability();
+                let ephemeris_available = self.ephemeris_availability();
                 events.extend(self.process_tracking_ms(
                     chunk,
                     now_ms,
-                    |prn| nav_available.binary_search(&prn).is_ok(),
-                    |prn| ephemeris_available.binary_search(&prn).is_ok(),
+                    |prn| nav_available[prn as usize],
+                    |prn| ephemeris_available[prn as usize],
                 ));
-            }
-            if let Some(event) = self.solve_and_maybe_emit_pvt(now_ms) {
-                events.push(event);
+                if let Some(event) = self.solve_and_maybe_emit_pvt(now_ms) {
+                    events.push(event);
+                }
             }
         }
 
         events
     }
 
-    fn nav_available_prns(&self) -> Vec<u8> {
-        self.nav_state
-            .channels
-            .iter()
-            .filter_map(|(&prn, channel)| (!channel.tow_history.is_empty()).then_some(prn))
-            .collect()
+    fn nav_availability(&self) -> [bool; PRN_COUNT + 1] {
+        prn_availability(
+            self.nav_state
+                .channels
+                .iter()
+                .filter_map(|(&prn, channel)| (!channel.tow_history.is_empty()).then_some(prn)),
+        )
     }
 
-    fn ephemeris_available_prns(&self) -> Vec<u8> {
-        self.nav_state.ephemerides.keys().copied().collect()
+    fn ephemeris_availability(&self) -> [bool; PRN_COUNT + 1] {
+        prn_availability(self.nav_state.ephemerides.keys().copied())
     }
 }
 
@@ -1590,28 +1767,33 @@ fn samples_to_ceil_ms(samples: u64, samples_per_ms: usize) -> u64 {
     samples.div_ceil(samples_per_ms)
 }
 
-fn process_tracking_channel_step(
-    prn: u8,
-    active: &mut ActiveTrackingChannel,
-    samples: &[Complex<f64>],
+#[derive(Clone, Copy)]
+struct TrackingStepContext {
     now_ms: u64,
     bit_sync_start_ms: u64,
     nav_tow_tag_latency_ms: usize,
     samples_per_ms: usize,
     doppler_window_samples: f64,
+}
+
+fn process_tracking_channel_step(
+    prn: u8,
+    active: &mut ActiveTrackingChannel,
+    samples: &[Complex<f64>],
+    context: TrackingStepContext,
 ) -> StreamingTrackingStepResult {
     let output = active.tracker.process(samples);
-    let pull_in_complete = active.pull_in_complete(now_ms, bit_sync_start_ms);
+    let pull_in_complete = active.pull_in_complete(context.now_ms, context.bit_sync_start_ms);
     let admission_ready = pull_in_complete && active.tracker.health_metrics_ready();
     let prompt_i = output.prompt.re;
     let mut pre_update_events = Vec::new();
 
     if active.bit_boundary.is_none() && pull_in_complete {
         if let Some(boundary) = active.bit_sync.update(prompt_i) {
-            active.set_bit_boundary(boundary, bit_sync_start_ms);
+            active.set_bit_boundary(boundary, context.bit_sync_start_ms);
             pre_update_events.push(StreamingPvtEvent::BitSyncUpdated(StreamingBitSyncUpdate {
                 prn,
-                now_ms,
+                now_ms: context.now_ms,
                 boundary_ms: boundary,
             }));
         }
@@ -1619,19 +1801,19 @@ fn process_tracking_channel_step(
 
     let nav_events = process_nav_symbol(
         prn,
-        now_ms,
+        context.now_ms,
         active,
         prompt_i,
         &output,
-        nav_tow_tag_latency_ms,
-        samples_per_ms,
+        context.nav_tow_tag_latency_ms,
+        context.samples_per_ms,
     );
     let output_rx_sample = output.tracking_sample_counter as f64 + output.rem_code_phase_samples;
     active.doppler_history.push_back(DopplerHistorySample {
         rx_sample: output_rx_sample,
         doppler_hz: output.carrier_doppler_hz,
     });
-    let oldest_epoch_sample = output_rx_sample - doppler_window_samples;
+    let oldest_epoch_sample = output_rx_sample - context.doppler_window_samples;
     while active
         .doppler_history
         .front()
@@ -1789,6 +1971,37 @@ impl AcquisitionRingBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_tracking_channels_preserve_prn_order_across_mutations() {
+        let mut channels = ActiveTrackingChannels::default();
+        let active = |prn: u8| {
+            let tracker =
+                DllPllTracking::new((prn - 1) as usize, 0.0, 0.0, TrackingConfig::default(), 0);
+            ActiveTrackingChannel::new(tracker, 0)
+        };
+
+        assert!(channels.insert(11, active(11)).is_none());
+        assert!(channels.insert(1, active(1)).is_none());
+        assert!(channels.insert(17, active(17)).is_none());
+        assert_eq!(channels.prns().collect::<Vec<_>>(), vec![1, 11, 17]);
+
+        assert!(channels.insert(11, active(11)).is_some());
+        assert_eq!(channels.len(), 3);
+        assert!(channels.get(&11).is_some());
+        assert!(channels.remove(&1).is_some());
+        assert_eq!(channels.prns().collect::<Vec<_>>(), vec![11, 17]);
+    }
+
+    #[test]
+    fn prn_availability_uses_fixed_gps_l1_ca_slots() {
+        let availability = prn_availability([32, 1, 0, 33]);
+
+        assert!(availability[1]);
+        assert!(availability[32]);
+        assert!(!availability[2]);
+        assert!(!availability[0]);
+    }
     use gnss_data::gps_l1ca::{CODE_LENGTH, PRN_CODES};
     use std::f64::consts::TAU;
     use std::fs;
@@ -1987,6 +2200,7 @@ mod tests {
 
         let mut bad = good_obs(8_250.0);
         bad.pll_lock_metric = 0.1;
+        bad.doppler_hz = 0.0;
 
         assert_eq!(
             manager.observe_tracking(20, bad, 2),
@@ -2001,6 +2215,57 @@ mod tests {
             ReceiverChannelState::Lost
         );
         assert_eq!(manager.reacquisition_prns(), vec![20]);
+        assert_eq!(
+            manager
+                .channel(20)
+                .and_then(|channel| channel.last_doppler_hz),
+            Some(8_250.0)
+        );
+    }
+
+    #[test]
+    fn failed_probation_returns_false_candidate_to_cold_acquisition() {
+        let admission = ChannelAdmissionConfig {
+            probation_good_epochs: 2,
+            lost_bad_epochs: 2,
+            min_reacquisition_peak_to_mean: 9.0,
+            ..Default::default()
+        };
+        let mut manager = ChannelManager::new([22], admission);
+        let mut weak_acquisition = acq(22, 2_000.0);
+        weak_acquisition.peak_to_mean = 5.0;
+        manager.accept_acquisition(weak_acquisition, 0);
+        let mut bad = good_obs(2_000.0);
+        bad.cn0_db_hz = 0.0;
+
+        manager.observe_tracking(22, bad, 1);
+        let state = manager.observe_tracking(22, bad, 2);
+
+        assert_eq!(state, ReceiverChannelState::Absent);
+        assert!(manager.reacquisition_prns().is_empty());
+        assert_eq!(manager.absent_prns(), vec![22]);
+    }
+
+    #[test]
+    fn failed_probation_keeps_strong_candidate_eligible_for_reacquisition() {
+        let admission = ChannelAdmissionConfig {
+            probation_good_epochs: 2,
+            lost_bad_epochs: 2,
+            min_reacquisition_peak_to_mean: 9.0,
+            ..Default::default()
+        };
+        let mut manager = ChannelManager::new([22], admission);
+        let mut strong_acquisition = acq(22, 2_000.0);
+        strong_acquisition.peak_to_mean = 12.0;
+        manager.accept_acquisition(strong_acquisition, 0);
+        let mut bad = good_obs(2_000.0);
+        bad.cn0_db_hz = 0.0;
+
+        manager.observe_tracking(22, bad, 1);
+        let state = manager.observe_tracking(22, bad, 2);
+
+        assert_eq!(state, ReceiverChannelState::Lost);
+        assert_eq!(manager.reacquisition_prns(), vec![22]);
     }
 
     #[test]
@@ -2012,13 +2277,18 @@ mod tests {
         };
         let mut manager = ChannelManager::new([1, 11, 17], admission);
         manager.accept_acquisition(acq(11, 5_500.0), 0);
+        assert_eq!(
+            manager.observe_tracking(11, good_obs(5_500.0), 1),
+            ReceiverChannelState::Healthy
+        );
         let mut bad = good_obs(5_500.0);
         bad.cn0_db_hz = 5.0;
-        manager.observe_tracking(11, bad, 1);
+        manager.observe_tracking(11, bad, 2);
 
         let mut scheduler = AcquisitionScheduler::new(AcquisitionSchedulerConfig {
             cold_acq_interval_ms: 1,
             reacq_interval_ms: 1,
+            reacq_doppler_max_offset_hz: 1_000.0,
             max_acq_prns_per_scan: 2,
             fixed_prns: Some(vec![1, 11, 17]),
             ..Default::default()
@@ -2027,6 +2297,13 @@ mod tests {
         let plan = scheduler.plan_scan(1, &manager).expect("reacq plan");
         assert_eq!(plan.kind, AcquisitionScanKind::Reacquisition);
         assert_eq!(plan.prns, vec![11]);
+        assert_eq!(
+            plan.doppler_search(11),
+            Some(AcquisitionDopplerSearch {
+                center_hz: 5_500.0,
+                max_offset_hz: 1_000.0,
+            })
+        );
         for prn in &plan.prns {
             manager.set_acquiring(*prn, 1);
         }
@@ -2034,6 +2311,15 @@ mod tests {
         let plan = scheduler.plan_scan(2, &manager).expect("cold plan");
         assert_eq!(plan.kind, AcquisitionScanKind::Cold);
         assert_eq!(plan.prns, vec![1, 17]);
+        for prn in &plan.prns {
+            assert_eq!(
+                plan.doppler_search(*prn),
+                Some(AcquisitionDopplerSearch {
+                    center_hz: 0.0,
+                    max_offset_hz: 10_000.0,
+                })
+            );
+        }
     }
 
     #[test]
@@ -2100,6 +2386,7 @@ mod tests {
         assert_eq!(config.channel_admission.lost_bad_epochs, 50);
         assert_eq!(config.pvt_output_rate_ms, 100);
         assert!(config.average_doppler_over_pvt_epoch);
+        assert_eq!(config.parallel_worker_threads, None);
         assert_eq!(config.doppler_epoch_window_samples(), 400_000);
 
         let config = config.with_doppler_epoch_averaging(false);
@@ -2107,6 +2394,9 @@ mod tests {
 
         let config = config.with_chunk_ms(20);
         assert_eq!(config.chunk_samples(), 80_000);
+
+        let config = config.with_parallel_worker_threads(4);
+        assert_eq!(config.parallel_worker_threads, Some(4));
     }
 
     #[test]
@@ -2212,7 +2502,7 @@ mod tests {
 
         runner.process_tracking_ms(&[], 2_100, |_| false, |_| false);
         assert_eq!(runner.channels().state(11), ReceiverChannelState::Lost);
-        assert!(!runner.active_tracking.contains_key(&11));
+        assert!(runner.active_tracking.get(&11).is_none());
 
         runner.accept_acquisition(acq(11, 5_500.0), 5_000);
         let reacquired = runner.active_tracking.get(&11).expect("reacquired channel");
@@ -2348,6 +2638,37 @@ mod tests {
         assert_eq!(completions.len(), 1);
         assert_eq!(completions[0].results.len(), 2);
         assert_eq!(runner.state_snapshot().sample_index, 20);
+    }
+
+    #[test]
+    fn streaming_runner_does_not_advance_pvt_for_incomplete_final_tracking_ms() {
+        let path = write_i16_iq_file(10);
+        let mut config = StreamingPvtConfig::cttc_fixed_prns(vec![1]);
+        config.iq_path = Some(path.clone());
+        config.sample_rate_hz = 4_000.0;
+        config.chunk_ms = 2;
+        config.pvt_output_rate_ms = 1;
+        config.acquisition.acq_window_ms = 10;
+        config.acquisition.threshold = f64::INFINITY;
+        config.acquisition_ring_ms = 10;
+        let mut runner = StreamingPvtRunner::new(config);
+        let mut steps = Vec::new();
+
+        let summary = runner
+            .stream_iq_file_until_ms(3, |step| steps.push(step))
+            .expect("stream IQ file with an incomplete final tracking millisecond");
+        fs::remove_file(path).ok();
+
+        assert_eq!(summary.samples_read, 10);
+        assert_eq!(summary.steps, 2);
+        assert_eq!(summary.final_state.as_ref().unwrap().sample_index, 10);
+        assert_eq!(summary.final_state.as_ref().unwrap().next_pvt_output_ms, 3);
+        assert_eq!(steps[1].samples_read, 2);
+        assert_eq!(steps[1].now_ms, 3);
+        assert_eq!(steps[1].state.sample_index, 10);
+        assert_eq!(steps[1].state.next_pvt_output_ms, 3);
+        assert_eq!(summary.event_counts.tracking_updates, 0);
+        assert_eq!(summary.event_counts.pvt_outputs, 0);
     }
 
     #[test]
@@ -2496,9 +2817,33 @@ mod tests {
             ..Default::default()
         };
         let prns = [1, 6, 11];
+        let doppler_searches = prns
+            .iter()
+            .copied()
+            .map(|prn| {
+                (
+                    prn,
+                    AcquisitionDopplerSearch {
+                        center_hz: 0.0,
+                        max_offset_hz: config.doppler_max,
+                    },
+                )
+            })
+            .collect();
+        let plan = AcquisitionScanPlan {
+            kind: AcquisitionScanKind::Cold,
+            prns: prns.to_vec(),
+            window_ms: 1,
+            noncoherent_integrations: 1,
+            doppler_searches,
+        };
 
-        let sequential = acquire_prns_sequential(config, &prns, &window, 0, 1);
-        let parallel = acquire_prns_parallel(config, &prns, &window, 0, 1);
+        let sequential = acquire_prns_sequential(config, &plan, &window, 0, 1);
+        let parallel_pool = ThreadPoolBuilder::new()
+            .num_threads(3)
+            .build()
+            .expect("test worker pool");
+        let parallel = acquire_prns_parallel(&parallel_pool, config, &plan, &window, 0, 1);
 
         assert_eq!(
             sequential
@@ -2514,8 +2859,10 @@ mod tests {
         for (sequential, parallel) in sequential.iter().zip(parallel.iter()) {
             assert_eq!(sequential.detected, parallel.detected);
             assert_eq!(sequential.prn, parallel.prn);
+            assert_eq!(sequential.sample_index, parallel.sample_index);
             assert!((sequential.doppler_hz - parallel.doppler_hz).abs() < f64::EPSILON);
             assert!((sequential.code_phase_chips - parallel.code_phase_chips).abs() < f64::EPSILON);
+            assert!((sequential.peak_to_mean - parallel.peak_to_mean).abs() < f64::EPSILON);
         }
     }
 
@@ -2903,5 +3250,64 @@ mod tests {
         assert_eq!(sample_index, 103);
         let re: Vec<f64> = window.iter().map(|sample| sample.re).collect();
         assert_eq!(re, vec![4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn ring_buffer_copies_windows_across_the_storage_boundary() {
+        let mut ring = AcquisitionRingBuffer::new(5, 200);
+        ring.push_samples(&[
+            Complex::new(1.0, 0.0),
+            Complex::new(2.0, 0.0),
+            Complex::new(3.0, 0.0),
+            Complex::new(4.0, 0.0),
+        ]);
+        ring.push_samples(&[
+            Complex::new(5.0, 0.0),
+            Complex::new(6.0, 0.0),
+            Complex::new(7.0, 0.0),
+        ]);
+
+        let (sample_index, window) = ring.latest_window(5).unwrap();
+        assert_eq!(sample_index, 202);
+        assert_eq!(
+            window.iter().map(|sample| sample.re).collect::<Vec<_>>(),
+            vec![3.0, 4.0, 5.0, 6.0, 7.0]
+        );
+    }
+
+    #[test]
+    fn ring_buffer_keeps_only_the_tail_of_oversized_input() {
+        let mut ring = AcquisitionRingBuffer::new(3, 300);
+        ring.push_samples(&[
+            Complex::new(1.0, 0.0),
+            Complex::new(2.0, 0.0),
+            Complex::new(3.0, 0.0),
+            Complex::new(4.0, 0.0),
+            Complex::new(5.0, 0.0),
+        ]);
+
+        assert_eq!(ring.start_sample_index(), 302);
+        assert_eq!(ring.next_sample_index(), 305);
+        assert_eq!(
+            ring.latest_window(3)
+                .unwrap()
+                .1
+                .iter()
+                .map(|sample| sample.re)
+                .collect::<Vec<_>>(),
+            vec![3.0, 4.0, 5.0]
+        );
+    }
+
+    #[test]
+    fn zero_capacity_ring_tracks_absolute_position_without_samples() {
+        let mut ring = AcquisitionRingBuffer::new(0, 400);
+        ring.push_samples(&[Complex::new(1.0, 0.0), Complex::new(2.0, 0.0)]);
+
+        assert!(ring.is_empty());
+        assert_eq!(ring.start_sample_index(), 402);
+        assert_eq!(ring.next_sample_index(), 402);
+        assert_eq!(ring.latest_window(0), Some((402, Vec::new())));
+        assert_eq!(ring.latest_window(1), None);
     }
 }

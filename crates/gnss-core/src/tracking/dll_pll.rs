@@ -10,6 +10,25 @@ use std::f64::consts::TAU;
 
 const GPS_L1_FREQ: f64 = 1575.42e6;
 const GPS_L1_CA_CODE_RATE: f64 = 1.023e6;
+const CARRIER_RENORMALIZATION_INTERVAL_SAMPLES: usize = 256;
+
+#[inline(always)]
+fn apply_prn_chip(value: Complex<f64>, chip: i8) -> Complex<f64> {
+    let sign_bit = ((chip < 0) as u64) << 63;
+    Complex::new(
+        f64::from_bits(value.re.to_bits() ^ sign_bit),
+        f64::from_bits(value.im.to_bits() ^ sign_bit),
+    )
+}
+
+#[inline(always)]
+fn complex_mul_fma(left: Complex<f64>, right: Complex<f64>) -> Complex<f64> {
+    // Keep the multiply explicit so optimized builds emit hardware FMA.
+    Complex::new(
+        (-left.im).mul_add(right.im, left.re * right.re),
+        left.im.mul_add(right.re, left.re * right.im),
+    )
+}
 
 #[derive(Debug, Clone)]
 pub struct TrackingConfig {
@@ -105,6 +124,7 @@ pub struct DllPllTracking {
     prev_prompt: Complex<f64>,
     cn0_prompt_buffer: VecDeque<Complex<f64>>,
     cn0_smoothed_db_hz: Option<f64>,
+    health_metrics_initialized: bool,
     last_prompt: Complex<f64>,
     cycle_ms: usize,
     bit_boundary: Option<usize>,
@@ -170,6 +190,7 @@ impl DllPllTracking {
             prev_prompt: Complex::new(0.0, 0.0),
             cn0_prompt_buffer: VecDeque::with_capacity(config.cn0_samples.max(1)),
             cn0_smoothed_db_hz: None,
+            health_metrics_initialized: false,
             last_prompt: Complex::new(0.0, 0.0),
             cycle_ms: 0,
             bit_boundary: None,
@@ -186,7 +207,6 @@ impl DllPllTracking {
         let spc_chips = self.config.early_late_spc;
         let spc_s = spc_chips * fs / self.code_freq_chips_per_s;
         let (e, p, l) = self.correlate(samples, spc_s);
-
         // Coherent accumulator (N ms before loop update)
         self.coh_early += e;
         self.coh_prompt += p;
@@ -328,6 +348,7 @@ impl DllPllTracking {
         self.bit_boundary = Some(boundary % 20);
         self.cn0_prompt_buffer.clear();
         self.cn0_smoothed_db_hz = None;
+        self.health_metrics_initialized = false;
     }
 
     fn correlate(
@@ -345,18 +366,35 @@ impl DllPllTracking {
         let mut e = Complex::new(0.0, 0.0);
         let mut p = Complex::new(0.0, 0.0);
         let mut l = Complex::new(0.0, 0.0);
+        let code_length = CODE_LENGTH as f64;
+        let code_phase_step = self.code_freq_chips_per_s / fs;
+        let mut code_phase = self.code_phase_chips;
         for (i, sample) in samples.iter().enumerate() {
-            let wiped = sample * carrier;
-            let cp = (self.code_phase_chips + i as f64 * self.code_freq_chips_per_s / fs)
-                % CODE_LENGTH as f64;
-            let ci = cp as usize % CODE_LENGTH;
-            let ei = ((cp - spc_chips + CODE_LENGTH as f64) as usize) % CODE_LENGTH;
-            e += wiped * Complex::new(self.code[ei] as f64, 0.0);
-            p += wiped * Complex::new(self.code[ci] as f64, 0.0);
-            let li = ((cp + spc_chips) as usize) % CODE_LENGTH;
-            l += wiped * Complex::new(self.code[li] as f64, 0.0);
-            carrier *= carrier_step;
-            if i % 256 == 255 {
+            let wiped = complex_mul_fma(*sample, carrier);
+            let ci = code_phase as usize;
+            let early_phase = code_phase - spc_chips;
+            let ei = if early_phase < 0.0 {
+                (early_phase + code_length) as usize
+            } else {
+                early_phase as usize
+            };
+            e += apply_prn_chip(wiped, self.code[ei]);
+            p += apply_prn_chip(wiped, self.code[ci]);
+            let late_phase = code_phase + spc_chips;
+            let li = if late_phase >= code_length {
+                (late_phase - code_length) as usize
+            } else {
+                late_phase as usize
+            };
+            l += apply_prn_chip(wiped, self.code[li]);
+            code_phase += code_phase_step;
+            if code_phase >= code_length {
+                code_phase -= code_length;
+            }
+            carrier = complex_mul_fma(carrier, carrier_step);
+            if i % CARRIER_RENORMALIZATION_INTERVAL_SAMPLES
+                == CARRIER_RENORMALIZATION_INTERVAL_SAMPLES - 1
+            {
                 carrier /= carrier.norm();
             }
         }
@@ -375,6 +413,8 @@ impl DllPllTracking {
             self.cn0_prompt_buffer.pop_front();
         }
         self.cn0_prompt_buffer.push_back(prompt);
+        self.health_metrics_initialized =
+            self.health_metrics_initialized || self.cn0_prompt_buffer.len() >= cn0_samples;
 
         if let Some(cn0_db_hz) = self.compute_cn0_nwpr() {
             let alpha = self.config.cn0_smoother_alpha.clamp(0.0, 1.0);
@@ -391,7 +431,7 @@ impl DllPllTracking {
     }
 
     pub(crate) fn health_metrics_ready(&self) -> bool {
-        self.cn0_prompt_buffer.len() >= self.cn0_window_len()
+        self.health_metrics_initialized
     }
 
     fn compute_pll_lock_metric(&self) -> f64 {
@@ -578,6 +618,28 @@ mod tests {
             tracker.update_cn0(Complex::new(1.0, 0.0));
             assert!(!tracker.health_metrics_ready());
         }
+        tracker.update_cn0(Complex::new(1.0, 0.0));
+
+        assert!(tracker.health_metrics_ready());
+    }
+
+    #[test]
+    fn test_health_metrics_remain_ready_across_cn0_window_reset() {
+        let config = TrackingConfig {
+            cn0_samples: 20,
+            cn0_smoother_alpha: 1.0,
+            ..Default::default()
+        };
+        let mut tracker = DllPllTracking::new(0, 0.0, 0.0, config, 0);
+        tracker.bit_boundary = Some(0);
+        tracker.ms_within_bit = 1;
+
+        for _ in 0..20 {
+            tracker.update_cn0(Complex::new(1.0, 0.0));
+        }
+        assert!(tracker.health_metrics_ready());
+
+        tracker.ms_within_bit = 0;
         tracker.update_cn0(Complex::new(1.0, 0.0));
 
         assert!(tracker.health_metrics_ready());

@@ -23,6 +23,10 @@ const CONV_TOL: f64 = 1e-4; // [m]
 pub struct WlsConfig {
     /// Exclude satellites whose broadcast ephemeris health flag is non-zero.
     pub exclude_unhealthy_sv: bool,
+    /// Apply the broadcast Klobuchar ionosphere correction when parameters are valid.
+    pub apply_ionosphere: bool,
+    /// Apply the Saastamoinen troposphere correction.
+    pub apply_troposphere: bool,
     /// Exclude satellites below this elevation once receiver geometry is valid.
     pub elevation_mask_rad: f64,
     /// Post-fit residual threshold for single-satellite RAIM exclusion [m].
@@ -75,6 +79,8 @@ impl Default for WlsConfig {
     fn default() -> Self {
         Self {
             exclude_unhealthy_sv: true,
+            apply_ionosphere: true,
+            apply_troposphere: true,
             elevation_mask_rad: 5.0_f64.to_radians(),
             raim_residual_threshold_m: 100.0,
             raim_standardized_residual_threshold: 5.0,
@@ -350,12 +356,12 @@ fn solve_wls_once(
             if apply_atmosphere && el < config.elevation_mask_rad {
                 continue;
             }
-            let iono_m = if apply_atmosphere && iono.valid {
+            let iono_m = if apply_atmosphere && config.apply_ionosphere && iono.valid {
                 klobuchar_iono(iono, lat_r, lon_r, az, el, t_sv)
             } else {
                 0.0
             };
-            let trop_m = if apply_atmosphere {
+            let trop_m = if apply_atmosphere && config.apply_troposphere {
                 saastamoinen_trop(lat_r, alt_r, el)
             } else {
                 0.0
@@ -374,7 +380,7 @@ fn solve_wls_once(
                 pr.cn0_db_hz,
                 pr.tracking_jitter_chips,
                 apply_atmosphere.then_some(el),
-                iono.valid,
+                config.apply_ionosphere && iono.valid,
                 config,
             );
             let weight = 1.0 / (sigma_model.total_m * sigma_model.total_m);
@@ -816,6 +822,8 @@ mod tests {
     fn test_wls_config_defaults_enable_mask_and_raim() {
         let cfg = WlsConfig::default();
         assert!(cfg.exclude_unhealthy_sv);
+        assert!(cfg.apply_ionosphere);
+        assert!(cfg.apply_troposphere);
         assert!((cfg.elevation_mask_rad.to_degrees() - 5.0).abs() < 1e-12);
         assert_eq!(cfg.raim_residual_threshold_m, 100.0);
         assert_eq!(cfg.raim_standardized_residual_threshold, 5.0);
@@ -1159,6 +1167,45 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn atmospheric_corrections_can_be_disabled_independently() {
+        let receiver_lla = [40.00154_f64.to_radians(), 116.33028_f64.to_radians(), 95.0];
+        let ephemerides = synthetic_ephemerides(12);
+        let pseudoranges =
+            synthetic_pseudoranges(&ephemerides, lla_to_ecef(receiver_lla), 50_000.0);
+        let iono = IonoParams {
+            alpha: [1.0e-8, 0.0, 0.0, 0.0],
+            beta: [90_000.0, 0.0, 0.0, 0.0],
+            valid: true,
+        };
+        let config = WlsConfig {
+            elevation_mask_rad: -std::f64::consts::FRAC_PI_2,
+            apply_ionosphere: false,
+            apply_troposphere: false,
+            ..WlsConfig::default()
+        };
+
+        let solution = solve_wls_with_config(
+            &pseudoranges,
+            &ephemerides,
+            &iono,
+            receiver_lla[0],
+            receiver_lla[1],
+            receiver_lla[2],
+            &config,
+        );
+
+        assert!(solution.converged);
+        assert!(solution
+            .satellite_diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.iono_delay_m == 0.0));
+        assert!(solution
+            .satellite_diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.tropo_delay_m == 0.0));
     }
 
     #[test]

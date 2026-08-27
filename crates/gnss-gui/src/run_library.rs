@@ -9,7 +9,13 @@ use gnss_core::pvt::{PvtCandidateDisposition, PvtEpochSolutionKind, UtcDateTime}
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use uuid::Uuid;
+
+const PERSISTENCE_QUEUE_CAPACITY: usize = 256;
+const PERSISTENCE_BATCH_SIZE: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunStatus {
@@ -589,6 +595,133 @@ impl From<&StoredSatellite> for GuiSatelliteGeometry {
 
 pub struct RunLibrary {
     connection: Connection,
+    database_path: PathBuf,
+}
+
+enum PersistenceCommand {
+    Progress {
+        run_id: Uuid,
+        status: RunStatus,
+        processed_samples: u64,
+        total_samples: u64,
+        pvt_epoch_count: usize,
+        message: String,
+    },
+    Epoch {
+        run_id: Uuid,
+        epoch_ordinal: usize,
+        epoch: Box<GuiPvtViewModel>,
+        channels: Vec<GuiChannelStatus>,
+    },
+    Event {
+        run_id: Uuid,
+        event_ordinal: usize,
+        event: GuiDiagnosticEvent,
+    },
+    Finalize {
+        run_id: Uuid,
+        status: RunStatus,
+        processed_samples: u64,
+        total_samples: u64,
+        pvt_epoch_count: usize,
+        message: String,
+        acknowledgement: SyncSender<Result<(), String>>,
+    },
+}
+
+pub struct RunPersistenceWriter {
+    sender: Option<SyncSender<PersistenceCommand>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl RunPersistenceWriter {
+    pub fn update_progress(
+        &self,
+        run_id: Uuid,
+        status: RunStatus,
+        processed_samples: u64,
+        total_samples: u64,
+        pvt_epoch_count: usize,
+        message: impl Into<String>,
+    ) -> Result<(), String> {
+        self.send(PersistenceCommand::Progress {
+            run_id,
+            status,
+            processed_samples,
+            total_samples,
+            pvt_epoch_count,
+            message: message.into(),
+        })
+    }
+
+    pub fn append_epoch(
+        &self,
+        run_id: Uuid,
+        epoch_ordinal: usize,
+        epoch: GuiPvtViewModel,
+        channels: Vec<GuiChannelStatus>,
+    ) -> Result<(), String> {
+        self.send(PersistenceCommand::Epoch {
+            run_id,
+            epoch_ordinal,
+            epoch: Box::new(epoch),
+            channels,
+        })
+    }
+
+    pub fn append_event(
+        &self,
+        run_id: Uuid,
+        event_ordinal: usize,
+        event: GuiDiagnosticEvent,
+    ) -> Result<(), String> {
+        self.send(PersistenceCommand::Event {
+            run_id,
+            event_ordinal,
+            event,
+        })
+    }
+
+    pub fn finalize(
+        &self,
+        run_id: Uuid,
+        status: RunStatus,
+        processed_samples: u64,
+        total_samples: u64,
+        pvt_epoch_count: usize,
+        message: impl Into<String>,
+    ) -> Result<(), String> {
+        let (acknowledgement, result) = mpsc::sync_channel(1);
+        self.send(PersistenceCommand::Finalize {
+            run_id,
+            status,
+            processed_samples,
+            total_samples,
+            pvt_epoch_count,
+            message: message.into(),
+            acknowledgement,
+        })?;
+        result
+            .recv()
+            .map_err(|_| "persistence writer stopped before finalizing the run".to_string())?
+    }
+
+    fn send(&self, command: PersistenceCommand) -> Result<(), String> {
+        self.sender
+            .as_ref()
+            .ok_or_else(|| "persistence writer is closed".to_string())?
+            .send(command)
+            .map_err(|_| "persistence writer stopped".to_string())
+    }
+}
+
+impl Drop for RunPersistenceWriter {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl RunLibrary {
@@ -601,7 +734,12 @@ impl RunLibrary {
     }
 
     pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-        let connection = Connection::open(path)?;
+        Self::open_with_recovery(path.as_ref().to_path_buf(), true)
+    }
+
+    fn open_with_recovery(database_path: PathBuf, recover_runs: bool) -> rusqlite::Result<Self> {
+        let connection = Connection::open(&database_path)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA journal_mode = WAL;
@@ -636,21 +774,39 @@ impl RunLibrary {
                 value TEXT NOT NULL
              );",
         )?;
-        connection.execute(
-            "UPDATE runs SET status = 'interrupted', message = '应用异常退出，结果不完整' WHERE status = 'processing'",
-            [],
-        )?;
-        connection.execute(
-            "UPDATE runs
-             SET pvt_epoch_count = (
-                SELECT COUNT(*) FROM epochs WHERE epochs.run_id = runs.id
-             )
-             WHERE pvt_epoch_count != (
-                SELECT COUNT(*) FROM epochs WHERE epochs.run_id = runs.id
-             )",
-            [],
-        )?;
-        Ok(Self { connection })
+        if recover_runs {
+            connection.execute(
+                "UPDATE runs SET status = 'interrupted', message = '应用异常退出，结果不完整' WHERE status = 'processing'",
+                [],
+            )?;
+            connection.execute(
+                "UPDATE runs
+                 SET pvt_epoch_count = (
+                    SELECT COUNT(*) FROM epochs WHERE epochs.run_id = runs.id
+                 )
+                 WHERE pvt_epoch_count != (
+                    SELECT COUNT(*) FROM epochs WHERE epochs.run_id = runs.id
+                 )",
+                [],
+            )?;
+        }
+        Ok(Self {
+            connection,
+            database_path,
+        })
+    }
+
+    pub fn spawn_persistence_writer(&self) -> rusqlite::Result<RunPersistenceWriter> {
+        if self.database_path == Path::new(":memory:") {
+            return Err(rusqlite::Error::InvalidPath(self.database_path.clone()));
+        }
+        let library = Self::open_with_recovery(self.database_path.clone(), false)?;
+        let (sender, receiver) = mpsc::sync_channel(PERSISTENCE_QUEUE_CAPACITY);
+        let handle = thread::spawn(move || run_persistence_writer(library, receiver));
+        Ok(RunPersistenceWriter {
+            sender: Some(sender),
+            handle: Some(handle),
+        })
     }
 
     pub fn create_run(&self, settings: &GuiProcessingSettings) -> rusqlite::Result<ProcessingRun> {
@@ -822,6 +978,110 @@ impl RunLibrary {
         )?;
         Ok(())
     }
+}
+
+fn run_persistence_writer(mut library: RunLibrary, receiver: Receiver<PersistenceCommand>) {
+    let mut first_error = None;
+    loop {
+        let Ok(first) = receiver.recv() else {
+            break;
+        };
+        let mut batch = Vec::with_capacity(PERSISTENCE_BATCH_SIZE);
+        batch.push(first);
+        let mut disconnected = false;
+        while batch.len() < PERSISTENCE_BATCH_SIZE {
+            match receiver.recv_timeout(Duration::from_millis(2)) {
+                Ok(command) => batch.push(command),
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    disconnected = true;
+                    break;
+                }
+            }
+        }
+
+        if let Err(error) = apply_persistence_batch(&mut library, &batch) {
+            first_error.get_or_insert_with(|| error.to_string());
+        }
+        for command in &batch {
+            if let PersistenceCommand::Finalize {
+                acknowledgement, ..
+            } = command
+            {
+                let result = first_error.clone().map_or(Ok(()), Err);
+                let _ = acknowledgement.send(result);
+            }
+        }
+        if disconnected {
+            break;
+        }
+    }
+}
+
+fn apply_persistence_batch(
+    library: &mut RunLibrary,
+    commands: &[PersistenceCommand],
+) -> rusqlite::Result<()> {
+    let transaction = library.connection.transaction()?;
+    for command in commands {
+        match command {
+            PersistenceCommand::Progress {
+                run_id,
+                status,
+                processed_samples,
+                total_samples,
+                pvt_epoch_count,
+                message,
+            }
+            | PersistenceCommand::Finalize {
+                run_id,
+                status,
+                processed_samples,
+                total_samples,
+                pvt_epoch_count,
+                message,
+                ..
+            } => {
+                let progress = if *total_samples == 0 {
+                    0.0
+                } else {
+                    (*processed_samples as f64 / *total_samples as f64).clamp(0.0, 1.0)
+                };
+                transaction.execute(
+                    "UPDATE runs SET status = ?2, progress = ?3, processed_samples = ?4, total_samples = ?5, pvt_epoch_count = ?6, message = ?7 WHERE id = ?1",
+                    params![run_id.to_string(), status.as_str(), progress, *processed_samples as i64, *total_samples as i64, *pvt_epoch_count as i64, message],
+                )?;
+            }
+            PersistenceCommand::Epoch {
+                run_id,
+                epoch_ordinal,
+                epoch,
+                channels,
+            } => {
+                let snapshot = serde_json::to_string(&StoredEpoch::from_view_model(
+                    epoch, channels,
+                ))
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                transaction.execute(
+                    "INSERT OR REPLACE INTO epochs (run_id, epoch_index, snapshot_json) VALUES (?1, ?2, ?3)",
+                    params![run_id.to_string(), *epoch_ordinal as i64, snapshot],
+                )?;
+            }
+            PersistenceCommand::Event {
+                run_id,
+                event_ordinal,
+                event,
+            } => {
+                let snapshot = serde_json::to_string(&StoredDiagnosticEvent::from(event))
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                transaction.execute(
+                    "INSERT OR REPLACE INTO run_events (run_id, event_index, event_json) VALUES (?1, ?2, ?3)",
+                    params![run_id.to_string(), *event_ordinal as i64, snapshot],
+                )?;
+            }
+        }
+    }
+    transaction.commit()
 }
 
 #[cfg(test)]
@@ -1050,6 +1310,57 @@ mod tests {
         let reopened = RunLibrary::open(&path).expect("reopen run library");
         assert_eq!(reopened.list_runs().unwrap()[0].pvt_epoch_count, 1);
         drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn background_writer_finalizes_after_all_queued_observations() {
+        let path = std::env::temp_dir().join(format!("gnsscope-writer-{}.sqlite3", Uuid::new_v4()));
+        let library = RunLibrary::open(&path).expect("open run library");
+        let settings = GuiProcessingSettings {
+            iq_file_path: Some(PathBuf::from("capture.dat")),
+            ..Default::default()
+        };
+        let run = library.create_run(&settings).expect("create run");
+        library
+            .update_progress(run.id, RunStatus::Processing, 0, 100, 0, "starting")
+            .expect("mark run processing");
+        let writer = library
+            .spawn_persistence_writer()
+            .expect("spawn persistence writer");
+        assert_eq!(
+            library.list_runs().expect("list active run")[0].status,
+            RunStatus::Processing
+        );
+        let first = crate::sample_pvt_view_model();
+        let mut second = first.clone();
+        second.epoch_index += 1;
+        let event = GuiDiagnosticEvent {
+            now_ms: 250,
+            sample_index: 1_000_000,
+            prn: Some(20),
+            kind: GuiDiagnosticEventKind::Navigation,
+            detail: "subframe 1".to_string(),
+        };
+
+        writer
+            .append_epoch(run.id, 0, first, Vec::new())
+            .expect("queue first epoch");
+        writer.append_event(run.id, 0, event).expect("queue event");
+        writer
+            .append_epoch(run.id, 1, second, Vec::new())
+            .expect("queue second epoch");
+        writer
+            .finalize(run.id, RunStatus::Completed, 100, 100, 2, "complete")
+            .expect("flush and finalize run");
+
+        let stored_run = library.list_runs().expect("list runs").remove(0);
+        assert_eq!(stored_run.status, RunStatus::Completed);
+        assert_eq!(stored_run.pvt_epoch_count, 2);
+        assert_eq!(library.epochs(run.id).expect("load epochs").len(), 2);
+        assert_eq!(library.events(run.id).expect("load events").len(), 1);
+        drop(writer);
+        drop(library);
         let _ = std::fs::remove_file(path);
     }
 }

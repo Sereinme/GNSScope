@@ -1,6 +1,10 @@
 use gnss_core::acquisition::{PcpsAcquisition, PcpsConfig};
 use gnss_core::io::{IqFormat, IqReader};
-use gnss_core::pvt::IntegerMsAmbiguityConfig;
+use gnss_core::nav::RinexNavConfig;
+use gnss_core::pvt::{
+    from_common_receive_epoch, from_tow_history_common_receive_epoch, ContinuousPvtConfig,
+    ContinuousPvtRunner, IntegerMsAmbiguityConfig, ObservablesBuilder, PseudorangeEpoch,
+};
 use gnss_core::receiver::{StreamingPvtConfig, StreamingPvtEvent, StreamingPvtRunner};
 use gnss_data::gps_l1ca::PRN_COUNT;
 use num_complex::Complex;
@@ -51,6 +55,7 @@ fn labsat_int8_iq_acquires_real_gps_l1_ca_signals() {
     let config = PcpsConfig {
         fs: ACQUISITION_SAMPLE_RATE_HZ,
         if_freq: 0.0,
+        doppler_center_hz: 0.0,
         doppler_max: 10_000.0,
         doppler_step: 500.0,
         coherent_integration_ms: 1.0,
@@ -134,6 +139,10 @@ fn labsat_int8_iq_produces_pvt() {
         Some([40.00154_f64.to_radians(), 116.33028_f64.to_radians(), 95.0]);
     config.continuous_pvt.gps_week_rollover_reference = Some(2_267);
     config.continuous_pvt.wls.raim_max_exclusions = 0;
+    let diagnostic_rinex_path = std::env::var_os("GNSSCOPE_LABSAT_RINEX_NAV");
+    if let Some(path) = diagnostic_rinex_path.as_ref() {
+        config.rinex_nav = RinexNavConfig::with_explicit_path(path).without_environment();
+    }
 
     let max_ms = std::env::var("GNSSCOPE_LABSAT_TEST_MS")
         .ok()
@@ -161,10 +170,179 @@ fn labsat_int8_iq_produces_pvt() {
         })
         .expect("stream LabSat Int8 IQ through PVT");
 
+    if std::env::var_os("GNSSCOPE_LABSAT_DIAGNOSTICS").is_some() {
+        if let Some(epoch) = runner.pseudorange_epoch_at_latest_sample() {
+            let nav = runner.nav_state().clone();
+            let base_config = runner.config().continuous_pvt.clone();
+            let common_rx_sample = runner.state_snapshot().sample_index as f64;
+            let observable_inputs = runner.observables_input(common_rx_sample);
+            let observables = ObservablesBuilder::new(common_rx_sample, SAMPLE_RATE_HZ)
+                .with_tracking_timestamp_observations(&observable_inputs.tracking_timestamp)
+                .with_nco_reference_observations(&observable_inputs.nco_reference)
+                .build();
+            eprintln!(
+                "LabSat observables diagnostic: source={:?}, timestamp-vs-nco raw={:.3} m, centered={:.3} m, tow-history spread={:.6}..{:.6} ms",
+                observables.source,
+                observables.reference_raw_delta_m,
+                observables.reference_centered_delta_m,
+                observable_inputs.tow_history_delta_min_ms,
+                observable_inputs.tow_history_delta_max_ms
+            );
+
+            let solve_variant = |label: &str,
+                                 epoch: &PseudorangeEpoch,
+                                 mut config: ContinuousPvtConfig| {
+                config.hatch = None;
+                config.kalman = None;
+                let mut pvt = ContinuousPvtRunner::new(config);
+                let mut results = if nav.ephemeris_catalog.is_empty() {
+                    pvt.solve_epochs(
+                        std::slice::from_ref(epoch),
+                        &nav.ephemerides,
+                        &nav.ionosphere,
+                        0.0,
+                        0.0,
+                        0.0,
+                    )
+                } else {
+                    pvt.solve_epochs_with_catalog(
+                        std::slice::from_ref(epoch),
+                        &nav.ephemeris_catalog,
+                        &nav.ionosphere,
+                        0.0,
+                        0.0,
+                        0.0,
+                    )
+                };
+                let result = results.pop().expect("LabSat diagnostic PVT result");
+                let solution = &result.raw_solution;
+                let diagnostic_count = solution.satellite_diagnostics.len().max(1) as f64;
+                let iono_mean = solution
+                    .satellite_diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.iono_delay_m)
+                    .sum::<f64>()
+                    / diagnostic_count;
+                let tropo_mean = solution
+                    .satellite_diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.tropo_delay_m)
+                    .sum::<f64>()
+                    / diagnostic_count;
+                eprintln!(
+                    "LabSat model diagnostic: {label}: converged={}, alt={:.3} m, residual_rms={:.3} m, iono_mean={iono_mean:.3} m, tropo_mean={tropo_mean:.3} m, sats={:?}",
+                    solution.converged,
+                    solution.lla[2],
+                    solution.residual_rms_m,
+                    solution.used_prns
+                );
+                solution.clone()
+            };
+
+            let baseline = solve_variant("iono=on,tropo=on", &epoch, base_config.clone());
+            solve_variant(
+                "observables=nco",
+                &PseudorangeEpoch {
+                    pseudoranges: observables.reference_pseudoranges,
+                },
+                base_config.clone(),
+            );
+            solve_variant(
+                "observables=quantized-nco",
+                &PseudorangeEpoch {
+                    pseudoranges: from_common_receive_epoch(
+                        &observable_inputs.quantized_reference,
+                        common_rx_sample,
+                        SAMPLE_RATE_HZ,
+                        0.075,
+                    ),
+                },
+                base_config.clone(),
+            );
+            solve_variant(
+                "observables=nco+rx-rem",
+                &PseudorangeEpoch {
+                    pseudoranges: from_common_receive_epoch(
+                        &observable_inputs.rx_rem_reference,
+                        common_rx_sample,
+                        SAMPLE_RATE_HZ,
+                        0.075,
+                    ),
+                },
+                base_config.clone(),
+            );
+            solve_variant(
+                "observables=tow-history+code-phase",
+                &PseudorangeEpoch {
+                    pseudoranges: from_tow_history_common_receive_epoch(
+                        &observable_inputs.tow_history_code_phase,
+                        common_rx_sample,
+                        SAMPLE_RATE_HZ,
+                        0.075,
+                    ),
+                },
+                base_config.clone(),
+            );
+            let mut no_iono = base_config.clone();
+            no_iono.wls.apply_ionosphere = false;
+            solve_variant("iono=off,tropo=on", &epoch, no_iono);
+            let mut no_tropo = base_config.clone();
+            no_tropo.wls.apply_troposphere = false;
+            solve_variant("iono=on,tropo=off", &epoch, no_tropo);
+            let mut no_atmosphere = base_config.clone();
+            no_atmosphere.wls.apply_ionosphere = false;
+            no_atmosphere.wls.apply_troposphere = false;
+            solve_variant("iono=off,tropo=off", &epoch, no_atmosphere);
+
+            for prn in baseline.used_prns {
+                let mut reduced_epoch = epoch.clone();
+                reduced_epoch
+                    .pseudoranges
+                    .retain(|pseudorange| pseudorange.prn != prn);
+                solve_variant(
+                    &format!("exclude=G{prn:02}"),
+                    &reduced_epoch,
+                    base_config.clone(),
+                );
+            }
+
+            for diagnostic in baseline.satellite_diagnostics {
+                let tgd_m = nav
+                    .ephemerides
+                    .get(&diagnostic.prn)
+                    .map(|ephemeris| ephemeris.tgd * 299_792_458.0)
+                    .unwrap_or(0.0);
+                eprintln!(
+                    "LabSat model diagnostic: G{:02}: residual={:.3} m, elevation={:.3} deg, iono={:.3} m, tropo={:.3} m, cTGD={tgd_m:.3} m",
+                    diagnostic.prn,
+                    diagnostic.residual_m,
+                    diagnostic.elevation_rad.to_degrees(),
+                    diagnostic.iono_delay_m,
+                    diagnostic.tropo_delay_m
+                );
+            }
+        } else {
+            eprintln!(
+                "LabSat model diagnostic: no latest pseudorange epoch; active tracking PRNs: {:?}",
+                runner.active_tracking_prns()
+            );
+        }
+    }
+
     eprintln!(
         "LabSat active tracking PRNs: {:?}",
         runner.active_tracking_prns()
     );
+    if diagnostic_rinex_path.is_none() {
+        assert!(
+            runner.nav_state().rinex_nav_source.is_none(),
+            "default LabSat PVT should use navigation-message ephemerides"
+        );
+        assert!(
+            !runner.nav_state().ephemerides.is_empty(),
+            "navigation messages should provide broadcast ephemerides"
+        );
+    }
     for channel in runner.nav_state().channels.values() {
         eprintln!(
             "  G{:02}: subframes={}, last_tow={:?}",
@@ -209,7 +387,8 @@ fn labsat_int8_iq_produces_pvt() {
     assert!(velocity.speed_mps < 1.0);
     let utc = last.time.utc.expect("LabSat UTC output");
     assert_eq!((utc.year, utc.month, utc.day), (2023, 6, 20));
-    assert_eq!((utc.hour, utc.minute), (13, 55));
+    let expected_minute = if max_ms >= 120_000 { 56 } else { 55 };
+    assert_eq!((utc.hour, utc.minute), (13, expected_minute));
     assert!(summary.event_counts.nav_subframes > 0);
     assert!(summary.event_counts.pvt_outputs > 0);
 }

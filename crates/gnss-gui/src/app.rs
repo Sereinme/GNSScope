@@ -1,7 +1,8 @@
 use crate::{
     spawn_streaming_worker, ActiveWorker, GuiChannelStatus, GuiDiagnosticEvent,
-    GuiProcessingSettings, GuiPvtViewModel, GuiSatelliteGeometry, GuiSettingsIssue, ProcessingRun,
-    RunLibrary, RunStatus, StoredEpoch, WorkerEvent,
+    GuiDiagnosticEventKind, GuiProcessingSettings, GuiPvtViewModel, GuiSatelliteGeometry,
+    GuiSettingsIssue, ProcessingRun, RunLibrary, RunPersistenceWriter, RunStatus, StoredEpoch,
+    WorkerEvent, WORKER_EVENT_CAPACITY,
 };
 use gnss_core::pvt::{PvtCandidateDisposition, PvtEpochSolutionKind};
 use gpui::prelude::*;
@@ -53,6 +54,36 @@ const EDITABLE_SETTING_FIELDS: &[&str] = &[
 
 fn color(value: u32) -> Hsla {
     rgb(value).into()
+}
+
+fn interface_font_family() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "SF Pro Text"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Segoe UI Variable Text"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        "Noto Sans"
+    }
+}
+
+fn data_font_family() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "SF Mono"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Cascadia Mono"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        "monospace"
+    }
 }
 
 fn setting_text_value(settings: &GuiProcessingSettings, field: &str) -> String {
@@ -114,7 +145,7 @@ fn parse_initial_lla(value: &str) -> Result<Option<[f64; 3]>, ()> {
         return Ok(None);
     }
     let values = value
-        .split(|character: char| character == ',' || character == ';')
+        .split([',', ';'])
         .map(|part| part.trim().parse::<f64>().map_err(|_| ()))
         .collect::<Result<Vec<_>, _>>()?;
     (values.len() == 3)
@@ -142,6 +173,100 @@ enum AppPage {
     InterfaceSettings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceView {
+    Overview,
+    Channels,
+    Position,
+    Navigation,
+}
+
+impl WorkspaceView {
+    const ALL: [Self; 4] = [
+        Self::Overview,
+        Self::Channels,
+        Self::Position,
+        Self::Navigation,
+    ];
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Channels => "channels",
+            Self::Position => "position",
+            Self::Navigation => "navigation",
+        }
+    }
+
+    fn label(self, language: InterfaceLanguage) -> &'static str {
+        match (self, language) {
+            (Self::Overview, InterfaceLanguage::SimplifiedChinese) => "总览",
+            (Self::Channels, InterfaceLanguage::SimplifiedChinese) => "通道",
+            (Self::Position, InterfaceLanguage::SimplifiedChinese) => "定位",
+            (Self::Navigation, InterfaceLanguage::SimplifiedChinese) => "导航",
+            (Self::Overview, InterfaceLanguage::English) => "Overview",
+            (Self::Channels, InterfaceLanguage::English) => "Channels",
+            (Self::Position, InterfaceLanguage::English) => "Position",
+            (Self::Navigation, InterfaceLanguage::English) => "Navigation",
+        }
+    }
+
+    fn description(self, language: InterfaceLanguage) -> &'static str {
+        match (self, language) {
+            (Self::Overview, InterfaceLanguage::SimplifiedChinese) => {
+                "查看卫星几何、位置轨迹和当前 PVT 摘要"
+            }
+            (Self::Channels, InterfaceLanguage::SimplifiedChinese) => {
+                "检查各 PRN 的锁定、C/N0、Doppler 和残差"
+            }
+            (Self::Position, InterfaceLanguage::SimplifiedChinese) => {
+                "分析位置、速度、高度和解算质量的时间变化"
+            }
+            (Self::Navigation, InterfaceLanguage::SimplifiedChinese) => {
+                "查看捕获、重捕获、跟踪状态和导航电文事件"
+            }
+            (Self::Overview, InterfaceLanguage::English) => {
+                "Inspect satellite geometry, position track, and current PVT"
+            }
+            (Self::Channels, InterfaceLanguage::English) => {
+                "Inspect per-PRN lock, C/N0, Doppler, and residuals"
+            }
+            (Self::Position, InterfaceLanguage::English) => {
+                "Analyze position, velocity, altitude, and solution quality"
+            }
+            (Self::Navigation, InterfaceLanguage::English) => {
+                "Review acquisition, reacquisition, tracking, and NAV events"
+            }
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::Overview => IconName::LayoutDashboard,
+            Self::Channels => IconName::Inspector,
+            Self::Position => IconName::Map,
+            Self::Navigation => IconName::Globe,
+        }
+    }
+
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("channels") => Self::Channels,
+            Some("position") => Self::Position,
+            Some("navigation") => Self::Navigation,
+            _ => Self::Overview,
+        }
+    }
+
+    fn for_plot(plot: PlotFocus) -> Self {
+        match plot {
+            PlotFocus::Sky => Self::Overview,
+            PlotFocus::Cn0 => Self::Channels,
+            PlotFocus::Position | PlotFocus::Velocity | PlotFocus::Altitude => Self::Position,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HistoryFilter {
     All,
@@ -156,6 +281,13 @@ enum PlotFocus {
     Cn0,
     Velocity,
     Altitude,
+}
+
+#[derive(Clone, Copy)]
+enum PlotPanelLayout {
+    Standard,
+    Stretch(f32),
+    Expanded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,14 +437,14 @@ struct Palette {
 impl Palette {
     fn light() -> Self {
         Self {
-            background: color(0xf1f4f5),
-            sidebar: color(0xe5ebed),
-            surface: color(0xfbfcfc),
-            surface_alt: color(0xf3f7f7),
-            border: color(0xcdd8dc),
-            text: color(0x152027),
-            muted: color(0x667780),
-            accent: color(0x147d99),
+            background: color(0xf5f6f7),
+            sidebar: color(0xedeff1),
+            surface: color(0xffffff),
+            surface_alt: color(0xf7f8f9),
+            border: color(0xd8dde1),
+            text: color(0x1d2329),
+            muted: color(0x68717a),
+            accent: color(0x187d95),
             healthy: color(0x137653),
             warning: color(0xb46e12),
             danger: color(0xb9363e),
@@ -321,17 +453,17 @@ impl Palette {
 
     fn dark() -> Self {
         Self {
-            background: color(0x0f1417),
-            sidebar: color(0x151b1f),
-            surface: color(0x1a2126),
-            surface_alt: color(0x202930),
-            border: color(0x303c44),
-            text: color(0xecf2f4),
-            muted: color(0x91a0a9),
-            accent: color(0x4bb6d0),
-            healthy: color(0x4db98d),
-            warning: color(0xe0a044),
-            danger: color(0xe56a6a),
+            background: color(0x111315),
+            sidebar: color(0x16191c),
+            surface: color(0x1b1f23),
+            surface_alt: color(0x20252a),
+            border: color(0x2d3339),
+            text: color(0xeef0f2),
+            muted: color(0x929aa3),
+            accent: color(0x42a5bd),
+            healthy: color(0x4eb78b),
+            warning: color(0xd7a14a),
+            danger: color(0xdf6a72),
         }
     }
 }
@@ -339,6 +471,7 @@ impl Palette {
 pub struct GnsscopeApp {
     settings: GuiProcessingSettings,
     library: Option<RunLibrary>,
+    persistence_writer: Option<RunPersistenceWriter>,
     history: Vec<ProcessingRun>,
     queue: VecDeque<ProcessingRun>,
     active_run: Option<ProcessingRun>,
@@ -346,6 +479,7 @@ pub struct GnsscopeApp {
     selected_run_id: Option<Uuid>,
     worker: Option<ActiveWorker>,
     worker_receiver: Option<Receiver<WorkerEvent>>,
+    poll_scheduled: bool,
     channels: Vec<GuiChannelStatus>,
     epochs: Vec<GuiPvtViewModel>,
     epoch_channels: Vec<Vec<GuiChannelStatus>>,
@@ -366,9 +500,11 @@ pub struct GnsscopeApp {
     theme_preference: ThemePreference,
     interface_language: InterfaceLanguage,
     page: AppPage,
+    workspace_view: WorkspaceView,
     system_dark: bool,
     side_drawer: Option<SideDrawer>,
     settings_category: SettingsCategory,
+    compact_library_expanded: bool,
     timeline_visible: bool,
     status_message: String,
 }
@@ -489,9 +625,13 @@ impl GnsscopeApp {
             .filter_map(|event| event.to_view_model())
             .collect();
         let selected_epoch = historical_epochs.len().checked_sub(1);
+        let persistence_writer = library
+            .as_ref()
+            .and_then(|library| library.spawn_persistence_writer().ok());
         let mut app = Self {
             settings,
             library,
+            persistence_writer,
             history,
             queue,
             active_run: None,
@@ -499,6 +639,7 @@ impl GnsscopeApp {
             selected_run_id: initial_run_id,
             worker: None,
             worker_receiver: None,
+            poll_scheduled: false,
             channels: Vec::new(),
             epochs: Vec::new(),
             epoch_channels: Vec::new(),
@@ -525,6 +666,9 @@ impl GnsscopeApp {
             } else {
                 AppPage::Workspace
             },
+            workspace_view: WorkspaceView::parse(
+                std::env::var("GNSSCOPE_WORKSPACE_VIEW").ok().as_deref(),
+            ),
             system_dark: cx.theme().mode.is_dark(),
             side_drawer: if std::env::var("GNSSCOPE_OPEN_COMPARISON")
                 .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
@@ -540,6 +684,7 @@ impl GnsscopeApp {
             settings_category: SettingsCategory::parse(
                 std::env::var("GNSSCOPE_SETTINGS_CATEGORY").ok().as_deref(),
             ),
+            compact_library_expanded: false,
             timeline_visible,
             status_message: "请选择 IQ 文件开始解算".to_string(),
         };
@@ -556,11 +701,13 @@ impl GnsscopeApp {
             app.live_run_id = None;
             app.historical_epochs = vec![crate::sample_pvt_view_model()];
             app.historical_channels = vec![crate::state::sample_channel_statuses()];
+            app.historical_diagnostic_events = preview_diagnostic_events();
             app.selected_epoch = Some(0);
+            app.timeline_visible = true;
             app.status_message = "确定性界面预览".to_string();
         }
         if std::env::var_os("GNSSCOPE_AUTORUN").is_some() {
-            app.enqueue();
+            app.enqueue(cx);
         }
         app.schedule_poll(cx);
         app
@@ -635,13 +782,24 @@ impl GnsscopeApp {
     }
 
     fn schedule_poll(&mut self, cx: &mut Context<Self>) {
+        if self.poll_scheduled || self.worker_receiver.is_none() {
+            return;
+        }
+        self.poll_scheduled = true;
         cx.spawn(async move |this, cx| {
             Timer::after(Duration::from_millis(50)).await;
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {
-                    this.drain_worker_events();
-                    this.schedule_poll(cx);
-                    cx.notify();
+                    this.poll_scheduled = false;
+                    let drained_events = this.drain_worker_events();
+                    let (notify, continue_polling) =
+                        poll_decision(this.worker_receiver.is_some(), drained_events);
+                    if continue_polling {
+                        this.schedule_poll(cx);
+                    }
+                    if notify {
+                        cx.notify();
+                    }
                 })
                 .ok();
             }
@@ -844,7 +1002,7 @@ impl GnsscopeApp {
         }
     }
 
-    fn enqueue(&mut self) {
+    fn enqueue(&mut self, cx: &mut Context<Self>) {
         if let Some((field, message)) = self.setting_parse_errors.iter().next() {
             self.status_message = format!("{field}: {message}");
             return;
@@ -868,24 +1026,34 @@ impl GnsscopeApp {
                     self.status_message = "任务已加入等待队列".to_string();
                 } else {
                     self.start_run(run);
+                    self.schedule_poll(cx);
                 }
             }
             Err(error) => self.status_message = format!("无法创建运行记录：{error}"),
         }
     }
 
-    fn enqueue_selected_or_draft(&mut self) {
-        self.enqueue();
+    fn enqueue_selected_or_draft(&mut self, cx: &mut Context<Self>) {
+        self.enqueue(cx);
     }
 
     fn start_run(&mut self, mut run: ProcessingRun) {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(WORKER_EVENT_CAPACITY);
         let worker = spawn_streaming_worker(run.settings.clone(), sender);
         run.status = RunStatus::Processing;
         run.message = "初始化接收机".to_string();
-        if let Some(library) = &self.library {
-            let _ = library.update_progress(run.id, RunStatus::Processing, 0, 0, 0, &run.message);
-        }
+        persist_progress(
+            self.persistence_writer.as_ref(),
+            self.library.as_ref(),
+            PersistenceProgress {
+                run_id: run.id,
+                status: RunStatus::Processing,
+                processed_samples: 0,
+                total_samples: 0,
+                pvt_epoch_count: 0,
+                message: &run.message,
+            },
+        );
         let run_id = run.id;
         self.active_run = Some(run);
         self.live_run_id = Some(run_id);
@@ -1000,15 +1168,17 @@ impl GnsscopeApp {
         self.status_message = "历史运行已删除，源 IQ 文件未修改".to_string();
     }
 
-    fn drain_worker_events(&mut self) {
+    fn drain_worker_events(&mut self) -> usize {
         let events = self
             .worker_receiver
             .as_ref()
             .map(|receiver| receiver.try_iter().collect::<Vec<_>>())
             .unwrap_or_default();
+        let event_count = events.len();
         for event in events {
             self.apply_worker_event(event);
         }
+        event_count
     }
 
     fn apply_worker_event(&mut self, event: WorkerEvent) {
@@ -1037,24 +1207,32 @@ impl GnsscopeApp {
                     };
                     run.message = phase.clone();
                     run.pvt_epoch_count = self.epochs.len();
-                    if let Some(library) = &self.library {
-                        let _ = library.update_progress(
-                            run.id,
-                            RunStatus::Processing,
+                    persist_progress(
+                        self.persistence_writer.as_ref(),
+                        self.library.as_ref(),
+                        PersistenceProgress {
+                            run_id: run.id,
+                            status: RunStatus::Processing,
                             processed_samples,
                             total_samples,
-                            self.epochs.len(),
-                            &phase,
-                        );
-                    }
+                            pvt_epoch_count: self.epochs.len(),
+                            message: &phase,
+                        },
+                    );
                 }
                 self.status_message = phase;
             }
             WorkerEvent::Epoch { pvt, channels } => {
                 let epoch_ordinal = self.epochs.len();
-                if let Some(library) = &self.library {
-                    let _ = library.append_epoch(run_id, epoch_ordinal, &pvt, &channels);
-                }
+                let pvt = *pvt;
+                persist_epoch(
+                    self.persistence_writer.as_ref(),
+                    self.library.as_ref(),
+                    run_id,
+                    epoch_ordinal,
+                    &pvt,
+                    &channels,
+                );
                 self.channels = channels.clone();
                 self.epoch_channels.push(channels);
                 self.epochs.push(pvt);
@@ -1067,9 +1245,13 @@ impl GnsscopeApp {
                 self.channels = channels;
             }
             WorkerEvent::Diagnostic(event) => {
-                if let Some(library) = &self.library {
-                    let _ = library.append_event(run_id, self.diagnostic_events.len(), &event);
-                }
+                persist_event(
+                    self.persistence_writer.as_ref(),
+                    self.library.as_ref(),
+                    run_id,
+                    self.diagnostic_events.len(),
+                    &event,
+                );
                 self.diagnostic_events.push(event);
             }
             WorkerEvent::Cancelled {
@@ -1122,16 +1304,18 @@ impl GnsscopeApp {
             };
             run.pvt_epoch_count = self.epochs.len();
             run.message = message.to_string();
-            if let Some(library) = &self.library {
-                let _ = library.update_progress(
-                    run.id,
+            finalize_persistence(
+                self.persistence_writer.as_ref(),
+                self.library.as_ref(),
+                PersistenceProgress {
+                    run_id: run.id,
                     status,
-                    processed,
-                    total,
-                    self.epochs.len(),
+                    processed_samples: processed,
+                    total_samples: total,
+                    pvt_epoch_count: self.epochs.len(),
                     message,
-                );
-            }
+                },
+            );
         }
         self.status_message = message.to_string();
         self.worker = None;
@@ -1171,6 +1355,14 @@ impl GnsscopeApp {
                 .and_then(|index| self.historical_channels.get(index))
                 .map(Vec::as_slice)
                 .unwrap_or(&[])
+        }
+    }
+
+    fn display_diagnostic_events(&self) -> &[GuiDiagnosticEvent] {
+        if self.selected_run_id.is_some() && self.selected_run_id == self.live_run_id {
+            &self.diagnostic_events
+        } else {
+            &self.historical_diagnostic_events
         }
     }
 
@@ -1247,9 +1439,11 @@ impl GnsscopeApp {
     }
 
     fn can_enqueue(&self) -> bool {
-        self.active_run.is_none()
-            && self.setting_parse_errors.is_empty()
-            && self.settings_issues().is_empty()
+        can_enqueue_run(
+            self.active_run.is_some(),
+            !self.setting_parse_errors.is_empty(),
+            !self.settings_issues().is_empty(),
+        )
     }
 
     fn file_label(&self) -> SharedString {
@@ -1274,18 +1468,24 @@ impl GnsscopeApp {
         let subtitle = subtitle.into();
         div()
             .flex()
-            .items_end()
-            .justify_between()
+            .flex_1()
+            .items_baseline()
+            .gap(px(7.))
+            .min_w_0()
             .child(
                 div()
-                    .text_size(px(14.))
+                    .flex_shrink_0()
+                    .text_size(px(13.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(palette.text)
                     .child(title),
             )
             .child(
                 div()
-                    .text_size(px(11.))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_size(px(10.))
                     .text_color(palette.muted)
                     .child(subtitle),
             )
@@ -1316,6 +1516,7 @@ impl GnsscopeApp {
                     .child(
                         div()
                             .text_size(px(20.))
+                            .font_family(data_font_family())
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(palette.text)
                             .child(value),
@@ -1445,14 +1646,37 @@ impl GnsscopeApp {
                             })),
                     )
                     .child(if is_active {
-                        Button::new("cancel")
-                            .danger()
-                            .icon(IconName::CircleX)
-                            .tooltip(self.localized("取消当前解算", "Cancel current solution"))
-                            .on_click(cx.listener(|this, _, _, _| this.cancel_active()))
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(
+                                Button::new("enqueue")
+                                    .primary()
+                                    .bg(palette.accent)
+                                    .text_color(color(0xffffff))
+                                    .icon(IconName::Plus)
+                                    .tooltip(self.localized("加入等待队列", "Add to queue"))
+                                    .disabled(!self.can_enqueue())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.enqueue_selected_or_draft(cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("cancel")
+                                    .danger()
+                                    .icon(IconName::CircleX)
+                                    .tooltip(
+                                        self.localized("取消当前解算", "Cancel current solution"),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, _| this.cancel_active())),
+                            )
+                            .into_any_element()
                     } else if self.selected_run_id.is_some() {
                         Button::new("run")
                             .primary()
+                            .bg(palette.accent)
+                            .text_color(color(0xffffff))
                             .icon(IconName::Replace)
                             .tooltip(
                                 self.localized(
@@ -1461,13 +1685,26 @@ impl GnsscopeApp {
                                 ),
                             )
                             .disabled(!self.can_enqueue())
-                            .on_click(cx.listener(|this, _, _, _| this.enqueue_selected_or_draft()))
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.enqueue_selected_or_draft(cx)),
+                            )
+                            .into_any_element()
                     } else {
                         Button::new("run")
                             .primary()
+                            .bg(palette.accent)
+                            .text_color(color(0xffffff))
+                            .icon(IconName::SquareTerminal)
                             .label(self.localized("开始解算", "Start processing"))
+                            .tooltip(self.localized(
+                                "使用当前 IQ 文件和接收机配置开始完整离线解算",
+                                "Start the complete offline receiver pipeline with the current IQ file and settings",
+                            ))
                             .disabled(!self.can_enqueue())
-                            .on_click(cx.listener(|this, _, _, _| this.enqueue_selected_or_draft()))
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.enqueue_selected_or_draft(cx)),
+                            )
+                            .into_any_element()
                     }),
             )
     }
@@ -1477,8 +1714,97 @@ impl GnsscopeApp {
         palette: Palette,
         stacked: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let history_query = self.history_search.read(cx).value().to_string();
+        if stacked && !self.compact_library_expanded {
+            let run_label = self
+                .selected_run()
+                .and_then(|run| run.source_path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.localized("未选择任务", "No task selected").to_string());
+            return div()
+                .w_full()
+                .h(px(50.))
+                .flex_shrink_0()
+                .px(px(8.))
+                .bg(palette.sidebar)
+                .border_b_1()
+                .border_color(palette.border)
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .child(
+                    Button::new("compact-new-task")
+                        .ghost()
+                        .icon(IconName::Plus)
+                        .tooltip(self.localized(
+                            "选择 IQ 文件并创建新的解算任务",
+                            "Select an IQ file and create a new processing task",
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.start_new_task(window, cx);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .px(px(6.))
+                        .child(
+                            div()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_size(px(10.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(palette.text)
+                                .child(run_label),
+                        )
+                        .child(div().text_size(px(9.)).text_color(palette.muted).child(
+                            match self.interface_language {
+                                InterfaceLanguage::SimplifiedChinese => format!(
+                                    "{} 条历史 · {} 项排队",
+                                    self.history.len(),
+                                    self.queue.len()
+                                ),
+                                InterfaceLanguage::English => format!(
+                                    "{} history · {} queued",
+                                    self.history.len(),
+                                    self.queue.len()
+                                ),
+                            },
+                        )),
+                )
+                .child(
+                    Button::new("compact-expand-library")
+                        .ghost()
+                        .icon(IconName::PanelBottomOpen)
+                        .tooltip(self.localized(
+                            "展开运行库、等待队列和历史记录",
+                            "Expand run library, queue, and history",
+                        ))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.compact_library_expanded = true;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("compact-interface-settings")
+                        .ghost()
+                        .icon(IconName::Settings2)
+                        .tooltip(self.localized(
+                            "打开界面外观与显示设置",
+                            "Open appearance and display settings",
+                        ))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.page = AppPage::InterfaceSettings;
+                            this.side_drawer = None;
+                            this.focused_plot = None;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element();
+        }
         let active = self.active_run.as_ref().map(|run| {
             div()
                 .p(px(10.))
@@ -1520,7 +1846,7 @@ impl GnsscopeApp {
         });
         div()
             .when(!stacked, |this| {
-                this.w(px(258.)).min_w(px(220.)).h_full().border_r_1()
+                this.w(px(236.)).min_w(px(216.)).h_full().border_r_1()
             })
             .when(stacked, |this| {
                 this.w_full().h(px(190.)).flex_shrink_0().border_b_1()
@@ -1531,32 +1857,6 @@ impl GnsscopeApp {
             .flex_col()
             .child(
                 div()
-                    .h(px(64.))
-                    .px(px(16.))
-                    .flex()
-                    .items_center()
-                    .justify_start()
-                    .border_b_1()
-                    .border_color(palette.border)
-                    .child(
-                        div()
-                            .child(
-                                div()
-                                    .text_size(px(16.))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(palette.text)
-                                    .child("GNSScope"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(palette.muted)
-                                    .child("GNSS SIGNAL LAB"),
-                            ),
-                    ),
-            )
-            .child(
-                div()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
@@ -1565,6 +1865,8 @@ impl GnsscopeApp {
                         Button::new("new-task")
                             .w_full()
                             .ghost()
+                            .rounded(px(4.))
+                            .bg(palette.surface_alt)
                             .justify_start()
                             .text_color(palette.text)
                             .icon(IconName::Plus)
@@ -1719,10 +2021,11 @@ impl GnsscopeApp {
                             ),
                     )
                     .child(
-                        div()
-                            .mb(px(8.))
-                            .h(px(32.))
-                            .child(Input::new(&self.history_search).prefix(IconName::Search)),
+                        div().mb(px(8.)).h(px(32.)).child(
+                            Input::new(&self.history_search)
+                                .prefix(IconName::Search)
+                                .bg(palette.background),
+                        ),
                     )
                     .children(
                         self.history
@@ -1848,9 +2151,12 @@ impl GnsscopeApp {
                     .py(px(8.))
                     .border_t_1()
                     .border_color(palette.border)
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
                     .child(
                         Button::new("interface-settings-page")
-                            .w_full()
+                            .flex_1()
                             .ghost()
                             .justify_start()
                             .text_color(if self.page == AppPage::InterfaceSettings {
@@ -1868,8 +2174,22 @@ impl GnsscopeApp {
                                 this.focused_plot = None;
                                 cx.notify();
                             })),
-                    ),
+                    )
+                    .children(stacked.then(|| {
+                        Button::new("compact-collapse-library")
+                            .ghost()
+                            .icon(IconName::PanelBottom)
+                            .tooltip(self.localized(
+                                "收起运行库并恢复工作区高度",
+                                "Collapse the run library and restore workspace height",
+                            ))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.compact_library_expanded = false;
+                                cx.notify();
+                            }))
+                    })),
             )
+            .into_any_element()
     }
 
     fn render_interface_setting_section(
@@ -1881,10 +2201,9 @@ impl GnsscopeApp {
         palette: Palette,
     ) -> impl IntoElement {
         div()
-            .p(px(20.))
-            .rounded(px(8.))
-            .bg(palette.surface)
-            .border_1()
+            .px(px(4.))
+            .py(px(18.))
+            .border_b_1()
             .border_color(palette.border)
             .child(
                 div()
@@ -1898,7 +2217,7 @@ impl GnsscopeApp {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(7.))
+                            .rounded(px(6.))
                             .bg(palette.accent.opacity(0.12))
                             .text_color(palette.accent)
                             .child(icon),
@@ -2047,10 +2366,10 @@ impl GnsscopeApp {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(900.))
+                    .max_w(px(780.))
                     .mx_auto()
                     .px(px(28.))
-                    .py(px(30.))
+                    .py(px(24.))
                     .child(
                         div()
                             .flex()
@@ -2060,7 +2379,7 @@ impl GnsscopeApp {
                                 div()
                                     .child(
                                         div()
-                                            .text_size(px(22.))
+                                            .text_size(px(18.))
                                             .font_weight(gpui::FontWeight::BOLD)
                                             .text_color(palette.text)
                                             .child(self.localized(
@@ -2092,7 +2411,7 @@ impl GnsscopeApp {
                     )
                     .child(
                         div()
-                            .mt(px(24.))
+                            .mt(px(18.))
                             .child(self.render_interface_setting_section(
                                 IconName::Palette,
                                 self.localized("外观主题", "Appearance theme"),
@@ -2105,9 +2424,7 @@ impl GnsscopeApp {
                             )),
                     )
                     .child(
-                        div()
-                            .mt(px(12.))
-                            .child(self.render_interface_setting_section(
+                        div().child(self.render_interface_setting_section(
                                 IconName::Globe,
                                 self.localized("界面语言", "Interface language"),
                                 self.localized(
@@ -2119,9 +2436,7 @@ impl GnsscopeApp {
                             )),
                     )
                     .child(
-                        div()
-                            .mt(px(12.))
-                            .child(self.render_interface_setting_section(
+                        div().child(self.render_interface_setting_section(
                                 IconName::PanelBottom,
                                 self.localized("Epoch 时间轴", "Epoch timeline"),
                                 self.localized(
@@ -2154,54 +2469,71 @@ impl GnsscopeApp {
             run.map(|run| run.message.clone())
                 .unwrap_or_else(|| self.status_message.clone())
         };
+        let status_color = if self.active_run.is_some() {
+            palette.accent
+        } else if progress >= 1.0 {
+            palette.healthy
+        } else {
+            palette.muted
+        };
         div()
-            .px(px(22.))
-            .pt(px(18.))
-            .pb(px(16.))
+            .px(px(16.))
+            .pt(px(8.))
+            .pb(px(7.))
+            .bg(palette.surface_alt)
+            .border_b_1()
+            .border_color(palette.border)
             .child(
                 div()
                     .flex()
-                    .items_end()
+                    .items_center()
                     .justify_between()
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .min_w_0()
+                            .child(div().size(px(6.)).rounded(px(2.)).bg(status_color))
                             .child(
                                 div()
-                                    .text_size(px(11.))
-                                    .text_color(palette.muted)
-                                    .child("处理状态"),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(3.))
-                                    .text_size(px(17.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .text_size(px(12.))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(palette.text)
                                     .child(status_message),
                             ),
                     )
                     .child(
                         div()
-                            .text_right()
-                            .child(
-                                div()
-                                    .text_size(px(20.))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(palette.accent)
-                                    .child(format!("{:.1}%", progress * 100.0)),
-                            )
+                            .ml(px(16.))
+                            .flex()
+                            .items_baseline()
+                            .gap(px(12.))
+                            .font_family(data_font_family())
                             .child(
                                 div()
                                     .text_size(px(10.))
                                     .text_color(palette.muted)
                                     .child(format!("{elapsed:.1} / {total:.1} s")),
+                            )
+                            .child(
+                                div()
+                                    .min_w(px(54.))
+                                    .text_right()
+                                    .text_size(px(12.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(palette.accent)
+                                    .child(format!("{:.1}%", progress * 100.0)),
                             ),
                     ),
             )
             .child(
                 Progress::new()
-                    .mt(px(11.))
-                    .h(px(7.))
+                    .mt(px(6.))
+                    .h(px(2.))
                     .bg(palette.accent)
                     .value((progress * 100.0) as f32),
             )
@@ -2240,7 +2572,12 @@ impl GnsscopeApp {
                     .child(label)
                     .child(unit),
             )
-            .child(div().mt(px(4.)).h(px(34.)).child(Input::new(input)))
+            .child(
+                div()
+                    .mt(px(4.))
+                    .h(px(34.))
+                    .child(Input::new(input).bg(palette.background)),
+            )
             .children(issue.map(|message| {
                 div()
                     .mt(px(3.))
@@ -2254,178 +2591,247 @@ impl GnsscopeApp {
         &self,
         palette: Palette,
         compact: bool,
+        full_width: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let issues = self.settings_issues();
         let category = self.settings_category;
         let issue_count = issues.len() + self.setting_parse_errors.len();
+        let icon_only_categories = compact && !full_width;
         div()
-            .w(if compact { px(360.) } else { px(500.) })
-            .flex_shrink_0()
+            .when(full_width, |this| this.w_full().flex_1())
+            .when(!full_width, |this| {
+                this.w(if compact { px(372.) } else { px(460.) })
+                    .flex_shrink_0()
+            })
             .h_full()
             .flex()
             .flex_col()
             .bg(palette.surface)
             .border_l_1()
             .border_color(palette.border)
-            .shadow_lg()
             .child(
                 div()
+                    .h(px(54.))
                     .flex_shrink_0()
-                    .p(px(18.))
+                    .px(px(14.))
                     .border_b_1()
                     .border_color(palette.border)
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .child(
                         div()
                             .flex()
-                            .items_start()
-                            .justify_between()
+                            .items_center()
+                            .gap(px(9.))
                             .child(
                                 div()
-                                    .child(
-                                        div()
-                                            .text_size(px(17.))
-                                            .font_weight(gpui::FontWeight::BOLD)
-                                            .text_color(palette.text)
-                                            .child("接收机配置"),
-                                    )
-                                    .child(
-                                        div()
-                                            .mt(px(4.))
-                                            .text_size(px(10.))
-                                            .text_color(palette.muted)
-                                            .child("直接修改 · 更改用于下一次解算"),
-                                    ),
+                                    .size(px(26.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(3.))
+                                    .bg(palette.accent.opacity(0.11))
+                                    .text_color(palette.accent)
+                                    .child(IconName::Inspector),
                             )
                             .child(
                                 div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(2.))
                                     .child(
-                                        Button::new("reset-receiver-settings")
-                                            .ghost()
-                                            .icon(IconName::Undo2)
-                                            .tooltip("恢复默认配置")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.reset_receiver_settings(window, cx);
-                                                cx.notify();
-                                            })),
+                                        div()
+                                            .text_size(px(13.))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(palette.text)
+                                            .child(self.localized(
+                                                "接收机检查器",
+                                                "Receiver inspector",
+                                            )),
                                     )
                                     .child(
-                                        Button::new("close-settings-drawer")
-                                            .ghost()
-                                            .icon(IconName::CircleX)
-                                            .tooltip("关闭接收机配置")
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.side_drawer = None;
-                                                cx.notify();
-                                            })),
+                                        div()
+                                            .text_size(px(9.))
+                                            .text_color(palette.muted)
+                                            .child(self.localized(
+                                                "下一次解算的配置草稿",
+                                                "Configuration draft for the next run",
+                                            )),
                                     ),
                             ),
                     )
-                    .children((issue_count > 0).then(|| {
+                    .child(
                         div()
-                            .mt(px(12.))
-                            .p(px(9.))
-                            .rounded(px(5.))
                             .flex()
-                            .items_start()
-                            .gap(px(8.))
-                            .bg(palette.danger.opacity(0.10))
-                            .border_1()
-                            .border_color(palette.danger.opacity(0.45))
-                            .text_size(px(10.))
-                            .text_color(palette.danger)
-                            .child(IconName::TriangleAlert)
-                            .child(format!(
-                                "{issue_count} 项配置需要处理{}",
-                                issues
-                                    .first()
-                                    .map(|issue| format!(" · {}", issue.message))
-                                    .unwrap_or_default()
-                            ))
-                    })),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .px(px(14.))
-                    .py(px(10.))
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(6.))
-                    .border_b_1()
-                    .border_color(palette.border)
-                    .children(SettingsCategory::ALL.into_iter().map(|candidate| {
-                        let selected = category == candidate;
-                        Button::new(SharedString::from(format!(
-                            "settings-category-{:?}",
-                            candidate
-                        )))
-                        .ghost()
-                        .icon(candidate.icon())
-                        .label(candidate.label())
-                        .text_color(if selected {
-                            palette.accent
-                        } else {
-                            palette.muted
-                        })
-                        .when(selected, |button| {
-                            button
-                                .bg(palette.accent.opacity(0.12))
-                                .border_1()
-                                .border_color(palette.accent.opacity(0.35))
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.settings_category = candidate;
-                            cx.notify();
-                        }))
-                    })),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .px(px(18.))
-                    .pt(px(14.))
-                    .pb(px(8.))
-                    .child(
-                        div()
-                            .text_size(px(14.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(palette.text)
-                            .child(category.label()),
-                    )
-                    .child(
-                        div()
-                            .mt(px(3.))
-                            .text_size(px(10.))
-                            .text_color(palette.muted)
-                            .child(category.description()),
+                            .items_center()
+                            .gap(px(2.))
+                            .child(
+                                Button::new("reset-receiver-settings")
+                                    .ghost()
+                                    .icon(IconName::Undo2)
+                                    .tooltip(self.localized(
+                                        "恢复接收机默认参数，但保留当前 IQ 文件",
+                                        "Restore receiver defaults while keeping the current IQ file",
+                                    ))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.reset_receiver_settings(window, cx);
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("close-settings-drawer")
+                                    .ghost()
+                                    .icon(IconName::CircleX)
+                                    .tooltip(self.localized(
+                                        "关闭接收机配置检查器",
+                                        "Close receiver inspector",
+                                    ))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.side_drawer = None;
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             )
+            .children((issue_count > 0).then(|| {
+                div()
+                    .min_h(px(34.))
+                    .flex_shrink_0()
+                    .px(px(14.))
+                    .py(px(7.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .bg(palette.danger.opacity(0.09))
+                    .border_b_1()
+                    .border_color(palette.danger.opacity(0.35))
+                    .text_size(px(9.))
+                    .text_color(palette.danger)
+                    .child(IconName::TriangleAlert)
+                    .child(format!(
+                        "{issue_count} 项配置需要处理{}",
+                        issues
+                            .first()
+                            .map(|issue| format!(" · {}", issue.message))
+                            .unwrap_or_default()
+                    ))
+            }))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scrollbar()
-                    .px(px(18.))
-                    .pb(px(20.))
+                    .flex()
                     .child(
-                        self.render_settings_category_content(category, palette, cx)
-                            .into_any_element(),
+                        div()
+                            .w(if icon_only_categories {
+                                px(54.)
+                            } else {
+                                px(118.)
+                            })
+                            .flex_shrink_0()
+                            .py(px(8.))
+                            .px(px(6.))
+                            .bg(palette.sidebar)
+                            .border_r_1()
+                            .border_color(palette.border)
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .children(SettingsCategory::ALL.into_iter().map(|candidate| {
+                                let selected = category == candidate;
+                                let button = Button::new(SharedString::from(format!(
+                                    "settings-category-{:?}",
+                                    candidate
+                                )))
+                                .w_full()
+                                .ghost()
+                                .justify_start()
+                                .icon(candidate.icon())
+                                .text_color(if selected {
+                                    palette.accent
+                                } else {
+                                    palette.muted
+                                })
+                                .bg(if selected {
+                                    palette.accent.opacity(0.10)
+                                } else {
+                                    palette.sidebar
+                                })
+                                .tooltip(candidate.description())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.settings_category = candidate;
+                                    cx.notify();
+                                }));
+                                if icon_only_categories {
+                                    button
+                                } else {
+                                    button.label(candidate.label())
+                                }
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_y_scrollbar()
+                            .child(
+                                div()
+                                    .px(px(16.))
+                                    .pt(px(14.))
+                                    .pb(px(8.))
+                                    .child(
+                                        div()
+                                            .text_size(px(13.))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(palette.text)
+                                            .child(category.label()),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt(px(2.))
+                                            .text_size(px(9.))
+                                            .text_color(palette.muted)
+                                            .child(category.description()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .px(px(16.))
+                                    .pb(px(20.))
+                                    .child(
+                                        self.render_settings_category_content(
+                                            category, palette, cx,
+                                        )
+                                        .into_any_element(),
+                                    ),
+                            ),
                     ),
             )
             .child(
                 div()
+                    .min_h(px(32.))
                     .flex_shrink_0()
-                    .px(px(18.))
-                    .py(px(10.))
+                    .px(px(14.))
+                    .py(px(7.))
                     .border_t_1()
                     .border_color(palette.border)
                     .text_size(px(9.))
-                    .text_color(palette.muted)
-                    .child("草稿即时验证 · 入队后配置冻结"),
+                    .text_color(if issue_count == 0 {
+                        palette.healthy
+                    } else {
+                        palette.danger
+                    })
+                    .child(if issue_count == 0 {
+                        self.localized(
+                            "配置有效 · 入队后快照冻结",
+                            "Configuration valid · Snapshot freezes when queued",
+                        )
+                    } else {
+                        self.localized(
+                            "修复配置问题后才能开始解算",
+                            "Resolve configuration issues before processing",
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -2715,10 +3121,268 @@ impl GnsscopeApp {
             )
     }
 
+    fn render_workspace_tabs(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .h(px(40.))
+            .flex_shrink_0()
+            .px(px(12.))
+            .bg(palette.surface)
+            .border_b_1()
+            .border_color(palette.border)
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .children(WorkspaceView::ALL.into_iter().map(|view| {
+                let selected = self.workspace_view == view;
+                div()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(if selected {
+                        palette.accent
+                    } else {
+                        palette.surface
+                    })
+                    .child(
+                        Button::new(SharedString::from(format!("workspace-view-{}", view.id())))
+                            .ghost()
+                            .rounded(px(0.))
+                            .icon(view.icon())
+                            .label(view.label(self.interface_language))
+                            .text_color(if selected {
+                                palette.text
+                            } else {
+                                palette.muted
+                            })
+                            .bg(if selected {
+                                palette.surface_alt
+                            } else {
+                                palette.surface
+                            })
+                            .tooltip(view.description(self.interface_language))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.workspace_view = view;
+                                this.focused_plot = None;
+                                cx.notify();
+                            })),
+                    )
+            }))
+    }
+
+    fn render_pvt_summary(
+        &self,
+        palette: Palette,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pvt = self.current_pvt();
+        let valid_pvt = pvt.filter(|pvt| pvt_position_is_displayable(pvt));
+        let latitude = valid_pvt
+            .map(|p| format!("{:.7}", p.latitude_deg))
+            .unwrap_or_else(|| "--".to_string());
+        let longitude = valid_pvt
+            .map(|p| format!("{:.7}", p.longitude_deg))
+            .unwrap_or_else(|| "--".to_string());
+        let altitude = valid_pvt
+            .map(|p| format!("{:.2}", p.altitude_m))
+            .unwrap_or_else(|| "--".to_string());
+        let speed = valid_pvt
+            .and_then(|p| p.velocity.as_ref())
+            .map(|v| format!("{:.3}", v.speed_mps))
+            .unwrap_or_else(|| "--".to_string());
+        let clock = valid_pvt
+            .and_then(|p| p.time.receiver_clock_drift_ppm)
+            .map(|v| format!("{v:.4}"))
+            .unwrap_or_else(|| "--".to_string());
+        let hdop = valid_pvt
+            .map(|p| format!("{:.2}", p.quality.hdop))
+            .unwrap_or_else(|| "--".to_string());
+        let utc = pvt
+            .and_then(|p| p.time.utc.as_ref())
+            .map(|utc| {
+                format!(
+                    "{:04}-{:02}-{:02} {:02}:{:02}:{:06.3} UTC",
+                    utc.year, utc.month, utc.day, utc.hour, utc.minute, utc.second
+                )
+            })
+            .unwrap_or_else(|| "UTC unavailable".to_string());
+
+        div()
+            .bg(palette.surface)
+            .border_1()
+            .border_color(palette.border)
+            .p(px(14.))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .child(Self::section_title(
+                        self.localized("当前 PVT", "Current PVT"),
+                        if valid_pvt.is_some() {
+                            pvt.map(|p| format!("{:?}", p.solution_kind))
+                                .unwrap_or_else(|| "等待解算".to_string())
+                        } else if pvt.is_some() {
+                            self.localized("质量门限拒绝", "Rejected by quality gate")
+                                .to_string()
+                        } else {
+                            self.localized("等待解算", "Waiting for solution")
+                                .to_string()
+                        },
+                        palette,
+                    ))
+                    .child(
+                        Button::new("candidate-comparison")
+                            .ghost()
+                            .icon(IconName::PanelRightOpen)
+                            .tooltip(self.localized(
+                                "打开 Raw、Smoothed 与 Kalman 候选解的详细比较",
+                                "Compare Raw, Smoothed, and Kalman candidates",
+                            ))
+                            .disabled(pvt.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.side_drawer = toggled_side_drawer(
+                                    this.side_drawer,
+                                    SideDrawer::CandidateComparison,
+                                );
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(8.))
+                    .flex()
+                    .when(compact, |this| this.flex_col())
+                    .child(Self::metric("纬度", latitude, "°", palette))
+                    .child(Self::metric("经度", longitude, "°", palette))
+                    .child(Self::metric("高程", altitude, "m", palette)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .when(compact, |this| this.flex_col())
+                    .child(Self::metric("三维速度", speed, "m/s", palette))
+                    .child(Self::metric("钟漂", clock, "ppm", palette))
+                    .child(Self::metric("HDOP", hdop, "", palette)),
+            )
+            .child(
+                div()
+                    .mt(px(6.))
+                    .pt(px(10.))
+                    .border_t_1()
+                    .border_color(palette.border)
+                    .text_size(px(12.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(palette.text)
+                    .child(utc),
+            )
+            .into_any_element()
+    }
+
+    fn render_channel_table(&self, palette: Palette) -> AnyElement {
+        let channels = self.display_channels();
+        let locked = channels
+            .iter()
+            .filter(|channel| channel.tracking_locked)
+            .count();
+        div()
+            .bg(palette.surface)
+            .border_1()
+            .border_color(palette.border)
+            .child(
+                div()
+                    .h(px(42.))
+                    .px(px(14.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(palette.border)
+                    .child(Self::section_title(
+                        self.localized("通道诊断", "Channel diagnostics"),
+                        format!("{locked} / {} locked", channels.len()),
+                        palette,
+                    )),
+            )
+            .child(channel_table_header(palette))
+            .children(
+                channels
+                    .iter()
+                    .map(|channel| channel_table_row(channel, palette)),
+            )
+            .children(channels.is_empty().then(|| {
+                div()
+                    .h(px(72.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .text_color(palette.muted)
+                    .child(self.localized(
+                        "当前 epoch 没有通道遥测",
+                        "No channel telemetry for this epoch",
+                    ))
+            }))
+            .into_any_element()
+    }
+
+    fn render_navigation_events(&self, palette: Palette) -> AnyElement {
+        let events = self.display_diagnostic_events();
+        div()
+            .bg(palette.surface)
+            .border_1()
+            .border_color(palette.border)
+            .child(
+                div()
+                    .h(px(42.))
+                    .px(px(14.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(palette.border)
+                    .child(Self::section_title(
+                        self.localized("接收机事件", "Receiver events"),
+                        match self.interface_language {
+                            InterfaceLanguage::SimplifiedChinese => {
+                                format!("已持久化 {} 条", events.len())
+                            }
+                            InterfaceLanguage::English => format!("{} persisted", events.len()),
+                        },
+                        palette,
+                    )),
+            )
+            .child(event_table_header(palette))
+            .children(
+                events
+                    .iter()
+                    .rev()
+                    .take(200)
+                    .map(|event| event_table_row(event, palette)),
+            )
+            .children(events.is_empty().then(|| {
+                div()
+                    .h(px(110.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .text_color(palette.muted)
+                    .child(self.localized(
+                        "运行开始后将在此记录捕获、失锁、重捕获和导航电文状态",
+                        "Acquisition, loss, reacquisition, and NAV events appear here",
+                    ))
+            }))
+            .into_any_element()
+    }
+
     fn render_overview(
         &self,
         palette: Palette,
         compact: bool,
+        viewport_height: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let epochs = self.display_epochs();
@@ -2728,6 +3392,8 @@ impl GnsscopeApp {
         let satellites = valid_pvt
             .map(|pvt| pvt.satellites.as_slice())
             .unwrap_or(&[]);
+        let stretch_overview = self.workspace_view == WorkspaceView::Overview && !compact;
+        let overview_panel_height = (viewport_height - 480.0).clamp(246.0, 560.0);
         if let Some(focus) = self.focused_plot {
             let (title, subtitle, plot) = match focus {
                 PlotFocus::Sky => (
@@ -2766,176 +3432,119 @@ impl GnsscopeApp {
                 ),
             };
             return div()
-                .px(px(22.))
-                .pb(px(30.))
-                .child(self.plot_panel(title, subtitle, plot, palette, focus, true, cx))
+                .px(px(12.))
+                .pb(px(20.))
+                .child(self.plot_panel(
+                    (title, subtitle),
+                    plot,
+                    palette,
+                    focus,
+                    PlotPanelLayout::Expanded,
+                    cx,
+                ))
                 .into_any_element();
         }
-        let latitude = valid_pvt
-            .map(|p| format!("{:.7}", p.latitude_deg))
-            .unwrap_or_else(|| "--".to_string());
-        let longitude = valid_pvt
-            .map(|p| format!("{:.7}", p.longitude_deg))
-            .unwrap_or_else(|| "--".to_string());
-        let altitude = valid_pvt
-            .map(|p| format!("{:.2}", p.altitude_m))
-            .unwrap_or_else(|| "--".to_string());
-        let speed = valid_pvt
-            .and_then(|p| p.velocity.as_ref())
-            .map(|v| format!("{:.3}", v.speed_mps))
-            .unwrap_or_else(|| "--".to_string());
-        let clock = valid_pvt
-            .and_then(|p| p.time.receiver_clock_drift_ppm)
-            .map(|v| format!("{v:.4}"))
-            .unwrap_or_else(|| "--".to_string());
-        let hdop = valid_pvt
-            .map(|p| format!("{:.2}", p.quality.hdop))
-            .unwrap_or_else(|| "--".to_string());
-        let utc = pvt
-            .and_then(|p| p.time.utc.as_ref())
-            .map(|utc| {
-                format!(
-                    "{:04}-{:02}-{:02} {:02}:{:02}:{:06.3} UTC",
-                    utc.year, utc.month, utc.day, utc.hour, utc.minute, utc.second
-                )
-            })
-            .unwrap_or_else(|| "UTC unavailable".to_string());
-        div()
-            .px(px(22.))
-            .pb(px(30.))
-            .child(
-                div()
-                    .grid()
-                    .grid_cols(if compact { 1 } else { 2 })
-                    .gap(px(12.))
-                    .child(self.plot_panel(
-                        "卫星天空图",
-                        "真实方位/仰角",
-                        sky_plot(
-                            satellites,
-                            channels,
-                            self.hovered_prn,
-                            self.pinned_prn,
-                            palette,
-                            cx,
-                        ),
+        let content = match self.workspace_view {
+            WorkspaceView::Overview => div()
+                .grid()
+                .grid_cols(if compact { 1 } else { 2 })
+                .gap(px(6.))
+                .when(stretch_overview, |this| this.h(px(overview_panel_height)))
+                .child(self.plot_panel(
+                    ("卫星天空图", "真实方位/仰角"),
+                    sky_plot(
+                        satellites,
+                        channels,
+                        self.hovered_prn,
+                        self.pinned_prn,
                         palette,
-                        PlotFocus::Sky,
-                        false,
                         cx,
-                    ))
-                    .child(self.plot_panel(
-                        "ENU 位置",
-                        "首个有效 epoch 为原点",
-                        position_plot(epochs, self.selected_epoch, palette),
-                        palette,
-                        PlotFocus::Position,
-                        false,
-                        cx,
-                    )),
-            )
-            .child(div().mt(px(12.)).child(self.plot_panel(
-                "稳定通道 C/N0",
-                "仅显示 Healthy PRN",
-                cn0_plot(channels, self.hovered_prn, self.pinned_prn, palette, cx),
-                palette,
-                PlotFocus::Cn0,
-                false,
-                cx,
-            )))
-            .child(
-                div()
-                    .mt(px(12.))
-                    .grid()
-                    .grid_cols(if compact { 1 } else { 2 })
-                    .gap(px(12.))
-                    .child(self.plot_panel(
-                        "速度与钟漂",
-                        "共享 epoch 时间轴",
-                        velocity_plot(epochs, self.selected_epoch, palette),
-                        palette,
-                        PlotFocus::Velocity,
-                        false,
-                        cx,
-                    ))
-                    .child(self.plot_panel(
-                        "高度历史",
-                        altitude_statistics(epochs),
-                        altitude_plot(epochs, self.selected_epoch, palette),
-                        palette,
-                        PlotFocus::Altitude,
-                        false,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .mt(px(12.))
-                    .rounded(px(6.))
-                    .bg(palette.surface)
-                    .border_1()
-                    .border_color(palette.border)
-                    .p(px(14.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_start()
-                            .justify_between()
-                            .child(Self::section_title(
-                                "当前 PVT",
-                                if valid_pvt.is_some() {
-                                    pvt.map(|p| format!("{:?}", p.solution_kind))
-                                        .unwrap_or_else(|| "等待解算".to_string())
-                                } else if pvt.is_some() {
-                                    "质量门限拒绝".to_string()
-                                } else {
-                                    "等待解算".to_string()
-                                },
-                                palette,
-                            ))
-                            .child(
-                                Button::new("candidate-comparison")
-                                    .ghost()
-                                    .icon(IconName::PanelRightOpen)
-                                    .tooltip("比较 Raw / Smoothed / Kalman")
-                                    .disabled(pvt.is_none())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.side_drawer = toggled_side_drawer(
-                                            this.side_drawer,
-                                            SideDrawer::CandidateComparison,
-                                        );
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mt(px(10.))
-                            .flex()
-                            .when(compact, |this| this.flex_col())
-                            .child(Self::metric("纬度", latitude, "°", palette))
-                            .child(Self::metric("经度", longitude, "°", palette))
-                            .child(Self::metric("高程", altitude, "m", palette)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .when(compact, |this| this.flex_col())
-                            .child(Self::metric("三维速度", speed, "m/s", palette))
-                            .child(Self::metric("钟漂", clock, "ppm", palette))
-                            .child(Self::metric("HDOP", hdop, "", palette)),
-                    )
-                    .child(
-                        div()
-                            .mt(px(8.))
-                            .pt(px(10.))
-                            .border_t_1()
-                            .border_color(palette.border)
-                            .text_size(px(13.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(palette.text)
-                            .child(utc),
                     ),
+                    palette,
+                    PlotFocus::Sky,
+                    if stretch_overview {
+                        PlotPanelLayout::Stretch(overview_panel_height)
+                    } else {
+                        PlotPanelLayout::Standard
+                    },
+                    cx,
+                ))
+                .child(self.plot_panel(
+                    ("ENU 位置", "首个有效 epoch 为原点"),
+                    position_plot(epochs, self.selected_epoch, palette),
+                    palette,
+                    PlotFocus::Position,
+                    if stretch_overview {
+                        PlotPanelLayout::Stretch(overview_panel_height)
+                    } else {
+                        PlotPanelLayout::Standard
+                    },
+                    cx,
+                ))
+                .into_any_element(),
+            WorkspaceView::Channels => div()
+                .child(self.plot_panel(
+                    ("稳定通道 C/N0", "仅显示 Healthy PRN"),
+                    cn0_plot(channels, self.hovered_prn, self.pinned_prn, palette, cx),
+                    palette,
+                    PlotFocus::Cn0,
+                    PlotPanelLayout::Standard,
+                    cx,
+                ))
+                .child(div().mt(px(6.)).child(self.render_channel_table(palette)))
+                .into_any_element(),
+            WorkspaceView::Position => div()
+                .child(self.plot_panel(
+                    ("ENU 位置", "首个有效 epoch 为原点"),
+                    position_plot(epochs, self.selected_epoch, palette),
+                    palette,
+                    PlotFocus::Position,
+                    PlotPanelLayout::Standard,
+                    cx,
+                ))
+                .child(
+                    div()
+                        .mt(px(6.))
+                        .grid()
+                        .grid_cols(if compact { 1 } else { 2 })
+                        .gap(px(6.))
+                        .child(self.plot_panel(
+                            ("速度与钟漂", "共享 epoch 时间轴"),
+                            velocity_plot(epochs, self.selected_epoch, palette),
+                            palette,
+                            PlotFocus::Velocity,
+                            PlotPanelLayout::Standard,
+                            cx,
+                        ))
+                        .child(self.plot_panel(
+                            ("高度历史", altitude_statistics(epochs)),
+                            altitude_plot(epochs, self.selected_epoch, palette),
+                            palette,
+                            PlotFocus::Altitude,
+                            PlotPanelLayout::Standard,
+                            cx,
+                        )),
+                )
+                .into_any_element(),
+            WorkspaceView::Navigation => self.render_navigation_events(palette),
+        };
+
+        div()
+            .px(px(12.))
+            .pt(px(10.))
+            .pb(px(20.))
+            .child(content)
+            .children(
+                matches!(
+                    self.workspace_view,
+                    WorkspaceView::Overview | WorkspaceView::Position
+                )
+                .then(|| {
+                    div()
+                        .mt(px(6.))
+                        .flex_shrink_0()
+                        .child(self.render_pvt_summary(palette, compact, cx))
+                }),
             )
             .into_any_element()
     }
@@ -2944,14 +3553,18 @@ impl GnsscopeApp {
         &self,
         palette: Palette,
         compact: bool,
+        full_width: bool,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let pvt = self.current_pvt();
         let epoch_number = self.selected_epoch.map(|index| index + 1).unwrap_or(0);
         let epoch_count = self.display_epochs().len();
         div()
-            .w(if compact { px(350.) } else { px(430.) })
-            .flex_shrink_0()
+            .when(full_width, |this| this.w_full().flex_1())
+            .when(!full_width, |this| {
+                this.w(if compact { px(350.) } else { px(430.) })
+                    .flex_shrink_0()
+            })
             .h_full()
             .overflow_y_scrollbar()
             .bg(palette.surface)
@@ -3008,6 +3621,7 @@ impl GnsscopeApp {
                 .into_iter()
                 .map(|kind| self.render_candidate_card(pvt, kind, palette)),
             )
+            .into_any_element()
     }
 
     fn render_candidate_card(
@@ -3163,8 +3777,8 @@ impl GnsscopeApp {
         let epochs = self.display_epochs();
         div()
             .flex_shrink_0()
-            .h(px(52.))
-            .px(px(20.))
+            .h(px(40.))
+            .px(px(16.))
             .bg(palette.surface)
             .border_t_1()
             .border_color(palette.border)
@@ -3182,17 +3796,20 @@ impl GnsscopeApp {
                     .child("EPOCH"),
             )
             .child(
-                div()
-                    .ml(px(14.))
-                    .flex_1()
-                    .child(Slider::new(&self.timeline).disabled(epochs.len() < 2)),
+                div().ml(px(12.)).flex_1().child(
+                    Slider::new(&self.timeline)
+                        .bg(palette.border)
+                        .text_color(palette.accent)
+                        .disabled(epochs.len() < 2),
+                ),
             )
             .child(
                 div()
-                    .ml(px(14.))
+                    .ml(px(12.))
                     .min_w(px(72.))
                     .text_right()
                     .text_size(px(10.))
+                    .font_family(data_font_family())
                     .text_color(palette.text)
                     .child(format!(
                         "{} / {}",
@@ -3204,21 +3821,28 @@ impl GnsscopeApp {
 
     fn plot_panel(
         &self,
-        title: impl Into<SharedString>,
-        subtitle: impl Into<SharedString>,
+        header: (impl Into<SharedString>, impl Into<SharedString>),
         plot: impl IntoElement,
         palette: Palette,
         focus: PlotFocus,
-        expanded: bool,
+        layout: PlotPanelLayout,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let (title, subtitle) = header;
+        let expanded = matches!(layout, PlotPanelLayout::Expanded);
+        let stretch_height = match layout {
+            PlotPanelLayout::Stretch(height) => Some(height),
+            PlotPanelLayout::Standard | PlotPanelLayout::Expanded => None,
+        };
         div()
-            .min_h(if expanded { px(580.) } else { px(250.) })
-            .rounded(px(6.))
+            .min_h(if expanded { px(580.) } else { px(246.) })
+            .when_some(stretch_height, |this, height| this.h(px(height)))
+            .rounded(px(0.))
             .bg(palette.surface)
             .border_1()
             .border_color(palette.border)
-            .p(px(14.))
+            .p(px(12.))
+            .when(stretch_height.is_some(), |this| this.flex().flex_col())
             .child(
                 div()
                     .flex()
@@ -3239,6 +3863,7 @@ impl GnsscopeApp {
                                 "聚焦图表"
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                this.workspace_view = WorkspaceView::for_plot(focus);
                                 this.focused_plot = if expanded { None } else { Some(focus) };
                                 cx.notify();
                             })),
@@ -3246,10 +3871,21 @@ impl GnsscopeApp {
             )
             .child(
                 div()
-                    .mt(px(12.))
-                    .h(if expanded { px(510.) } else { px(200.) })
+                    .mt(px(8.))
+                    .when(stretch_height.is_some(), |this| this.flex_1().min_h_0())
+                    .when(stretch_height.is_none(), |this| {
+                        this.h(if expanded { px(514.) } else { px(200.) })
+                    })
                     .child(plot),
             )
+    }
+}
+
+impl Drop for GnsscopeApp {
+    fn drop(&mut self) {
+        self.worker_receiver.take();
+        self.worker.take();
+        self.persistence_writer.take();
     }
 }
 
@@ -3257,13 +3893,15 @@ impl Render for GnsscopeApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = self.palette();
         let viewport_width = f32::from(window.viewport_size().width);
+        let viewport_height = f32::from(window.viewport_size().height);
         let compact = viewport_width < 1_180.0;
         let stacked_sidebar = viewport_width < 840.0;
+        let show_workspace = !stacked_sidebar || self.side_drawer.is_none();
         div()
             .size_full()
             .bg(palette.background)
             .text_color(palette.text)
-            .font_family("Segoe UI Variable Text")
+            .font_family(interface_font_family())
             .flex()
             .flex_col()
             .child(self.render_title_bar(palette, compact, cx))
@@ -3281,9 +3919,9 @@ impl Render for GnsscopeApp {
                         AppPage::Workspace => div()
                             .flex_1()
                             .min_w_0()
-                            .h_full()
+                            .min_h_0()
                             .flex()
-                            .child(
+                            .children(show_workspace.then(|| {
                                 div()
                                     .flex_1()
                                     .min_w_0()
@@ -3291,27 +3929,43 @@ impl Render for GnsscopeApp {
                                     .h_full()
                                     .flex()
                                     .flex_col()
+                                    .child(self.render_workspace_tabs(palette, cx))
                                     .child(
                                         div()
                                             .flex_1()
                                             .min_h_0()
                                             .overflow_y_scrollbar()
                                             .child(self.render_progress(palette))
-                                            .child(self.render_overview(palette, compact, cx)),
+                                            .child(self.render_overview(
+                                                palette,
+                                                compact,
+                                                viewport_height,
+                                                cx,
+                                            )),
                                     )
                                     .children(
                                         self.timeline_visible
                                             .then(|| self.render_timeline_bar(palette)),
-                                    ),
-                            )
+                                    )
+                            }))
                             .children(match self.side_drawer {
                                 Some(SideDrawer::Settings) => Some(
-                                    self.render_config_drawer(palette, compact, cx)
-                                        .into_any_element(),
+                                    self.render_config_drawer(
+                                        palette,
+                                        compact,
+                                        stacked_sidebar,
+                                        cx,
+                                    )
+                                    .into_any_element(),
                                 ),
                                 Some(SideDrawer::CandidateComparison) => Some(
-                                    self.render_candidate_drawer(palette, compact, cx)
-                                        .into_any_element(),
+                                    self.render_candidate_drawer(
+                                        palette,
+                                        compact,
+                                        stacked_sidebar,
+                                        cx,
+                                    )
+                                    .into_any_element(),
                                 ),
                                 None => None,
                             })
@@ -3319,6 +3973,234 @@ impl Render for GnsscopeApp {
                     }),
             )
     }
+}
+
+fn table_cell(
+    value: impl Into<SharedString>,
+    width: f32,
+    palette: Palette,
+    muted: bool,
+) -> impl IntoElement {
+    div()
+        .w(px(width))
+        .flex_shrink_0()
+        .text_size(px(10.))
+        .font_family(data_font_family())
+        .text_color(if muted { palette.muted } else { palette.text })
+        .child(value.into())
+}
+
+fn channel_table_header(palette: Palette) -> impl IntoElement {
+    div()
+        .h(px(30.))
+        .px(px(14.))
+        .flex()
+        .items_center()
+        .bg(palette.surface_alt)
+        .border_b_1()
+        .border_color(palette.border)
+        .child(table_cell("PRN", 54.0, palette, true))
+        .child(table_cell("STATE", 110.0, palette, true))
+        .child(table_cell("C/N0 dB-Hz", 96.0, palette, true))
+        .child(table_cell("DOPPLER Hz", 104.0, palette, true))
+        .child(table_cell("RESIDUAL m", 104.0, palette, true))
+}
+
+fn channel_table_row(channel: &GuiChannelStatus, palette: Palette) -> impl IntoElement {
+    let (state, state_color) = if channel.nav_locked {
+        ("NAV LOCK", palette.healthy)
+    } else if channel.tracking_locked {
+        ("TRACKING", palette.accent)
+    } else if channel.acquired {
+        ("ACQUIRED", palette.warning)
+    } else {
+        ("SEARCH", palette.muted)
+    };
+    div()
+        .min_h(px(34.))
+        .px(px(14.))
+        .flex()
+        .items_center()
+        .border_b_1()
+        .border_color(palette.border.opacity(0.55))
+        .child(
+            div()
+                .w(px(54.))
+                .flex_shrink_0()
+                .text_size(px(11.))
+                .font_family(data_font_family())
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(palette.text)
+                .child(format!("G{:02}", channel.prn)),
+        )
+        .child(
+            div()
+                .w(px(110.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap(px(7.))
+                .child(div().size(px(7.)).rounded(px(2.)).bg(state_color))
+                .child(
+                    div()
+                        .text_size(px(9.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(state_color)
+                        .child(state),
+                ),
+        )
+        .child(table_cell(
+            format!("{:.1}", channel.cn0_db_hz),
+            96.0,
+            palette,
+            false,
+        ))
+        .child(table_cell(
+            format!("{:+.0}", channel.doppler_hz),
+            104.0,
+            palette,
+            false,
+        ))
+        .child(table_cell(
+            channel
+                .residual_m
+                .map(|residual| format!("{residual:+.3}"))
+                .unwrap_or_else(|| "--".to_string()),
+            104.0,
+            palette,
+            channel.residual_m.is_none(),
+        ))
+}
+
+fn event_kind_label(event: &GuiDiagnosticEvent) -> &'static str {
+    match event.kind.as_str() {
+        "acquisition" => "ACQUIRED",
+        "acquisition_failed" => "ACQ FAILED",
+        "reacquisition" => "REACQUIRED",
+        "reacquisition_failed" => "REACQ FAILED",
+        "channel_state" => "CHANNEL",
+        "navigation" => "NAV",
+        _ => "EVENT",
+    }
+}
+
+fn event_kind_color(event: &GuiDiagnosticEvent, palette: Palette) -> Hsla {
+    match event.kind.as_str() {
+        "acquisition" | "reacquisition" | "navigation" => palette.healthy,
+        "acquisition_failed" | "reacquisition_failed" => palette.danger,
+        _ => palette.accent,
+    }
+}
+
+fn preview_diagnostic_events() -> Vec<GuiDiagnosticEvent> {
+    [
+        (
+            1_200,
+            Some(1),
+            GuiDiagnosticEventKind::Acquisition,
+            "Doppler +7000 Hz · metric 4.82",
+        ),
+        (
+            6_200,
+            Some(1),
+            GuiDiagnosticEventKind::Navigation,
+            "Subframe synchronization established",
+        ),
+        (
+            8_300,
+            Some(11),
+            GuiDiagnosticEventKind::ChannelState,
+            "TrackingLocked -> Lost",
+        ),
+        (
+            9_300,
+            Some(11),
+            GuiDiagnosticEventKind::Reacquisition,
+            "Doppler +5400 Hz · metric 4.31",
+        ),
+        (
+            10_300,
+            Some(24),
+            GuiDiagnosticEventKind::AcquisitionFailed,
+            "Peak metric 1.72 below threshold",
+        ),
+    ]
+    .into_iter()
+    .map(|(now_ms, prn, kind, detail)| GuiDiagnosticEvent {
+        now_ms,
+        sample_index: now_ms * 10_230,
+        prn,
+        kind,
+        detail: detail.to_string(),
+    })
+    .collect()
+}
+
+fn event_table_header(palette: Palette) -> impl IntoElement {
+    div()
+        .h(px(30.))
+        .px(px(14.))
+        .flex()
+        .items_center()
+        .bg(palette.surface_alt)
+        .border_b_1()
+        .border_color(palette.border)
+        .child(table_cell("TIME", 86.0, palette, true))
+        .child(table_cell("PRN", 54.0, palette, true))
+        .child(table_cell("EVENT", 112.0, palette, true))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(10.))
+                .text_color(palette.muted)
+                .child("DETAIL"),
+        )
+}
+
+fn event_table_row(event: &GuiDiagnosticEvent, palette: Palette) -> impl IntoElement {
+    let kind_color = event_kind_color(event, palette);
+    div()
+        .min_h(px(36.))
+        .px(px(14.))
+        .flex()
+        .items_center()
+        .border_b_1()
+        .border_color(palette.border.opacity(0.55))
+        .child(table_cell(
+            format!("{:.3} s", event.now_ms as f64 / 1_000.0),
+            86.0,
+            palette,
+            true,
+        ))
+        .child(table_cell(
+            event
+                .prn
+                .map(|prn| format!("G{prn:02}"))
+                .unwrap_or_else(|| "--".to_string()),
+            54.0,
+            palette,
+            event.prn.is_none(),
+        ))
+        .child(
+            div()
+                .w(px(112.))
+                .flex_shrink_0()
+                .text_size(px(9.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(kind_color)
+                .child(event_kind_label(event)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .text_size(px(10.))
+                .text_color(palette.text)
+                .child(event.detail.clone()),
+        )
 }
 
 fn candidate_kind_label(kind: PvtEpochSolutionKind) -> &'static str {
@@ -3390,6 +4272,7 @@ fn comparison_metric(
         .child(
             div()
                 .text_right()
+                .font_family(data_font_family())
                 .text_color(palette.text)
                 .child(value.into()),
         )
@@ -4146,6 +5029,129 @@ fn move_queue_item<T>(queue: &mut VecDeque<T>, index: usize, direction: i32) -> 
     true
 }
 
+fn can_enqueue_run(
+    _has_active_run: bool,
+    has_setting_parse_errors: bool,
+    has_settings_issues: bool,
+) -> bool {
+    !has_setting_parse_errors && !has_settings_issues
+}
+
+fn poll_decision(worker_connected: bool, drained_events: usize) -> (bool, bool) {
+    (drained_events > 0, worker_connected)
+}
+
+#[derive(Clone, Copy)]
+struct PersistenceProgress<'a> {
+    run_id: Uuid,
+    status: RunStatus,
+    processed_samples: u64,
+    total_samples: u64,
+    pvt_epoch_count: usize,
+    message: &'a str,
+}
+
+fn persist_progress(
+    writer: Option<&RunPersistenceWriter>,
+    library: Option<&RunLibrary>,
+    progress: PersistenceProgress<'_>,
+) {
+    let queued = writer.is_some_and(|writer| {
+        writer
+            .update_progress(
+                progress.run_id,
+                progress.status,
+                progress.processed_samples,
+                progress.total_samples,
+                progress.pvt_epoch_count,
+                progress.message,
+            )
+            .is_ok()
+    });
+    if !queued {
+        if let Some(library) = library {
+            let _ = library.update_progress(
+                progress.run_id,
+                progress.status,
+                progress.processed_samples,
+                progress.total_samples,
+                progress.pvt_epoch_count,
+                progress.message,
+            );
+        }
+    }
+}
+
+fn persist_epoch(
+    writer: Option<&RunPersistenceWriter>,
+    library: Option<&RunLibrary>,
+    run_id: Uuid,
+    epoch_ordinal: usize,
+    epoch: &GuiPvtViewModel,
+    channels: &[GuiChannelStatus],
+) {
+    let queued = writer.is_some_and(|writer| {
+        writer
+            .append_epoch(run_id, epoch_ordinal, epoch.clone(), channels.to_vec())
+            .is_ok()
+    });
+    if !queued {
+        if let Some(library) = library {
+            let _ = library.append_epoch(run_id, epoch_ordinal, epoch, channels);
+        }
+    }
+}
+
+fn persist_event(
+    writer: Option<&RunPersistenceWriter>,
+    library: Option<&RunLibrary>,
+    run_id: Uuid,
+    event_ordinal: usize,
+    event: &GuiDiagnosticEvent,
+) {
+    let queued = writer.is_some_and(|writer| {
+        writer
+            .append_event(run_id, event_ordinal, event.clone())
+            .is_ok()
+    });
+    if !queued {
+        if let Some(library) = library {
+            let _ = library.append_event(run_id, event_ordinal, event);
+        }
+    }
+}
+
+fn finalize_persistence(
+    writer: Option<&RunPersistenceWriter>,
+    library: Option<&RunLibrary>,
+    progress: PersistenceProgress<'_>,
+) {
+    let finalized = writer.is_some_and(|writer| {
+        writer
+            .finalize(
+                progress.run_id,
+                progress.status,
+                progress.processed_samples,
+                progress.total_samples,
+                progress.pvt_epoch_count,
+                progress.message,
+            )
+            .is_ok()
+    });
+    if !finalized {
+        if let Some(library) = library {
+            let _ = library.update_progress(
+                progress.run_id,
+                progress.status,
+                progress.processed_samples,
+                progress.total_samples,
+                progress.pvt_epoch_count,
+                progress.message,
+            );
+        }
+    }
+}
+
 fn history_run_matches(run: &ProcessingRun, query: &str, filter: HistoryFilter) -> bool {
     let status_matches = match filter {
         HistoryFilter::All => true,
@@ -4222,13 +5228,27 @@ mod history_queue_tests {
             HistoryFilter::NeedsAttention
         ));
     }
+
+    #[test]
+    fn valid_run_can_be_enqueued_while_another_run_is_active() {
+        assert!(can_enqueue_run(true, false, false));
+        assert!(!can_enqueue_run(true, true, false));
+        assert!(!can_enqueue_run(true, false, true));
+    }
+
+    #[test]
+    fn worker_poll_only_redraws_for_events_and_stops_when_disconnected() {
+        assert_eq!(poll_decision(true, 0), (false, true));
+        assert_eq!(poll_decision(true, 2), (true, true));
+        assert_eq!(poll_decision(false, 0), (false, false));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        epoch_index_for_percent, toggled_side_drawer, InterfaceLanguage, SettingsCategory,
-        SideDrawer, ThemePreference,
+        epoch_index_for_percent, preview_diagnostic_events, toggled_side_drawer, InterfaceLanguage,
+        PlotFocus, SettingsCategory, SideDrawer, ThemePreference, WorkspaceView,
     };
 
     #[test]
@@ -4257,6 +5277,42 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn workspace_views_route_domain_plots_to_their_expected_workbench() {
+        assert_eq!(
+            WorkspaceView::for_plot(PlotFocus::Sky),
+            WorkspaceView::Overview
+        );
+        assert_eq!(
+            WorkspaceView::for_plot(PlotFocus::Cn0),
+            WorkspaceView::Channels
+        );
+        assert_eq!(
+            WorkspaceView::for_plot(PlotFocus::Position),
+            WorkspaceView::Position
+        );
+        assert_eq!(
+            WorkspaceView::for_plot(PlotFocus::Velocity),
+            WorkspaceView::Position
+        );
+        assert_eq!(
+            WorkspaceView::for_plot(PlotFocus::Altitude),
+            WorkspaceView::Position
+        );
+    }
+
+    #[test]
+    fn visual_preview_uses_bounded_deterministic_diagnostics() {
+        let events = preview_diagnostic_events();
+
+        assert_eq!(events.len(), 5);
+        assert_eq!(events.first().and_then(|event| event.prn), Some(1));
+        assert_eq!(events.last().and_then(|event| event.prn), Some(24));
+        assert!(events
+            .windows(2)
+            .all(|pair| pair[0].now_ms < pair[1].now_ms));
     }
 
     #[test]

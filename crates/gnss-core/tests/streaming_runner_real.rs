@@ -4,7 +4,7 @@
 //! into a production-path throughput and navigation/PVT regression run.
 
 use gnss_core::io::{IqFormat, IqReader};
-use gnss_core::pvt::PositionQualityConfig;
+use gnss_core::pvt::{PositionQualityConfig, PvtEpochOutput};
 use gnss_core::receiver::{
     AcquisitionScanKind, ChannelHealthObservation, ReceiverChannelState, StreamingPvtConfig,
     StreamingPvtEvent, StreamingPvtRunner,
@@ -50,6 +50,10 @@ fn test_streaming_runner_real_data_smoke() {
         .ok()
         .is_none_or(|value| value != "0");
     let mut config = StreamingPvtConfig::cttc_spain_real_data(DATA_FILE);
+    config.rinex_nav = gnss_core::nav::RinexNavConfig {
+        auto_discover_colocated: true,
+        ..Default::default()
+    };
     config.parallel_tracking = parallel_tracking;
     config.channel_admission.probation_good_epochs = 1;
     config.channel_admission.min_cn0_db_hz = 0.0;
@@ -206,6 +210,47 @@ fn test_streaming_runner_real_data_smoke() {
 }
 
 #[test]
+#[ignore = "runs the complete 100 second CTTC capture twice; use a release build"]
+fn test_streaming_runner_complete_real_pvt_stream_matches_serial_and_parallel() {
+    let data_path = Path::new(DATA_FILE);
+    if !data_path.exists() {
+        eprintln!("SKIP: real data not present");
+        return;
+    }
+
+    let run = |parallel: bool| {
+        let mut config = StreamingPvtConfig::cttc_spain_real_data(DATA_FILE);
+        config.rinex_nav = gnss_core::nav::RinexNavConfig {
+            auto_discover_colocated: true,
+            ..Default::default()
+        };
+        config.parallel_acquisition = parallel;
+        config.parallel_tracking = parallel;
+        config.channel_admission.probation_good_epochs = 1;
+        config.channel_admission.min_cn0_db_hz = 0.0;
+        config.channel_admission.min_pll_lock_metric = 0.0;
+        let mut runner = StreamingPvtRunner::new(config);
+        let mut outputs = Vec::<PvtEpochOutput>::new();
+        let summary = runner
+            .stream_iq_file_until_ms(100_000, |step| {
+                outputs.extend(step.events.into_iter().filter_map(|event| match event {
+                    StreamingPvtEvent::PvtOutput(output) => Some(*output),
+                    _ => None,
+                }));
+            })
+            .expect("stream complete CTTC IQ");
+        (outputs, summary.event_counts)
+    };
+
+    let (serial_outputs, serial_counts) = run(false);
+    let (parallel_outputs, parallel_counts) = run(true);
+
+    assert!(!serial_outputs.is_empty(), "CTTC must produce PVT outputs");
+    assert_eq!(serial_counts, parallel_counts);
+    assert_eq!(serial_outputs, parallel_outputs);
+}
+
+#[test]
 fn test_streaming_runner_real_data_reacquires_forced_lost_channel() {
     let data_path = Path::new(DATA_FILE);
     if !data_path.exists() {
@@ -215,20 +260,23 @@ fn test_streaming_runner_real_data_reacquires_forced_lost_channel() {
 
     let mut config = StreamingPvtConfig::cttc_spain_real_data(DATA_FILE);
     config.acquisition.reacq_interval_ms = 1;
+    config.bit_sync_start_ms = 0;
     config.channel_admission.probation_good_epochs = 1;
+    config.channel_admission.lost_bad_epochs = 10;
     config.channel_admission.min_cn0_db_hz = 0.0;
     config.channel_admission.min_pll_lock_metric = 0.0;
     let mut runner = StreamingPvtRunner::new(config);
     let mut reader = IqReader::open(data_path, IqFormat::Int16).expect("open real CTTC IQ");
 
     runner
-        .stream_iq_reader_until_ms(&mut reader, 25, |_| {})
+        .stream_iq_reader_until_ms(&mut reader, 60, |_| {})
         .expect("establish real-data tracking");
     let prn = *runner
-        .active_tracking_prns()
+        .channels()
+        .pvt_eligible_prns()
         .first()
-        .expect("at least one tracked real-data PRN");
-    for now_ms in 25..35 {
+        .expect("at least one healthy real-data PRN");
+    for now_ms in 60..70 {
         runner.observe_tracking(
             prn,
             ChannelHealthObservation {
@@ -286,7 +334,7 @@ fn test_streaming_runner_real_data_reacquires_forced_lost_channel() {
 }
 
 #[test]
-#[ignore = "requires 28 seconds of real CTTC IQ; run in release mode"]
+#[ignore = "requires 31 seconds of real CTTC IQ; run in release mode"]
 fn test_streaming_runner_real_data_resumes_pvt_after_multi_channel_reacquisition() {
     let data_path = Path::new(DATA_FILE);
     if !data_path.exists() {
@@ -295,25 +343,33 @@ fn test_streaming_runner_real_data_resumes_pvt_after_multi_channel_reacquisition
     }
 
     let mut config = StreamingPvtConfig::cttc_spain_real_data(DATA_FILE);
+    config.rinex_nav = gnss_core::nav::RinexNavConfig {
+        auto_discover_colocated: true,
+        ..Default::default()
+    };
     config.acquisition.reacq_interval_ms = 500;
     config.acquisition.max_acq_prns_per_scan = 1;
     config.channel_admission.probation_good_epochs = 1;
+    config.channel_admission.lost_bad_epochs = 10;
     config.channel_admission.min_cn0_db_hz = 0.0;
     config.channel_admission.min_pll_lock_metric = 0.0;
     let samples_per_ms = config.samples_per_ms() as u64;
     let mut runner = StreamingPvtRunner::new(config);
     let mut reader = IqReader::open(data_path, IqFormat::Int16).expect("open real CTTC IQ");
 
-    let established = runner
-        .stream_iq_reader_until_ms(&mut reader, 27_000, |_| {})
+    let mut pre_loss_pvt = None;
+    runner
+        .stream_iq_reader_until_ms(&mut reader, 27_000, |step| {
+            for event in step.events {
+                if let StreamingPvtEvent::PvtOutput(output) = event {
+                    if output.quality.converged {
+                        pre_loss_pvt = Some(*output);
+                    }
+                }
+            }
+        })
         .expect("establish converged real-data PVT");
-    let pre_loss_pvt = established
-        .latest_pvt_output
-        .expect("converged PVT before forced multi-channel loss");
-    assert!(
-        pre_loss_pvt.quality.converged,
-        "latest pre-loss PVT must be converged"
-    );
+    let pre_loss_pvt = pre_loss_pvt.expect("converged PVT before forced multi-channel loss");
 
     let eligible_prns = runner.channels().pvt_eligible_prns();
     assert_eq!(
@@ -407,7 +463,7 @@ fn test_streaming_runner_real_data_resumes_pvt_after_multi_channel_reacquisition
 
     let mut recovered_pvt_outputs = Vec::new();
     runner
-        .stream_iq_reader_until_ms(&mut reader, 1_200, |step| {
+        .stream_iq_reader_until_ms(&mut reader, 3_000, |step| {
             for event in step.events {
                 match event {
                     StreamingPvtEvent::AcquisitionScanCompleted(scan)

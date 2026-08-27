@@ -44,6 +44,7 @@ fn test_real_data_acquisition() {
     let config = PcpsConfig {
         fs: FS,
         if_freq: 0.0,
+        doppler_center_hz: 0.0,
         doppler_max: 10_000.0,
         doppler_step: 250.0, // finer step for real data
         coherent_integration_ms: 1.0,

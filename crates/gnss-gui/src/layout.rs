@@ -175,7 +175,14 @@ mod tests {
 
     #[test]
     fn test_workspace_layout_reports_combined_nav_policy() {
-        let layout = ReceiverWorkspaceLayout::new(GuiProcessingSettings::default(), None);
+        let layout = ReceiverWorkspaceLayout::new(
+            GuiProcessingSettings {
+                use_rinex_nav_environment: true,
+                auto_discover_colocated_nav: true,
+                ..Default::default()
+            },
+            None,
+        );
 
         assert_eq!(
             layout.nav_status_label(),

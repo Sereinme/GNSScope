@@ -331,7 +331,6 @@ pub fn validate_settings(settings: &GuiProcessingSettings) -> Vec<GuiSettingsIss
             );
         }
     }
-    drop(issue);
     issues
 }
 

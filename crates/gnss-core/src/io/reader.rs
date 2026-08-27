@@ -78,10 +78,11 @@ impl IqReader {
     fn read_int8(&mut self, buffer: &mut [Complex<f64>], n: usize) -> std::io::Result<usize> {
         let bytes = self.read_raw(n * 2)?;
         let samples_read = bytes / 2;
-        for i in 0..samples_read {
-            let i_val = self.raw_buffer[i * 2] as i8;
-            let q_val = self.raw_buffer[i * 2 + 1] as i8;
-            buffer[i] = Complex::new(i_val as f64, q_val as f64);
+        for (sample, iq) in buffer
+            .iter_mut()
+            .zip(self.raw_buffer[..samples_read * 2].chunks_exact(2))
+        {
+            *sample = Complex::new(iq[0] as i8 as f64, iq[1] as i8 as f64);
         }
         self.bytes_read += bytes as u64;
         Ok(samples_read)
@@ -90,11 +91,13 @@ impl IqReader {
     fn read_int16(&mut self, buffer: &mut [Complex<f64>], n: usize) -> std::io::Result<usize> {
         let bytes = self.read_raw(n * 4)?;
         let samples_read = bytes / 4;
-        for i in 0..samples_read {
-            let i_val = i16::from_le_bytes([self.raw_buffer[i * 4], self.raw_buffer[i * 4 + 1]]);
-            let q_val =
-                i16::from_le_bytes([self.raw_buffer[i * 4 + 2], self.raw_buffer[i * 4 + 3]]);
-            buffer[i] = Complex::new(i_val as f64, q_val as f64);
+        for (sample, iq) in buffer
+            .iter_mut()
+            .zip(self.raw_buffer[..samples_read * 4].chunks_exact(4))
+        {
+            let i_val = i16::from_le_bytes([iq[0], iq[1]]);
+            let q_val = i16::from_le_bytes([iq[2], iq[3]]);
+            *sample = Complex::new(i_val as f64, q_val as f64);
         }
         self.bytes_read += bytes as u64;
         Ok(samples_read)
