@@ -47,6 +47,16 @@ The pipeline is bounded and single-pass. Acquisition and active-channel tracking
 | `gnss-core` | IQ I/O, acquisition, tracking, NAV decoding, observables, PVT, channel management, and streaming orchestration |
 | `gnss-gui` | GPUI desktop interface, background processing, run queue, SQLite persistence, replay, plots, and candidate comparison |
 
+## Downloads
+
+Prebuilt packages are published on the [GitHub Releases](https://github.com/Sereinme/GNSScope/releases) page:
+
+- macOS Apple Silicon and Intel disk images (`.dmg`)
+- Windows x64 installer (`.exe`) and portable archive (`.zip`)
+- Debian/Ubuntu x64 package (`.deb`) and portable Linux archive (`.tar.gz`)
+
+Verify downloads against the attached `SHA256SUMS`. The macOS bundle is ad-hoc signed but not notarized, and the Windows installer is not code-signed; the operating system may therefore require explicit confirmation before first launch.
+
 ## Quick start
 
 Install a stable Rust toolchain, then run from the repository root:

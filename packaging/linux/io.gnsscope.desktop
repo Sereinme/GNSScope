@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GNSScope
+Comment=Offline GPS L1 C/A software receiver and analysis application
+Exec=gnsscope
+Terminal=false
+Categories=Science;Education;
+StartupNotify=true

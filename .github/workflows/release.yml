@@ -1,0 +1,186 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate tag version
+        shell: bash
+        run: |
+          version="$(awk -F '"' '/^version = / { print $2; exit }' crates/gnss-gui/Cargo.toml)"
+          test "v${version}" = "${GITHUB_REF_NAME}"
+      - name: Build release application
+        run: cargo build --release --locked -p gnss-gui
+      - name: Build and verify disk image
+        shell: bash
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          ./scripts/package-macos-release.sh --skip-build
+          codesign --verify --deep --strict target/release/bundle/osx/GNSScope.app
+          hdiutil verify target/release/dist/*.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gnsscope-macos-${{ matrix.arch }}
+          path: target/release/dist/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GPUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libfontconfig-dev \
+            libglib2.0-dev \
+            libssl-dev \
+            libva-dev \
+            libvulkan1 \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            libzstd-dev \
+            libsqlite3-dev
+      - name: Validate tag version
+        shell: bash
+        run: |
+          version="$(awk -F '"' '/^version = / { print $2; exit }' crates/gnss-gui/Cargo.toml)"
+          test "v${version}" = "${GITHUB_REF_NAME}"
+      - name: Build release application
+        run: cargo build --release --locked -p gnss-gui
+      - name: Build and inspect Linux packages
+        run: |
+          ./scripts/package-linux.sh --skip-build
+          dpkg-deb --info target/release/dist/*.deb
+          tar -tzf target/release/dist/*.tar.gz
+          ldd target/release/gnss-gui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gnsscope-linux-x86_64
+          path: |
+            target/release/dist/*.deb
+            target/release/dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Windows x86_64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate tag version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content crates/gnss-gui/Cargo.toml -Raw
+          if ($manifest -notmatch '(?m)^version = "([^"]+)"') {
+            throw 'Unable to read gnss-gui version'
+          }
+          $version = $Matches[1]
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            throw "Tag $env:GITHUB_REF_NAME does not match crate version $version"
+          }
+          "GNSSCOPE_VERSION=$version" >> $env:GITHUB_ENV
+      - name: Build release application
+        run: cargo build --release --locked -p gnss-gui
+      - name: Build installer and portable archive
+        shell: pwsh
+        run: |
+          $dist = New-Item -ItemType Directory -Force target/release/dist
+          $sourceExe = (Resolve-Path target/release/gnss-gui.exe).Path
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup compiler not found: $iscc"
+          }
+
+          & $iscc "/DMyAppVersion=$env:GNSSCOPE_VERSION" "/DMySourceExe=$sourceExe" "/DMyOutputDir=$($dist.FullName)" packaging/windows/GNSScope.iss
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE"
+          }
+
+          $portable = Join-Path $env:RUNNER_TEMP "GNSScope-v$env:GNSSCOPE_VERSION-windows-x86_64"
+          New-Item -ItemType Directory -Force $portable | Out-Null
+          Copy-Item $sourceExe (Join-Path $portable GNSScope.exe)
+          Copy-Item README.md, README.zh-CN.md $portable
+          Compress-Archive -Path "$portable\*" -DestinationPath "target/release/dist/GNSScope-v$env:GNSSCOPE_VERSION-windows-x86_64-portable.zip"
+
+          Get-ChildItem target/release/dist | Format-Table Name, Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gnsscope-windows-x86_64
+          path: |
+            target/release/dist/*.exe
+            target/release/dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: [macos, linux, windows]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Verify artifact set and write checksums
+        shell: bash
+        run: |
+          expected=(
+            "GNSScope-${GITHUB_REF_NAME}-macos-arm64.dmg"
+            "GNSScope-${GITHUB_REF_NAME}-macos-x86_64.dmg"
+            "GNSScope-${GITHUB_REF_NAME}-windows-x86_64-setup.exe"
+            "GNSScope-${GITHUB_REF_NAME}-windows-x86_64-portable.zip"
+            "GNSScope-${GITHUB_REF_NAME}-linux-x86_64.deb"
+            "GNSScope-${GITHUB_REF_NAME}-linux-x86_64.tar.gz"
+          )
+          for artifact_name in "${expected[@]}"; do
+            test -s "dist/${artifact_name}"
+          done
+          find dist -maxdepth 1 -type f -print | sort
+          (cd dist && sha256sum GNSScope-* | sort -k2 > SHA256SUMS)
+          test "$(wc -l < dist/SHA256SUMS)" -eq 6
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          notes_file="docs/releases/${GITHUB_REF_NAME}.md"
+          if [[ -f "${notes_file}" ]]; then
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "GNSScope ${GITHUB_REF_NAME}" \
+              --notes-file "${notes_file}"
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "GNSScope ${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi

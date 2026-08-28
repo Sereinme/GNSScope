@@ -47,6 +47,16 @@ GNSScope 是一个使用 Rust 编写的离线 GPS L1 C/A 软件接收机与桌�
 | `gnss-core` | IQ I/O、捕获、跟踪、NAV 解码、观测量、PVT、通道管理和流式编排 |
 | `gnss-gui` | GPUI 桌面界面、后台处理、任务队列、SQLite 持久化、历史回放、图表和候选解比较 |
 
+## 下载安装
+
+预构建安装包发布在 [GitHub Releases](https://github.com/Sereinme/GNSScope/releases) 页面：
+
+- macOS Apple Silicon 与 Intel 磁盘映像（`.dmg`）
+- Windows x64 安装程序（`.exe`）与便携压缩包（`.zip`）
+- Debian/Ubuntu x64 软件包（`.deb`）与 Linux 便携压缩包（`.tar.gz`）
+
+请使用附件中的 `SHA256SUMS` 校验下载文件。macOS 应用仅带 ad-hoc 签名、未经公证，Windows 安装程序也尚未进行代码签名，因此首次启动时系统可能要求用户显式确认。
+
 ## 快速开始
 
 安装稳定版 Rust 工具链，然后在仓库根目录运行：
