@@ -149,6 +149,18 @@ history lines instead of a selected-epoch bar chart. The Overview PVT surface is
 dense parameter/value/unit/status table, and deterministic preview-only history covers
 the line-chart and shared-cursor visual regressions without changing production data.
 
+**Instrument-refinement checkpoint (2026-08-29):** the desktop shell now uses a
+functional title-bar run search, a denser selected-run identity/metadata header, and
+quieter dock proportions. Sky geometry includes a compact elevation/state legend;
+ENU is rendered as a continuous trajectory over a measurement grid; the C/N0 surface
+adds time-axis anchors and the shared selected-epoch cursor. The right inspector now
+groups signal, tracking, geometry/quality, position, navigation/event, and ephemeris
+availability in one run-local diagnostic chain. The epoch dock adds first/previous/
+next/last controls and an explicit epoch readout while preserving slider and live-follow
+behavior. Remaining UI work is keyboard command coverage, light-theme and full
+responsive screenshot coverage, and removal of dormant legacy render paths after
+parity tests.
+
 #### 1.4 Rebuild workflows inside the workbench
 
 Implement and verify the workflows in this order so that each step can replace a

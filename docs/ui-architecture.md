@@ -74,8 +74,9 @@ when another run is active, it enters the queue instead.
 
 ## Responsive Behavior
 
-- At desktop width, use a roughly 286 px Runs dock, flexible workbench, and roughly
-  298 px inspector when space permits.
+- At desktop width, use a roughly 272 px Runs dock, flexible workbench, and roughly
+  278 px inspector when space permits. The analysis canvas receives the saved space;
+  measurements stay dense rather than shrinking into dashboard cards.
 - At narrower widths, collapse the inspector first and then the Runs dock. Do not
   stack the run library above plots or introduce a replacement activity bar.
 - Configuration pages become vertically stacked at compact widths.

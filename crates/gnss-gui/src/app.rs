@@ -1519,6 +1519,15 @@ impl GnsscopeApp {
         let current = self.selected_epoch.unwrap_or(count - 1);
         let next =
             (current as i64 + delta as i64).clamp(0, count.saturating_sub(1) as i64) as usize;
+        self.jump_selected_epoch(next, window, cx);
+    }
+
+    fn jump_selected_epoch(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.display_epochs().len();
+        if count == 0 {
+            return;
+        }
+        let next = index.min(count - 1);
         self.selected_epoch = Some(next);
         self.follow_live = false;
         let percent = if count <= 1 {
@@ -1819,7 +1828,7 @@ impl GnsscopeApp {
     fn render_title_bar(
         &self,
         palette: Palette,
-        _compact: bool,
+        compact: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected_name = self.file_label();
@@ -1892,6 +1901,15 @@ impl GnsscopeApp {
                                     .child(selected_name),
                             ),
                     )
+                    .child(div().flex_1())
+                    .children((!compact).then(|| {
+                        div().w(px(360.)).h(px(28.)).flex_shrink_0().child(
+                            Input::new(&self.history_search)
+                                .prefix(IconName::Search)
+                                .bg(palette.surface)
+                                .border_color(palette.border),
+                        )
+                    }))
                     .child(div().flex_1())
                     .child(
                         Button::new("global-interface-settings")
@@ -2485,8 +2503,8 @@ impl GnsscopeApp {
         });
 
         div()
-            .w(px(286.))
-            .min_w(px(254.))
+            .w(px(272.))
+            .min_w(px(244.))
             .h_full()
             .flex_shrink_0()
             .bg(palette.sidebar)
@@ -5031,16 +5049,37 @@ impl GnsscopeApp {
                 _ => self.localized("处理中", "Running"),
             })
             .unwrap_or(self.localized("未选择", "No run"));
+        let status_text = selected_run
+            .map(|run| format!("{status_label}  {:.0}%", run.progress * 100.0))
+            .unwrap_or_else(|| status_label.to_string());
+        let run_metadata = selected_run
+            .map(|run| {
+                format!(
+                    "{}  ·  GPS L1 C/A  ·  {:.3} Msps  ·  IF {:.3} MHz  ·  {:?}",
+                    run.created_at.format("%H:%M:%S"),
+                    run.settings.sample_rate_hz / 1e6,
+                    run.settings.intermediate_frequency_hz / 1e6,
+                    run.settings.iq_format
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "GPS L1 C/A  ·  {:.3} Msps  ·  IF {:.3} MHz  ·  {:?}",
+                    self.settings.sample_rate_hz / 1e6,
+                    self.settings.intermediate_frequency_hz / 1e6,
+                    self.settings.iq_format
+                )
+            });
 
         div()
-            .h(px(82.))
+            .h(px(96.))
             .flex_shrink_0()
             .bg(palette.surface)
             .border_b_1()
             .border_color(palette.border)
             .child(
                 div()
-                    .h(px(43.))
+                    .h(px(56.))
                     .px(px(14.))
                     .flex()
                     .items_center()
@@ -5059,7 +5098,7 @@ impl GnsscopeApp {
                                             .min_w_0()
                                             .overflow_hidden()
                                             .text_ellipsis()
-                                            .text_size(px(13.))
+                                            .text_size(px(17.))
                                             .font_family(data_font_family())
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .text_color(palette.text)
@@ -5068,23 +5107,19 @@ impl GnsscopeApp {
                                     .child(div().size(px(6.)).rounded_full().bg(status_color))
                                     .child(
                                         div()
-                                            .text_size(px(8.))
+                                            .text_size(px(9.))
+                                            .font_family(data_font_family())
                                             .text_color(status_color)
-                                            .child(status_label),
+                                            .child(status_text),
                                     ),
                             )
                             .child(
                                 div()
-                                    .mt(px(3.))
-                                    .text_size(px(8.))
+                                    .mt(px(5.))
+                                    .text_size(px(9.))
                                     .font_family(data_font_family())
                                     .text_color(palette.muted)
-                                    .child(format!(
-                                        "GPS L1 C/A  ·  {:.3} Msps  ·  IF {:.3} MHz  ·  {:?}",
-                                        self.settings.sample_rate_hz / 1e6,
-                                        self.settings.intermediate_frequency_hz / 1e6,
-                                        self.settings.iq_format
-                                    )),
+                                    .child(run_metadata),
                             ),
                     )
                     .children((self.active_run.is_some() && !self.follow_live).then(|| {
@@ -5107,6 +5142,8 @@ impl GnsscopeApp {
                         Button::new("workspace-event-log")
                             .ghost()
                             .rounded(px(3.))
+                            .border_1()
+                            .border_color(palette.border)
                             .text_color(palette.muted)
                             .icon(IconName::Inbox)
                             .label(self.localized("事件日志", "Event log"))
@@ -5120,6 +5157,8 @@ impl GnsscopeApp {
                         Button::new("workspace-run-configuration")
                             .ghost()
                             .rounded(px(3.))
+                            .border_1()
+                            .border_color(palette.border)
                             .text_color(if self.side_drawer == Some(SideDrawer::Settings) {
                                 palette.accent
                             } else {
@@ -5168,8 +5207,8 @@ impl GnsscopeApp {
             )
             .child(
                 div()
-                    .h(px(39.))
-                    .px(px(10.))
+                    .h(px(40.))
+                    .px(px(14.))
                     .flex()
                     .items_center()
                     .gap(px(1.))
@@ -5302,27 +5341,50 @@ impl GnsscopeApp {
         let altitude = valid_pvt
             .map(|p| format!("{:.2}", p.altitude_m))
             .unwrap_or_else(|| "--".to_string());
+        let gps_time = pvt
+            .map(|p| {
+                format!(
+                    "W{} / {}",
+                    p.time
+                        .gps_week
+                        .map(|week| week.to_string())
+                        .unwrap_or_else(|| "--".to_string()),
+                    p.time
+                        .receiver_time_sow
+                        .map(|sow| format!("{sow:.3}"))
+                        .unwrap_or_else(|| "--".to_string())
+                )
+            })
+            .unwrap_or_else(|| "--".to_string());
+        let ecef = valid_pvt.map(|p| p.ecef_m);
+        let velocity_enu = valid_pvt
+            .and_then(|p| p.velocity.as_ref())
+            .map(|v| {
+                format!(
+                    "{:+.3} / {:+.3} / {:+.3}",
+                    v.east_mps, v.north_mps, v.up_mps
+                )
+            })
+            .unwrap_or_else(|| "--".to_string());
         let speed = valid_pvt
             .and_then(|p| p.velocity.as_ref())
             .map(|v| format!("{:.3}", v.speed_mps))
             .unwrap_or_else(|| "--".to_string());
         let clock = valid_pvt
-            .and_then(|p| p.time.receiver_clock_drift_ppm)
-            .map(|v| format!("{v:.4}"))
-            .unwrap_or_else(|| "--".to_string());
-        let hdop = valid_pvt
-            .map(|p| format!("{:.2}", p.quality.hdop))
-            .unwrap_or_else(|| "--".to_string());
-        let utc = pvt
-            .and_then(|p| p.time.utc.as_ref())
-            .map(|utc| {
+            .map(|p| {
                 format!(
-                    "{:04}-{:02}-{:02} {:02}:{:02}:{:06.3} UTC",
-                    utc.year, utc.month, utc.day, utc.hour, utc.minute, utc.second
+                    "{:+.3} / {}",
+                    p.time.receiver_clock_bias_us,
+                    p.time
+                        .receiver_clock_drift_ppm
+                        .map(|value| format!("{value:+.5}"))
+                        .unwrap_or_else(|| "--".to_string())
                 )
             })
-            .unwrap_or_else(|| "UTC unavailable".to_string());
-
+            .unwrap_or_else(|| "--".to_string());
+        let dops = valid_pvt
+            .map(|p| format!("{:.2} / {:.2}", p.quality.gdop, p.quality.hdop))
+            .unwrap_or_else(|| "--".to_string());
         div()
             .bg(palette.surface)
             .border_1()
@@ -5382,6 +5444,37 @@ impl GnsscopeApp {
                     .child(div().w(px(44.)).text_right().child("STATUS")),
             )
             .child(pvt_table_row(
+                self.localized("GPS 时间", "GPS time"),
+                gps_time,
+                "week / s",
+                pvt.is_some(),
+                palette,
+            ))
+            .child(pvt_table_row(
+                "Position X (ECEF)",
+                ecef.map(|position| format!("{:.3}", position[0]))
+                    .unwrap_or_else(|| "--".to_string()),
+                "m",
+                valid_pvt.is_some(),
+                palette,
+            ))
+            .child(pvt_table_row(
+                "Position Y (ECEF)",
+                ecef.map(|position| format!("{:.3}", position[1]))
+                    .unwrap_or_else(|| "--".to_string()),
+                "m",
+                valid_pvt.is_some(),
+                palette,
+            ))
+            .child(pvt_table_row(
+                "Position Z (ECEF)",
+                ecef.map(|position| format!("{:.3}", position[2]))
+                    .unwrap_or_else(|| "--".to_string()),
+                "m",
+                valid_pvt.is_some(),
+                palette,
+            ))
+            .child(pvt_table_row(
                 self.localized("纬度", "Latitude"),
                 latitude,
                 "deg",
@@ -5403,6 +5496,13 @@ impl GnsscopeApp {
                 palette,
             ))
             .child(pvt_table_row(
+                self.localized("速度 E / N / U", "Velocity E / N / U"),
+                velocity_enu,
+                "m/s",
+                valid_pvt.is_some(),
+                palette,
+            ))
+            .child(pvt_table_row(
                 self.localized("三维速度", "3D speed"),
                 speed,
                 "m/s",
@@ -5412,32 +5512,21 @@ impl GnsscopeApp {
             .child(pvt_table_row(
                 self.localized("接收机钟漂", "Clock drift"),
                 clock,
-                "ppm",
+                "µs / ppm",
                 valid_pvt.is_some(),
                 palette,
             ))
             .child(pvt_table_row(
-                "HDOP",
-                hdop,
-                "-",
+                "GDOP / HDOP",
+                dops,
+                "- / -",
                 valid_pvt.is_some(),
                 palette,
             ))
-            .child(
-                div()
-                    .mt(px(4.))
-                    .pt(px(7.))
-                    .border_t_1()
-                    .border_color(palette.border)
-                    .text_size(px(9.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(palette.text)
-                    .child(utc),
-            )
             .into_any_element()
     }
 
-    fn render_epoch_inspector(&self, palette: Palette) -> AnyElement {
+    fn render_epoch_inspector(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let pvt = self.current_pvt();
         let channels = self.display_channels();
         let selected_prn = self
@@ -5457,6 +5546,16 @@ impl GnsscopeApp {
         });
         let epoch_number = self.selected_epoch.map(|index| index + 1).unwrap_or(0);
         let epoch_count = self.display_epochs().len();
+        let selected_event_count = self
+            .display_diagnostic_events()
+            .iter()
+            .filter(|event| selected_prn.is_none() || event.prn == selected_prn)
+            .count();
+        let last_selected_event = self
+            .display_diagnostic_events()
+            .iter()
+            .rev()
+            .find(|event| selected_prn.is_none() || event.prn == selected_prn);
         let signal_status = channel
             .map(|channel| {
                 if channel.nav_locked {
@@ -5485,8 +5584,8 @@ impl GnsscopeApp {
             .unwrap_or(palette.muted);
 
         div()
-            .w(px(298.))
-            .min_w(px(280.))
+            .w(px(278.))
+            .min_w(px(258.))
             .h_full()
             .flex_shrink_0()
             .overflow_y_scrollbar()
@@ -5514,10 +5613,44 @@ impl GnsscopeApp {
                             )
                             .child(
                                 div()
-                                    .text_size(px(8.))
-                                    .font_family(data_font_family())
-                                    .text_color(palette.muted)
-                                    .child(format!("{epoch_number} / {epoch_count}")),
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(2.))
+                                    .child(
+                                        Button::new("inspector-epoch-previous")
+                                            .ghost()
+                                            .rounded(px(2.))
+                                            .icon(IconName::ChevronLeft)
+                                            .tooltip(
+                                                self.localized("上一个 epoch", "Previous epoch"),
+                                            )
+                                            .disabled(epoch_count == 0)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.step_selected_epoch(-1, window, cx);
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(54.))
+                                            .text_center()
+                                            .text_size(px(8.))
+                                            .font_family(data_font_family())
+                                            .text_color(palette.muted)
+                                            .child(format!("{epoch_number} / {epoch_count}")),
+                                    )
+                                    .child(
+                                        Button::new("inspector-epoch-next")
+                                            .ghost()
+                                            .rounded(px(2.))
+                                            .icon(IconName::ChevronRight)
+                                            .tooltip(self.localized("下一个 epoch", "Next epoch"))
+                                            .disabled(epoch_count == 0)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.step_selected_epoch(1, window, cx);
+                                                cx.notify();
+                                            })),
+                                    ),
                             ),
                     )
                     .child(
@@ -5578,6 +5711,56 @@ impl GnsscopeApp {
                             .unwrap_or_else(|| "--".to_string()),
                         palette,
                     ))
+                    .child(inspector_section(
+                        self.localized("跟踪", "Tracking"),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("捕获", "Acquisition"),
+                        channel
+                            .map(|channel| {
+                                if channel.acquired {
+                                    self.localized("已捕获", "Acquired")
+                                } else {
+                                    self.localized("搜索中", "Searching")
+                                }
+                                .to_string()
+                            })
+                            .unwrap_or_else(|| "--".to_string()),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("载波跟踪", "Carrier tracking"),
+                        channel
+                            .map(|channel| {
+                                if channel.tracking_locked {
+                                    self.localized("锁定", "Locked")
+                                } else {
+                                    self.localized("未锁定", "Unlocked")
+                                }
+                                .to_string()
+                            })
+                            .unwrap_or_else(|| "--".to_string()),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("导航电文", "Navigation data"),
+                        channel
+                            .map(|channel| {
+                                if channel.nav_locked {
+                                    self.localized("同步", "Synchronized")
+                                } else {
+                                    self.localized("等待同步", "Awaiting sync")
+                                }
+                                .to_string()
+                            })
+                            .unwrap_or_else(|| "--".to_string()),
+                        palette,
+                    ))
+                    .child(inspector_section(
+                        self.localized("几何与质量", "Geometry and quality"),
+                        palette,
+                    ))
                     .child(inspector_row(
                         self.localized("伪距残差", "Residual"),
                         channel
@@ -5594,6 +5777,41 @@ impl GnsscopeApp {
                                     "{:.1}° / {:.1}°",
                                     satellite.azimuth_deg, satellite.elevation_deg
                                 )
+                            })
+                            .unwrap_or_else(|| "--".to_string()),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("测距标准差", "Range sigma"),
+                        geometry
+                            .map(|satellite| format!("{:.3} m", satellite.pseudorange_sigma_m))
+                            .unwrap_or_else(|| "--".to_string()),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("用于 PVT", "Used in PVT"),
+                        geometry
+                            .map(|satellite| {
+                                if satellite.used_in_solution {
+                                    self.localized("是", "Yes")
+                                } else {
+                                    self.localized("否", "No")
+                                }
+                                .to_string()
+                            })
+                            .unwrap_or_else(|| "--".to_string()),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        "RAIM",
+                        geometry
+                            .map(|satellite| {
+                                if satellite.raim_excluded {
+                                    self.localized("已剔除", "Excluded")
+                                } else {
+                                    self.localized("通过", "Passed")
+                                }
+                                .to_string()
                             })
                             .unwrap_or_else(|| "--".to_string()),
                         palette,
@@ -5650,10 +5868,10 @@ impl GnsscopeApp {
                     ))
                     .child(inspector_row(
                         self.localized("事件数", "Events"),
-                        self.display_diagnostic_events().len().to_string(),
+                        selected_event_count.to_string(),
                         palette,
                     ))
-                    .children(self.display_diagnostic_events().last().map(|event| {
+                    .children(last_selected_event.map(|event| {
                         div()
                             .mt(px(7.))
                             .p(px(8.))
@@ -5673,7 +5891,17 @@ impl GnsscopeApp {
                                     .unwrap_or_default(),
                                 event.detail
                             ))
-                    })),
+                    }))
+                    .child(inspector_section(
+                        self.localized("星历快照", "Ephemeris snapshot"),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("可用性", "Availability"),
+                        self.localized("当前运行快照未暴露", "Not exposed by run snapshot")
+                            .to_string(),
+                        palette,
+                    )),
             )
             .into_any_element()
     }
@@ -6234,9 +6462,19 @@ impl GnsscopeApp {
             .collect::<Vec<_>>();
         let epoch_number = self.selected_epoch.map(|index| index + 1).unwrap_or(0);
         let epoch_count = epochs.len();
+        let cursor_percent = self
+            .selected_epoch
+            .filter(|_| epoch_count > 1)
+            .map(|index| index as f32 / (epoch_count - 1) as f32)
+            .unwrap_or(0.0);
+        let receiver_time = self
+            .current_pvt()
+            .and_then(|pvt| pvt.time.receiver_time_sow)
+            .map(|sow| format!("SOW {sow:.3}"))
+            .unwrap_or_else(|| "SOW --".to_string());
         div()
             .flex_shrink_0()
-            .h(px(112.))
+            .h(px(124.))
             .bg(palette.surface)
             .border_t_1()
             .border_color(palette.border)
@@ -6258,6 +6496,14 @@ impl GnsscopeApp {
                     )
                     .child(
                         div()
+                            .mr(px(16.))
+                            .text_size(px(8.))
+                            .font_family(data_font_family())
+                            .text_color(palette.muted)
+                            .child(receiver_time),
+                    )
+                    .child(
+                        div()
                             .text_size(px(10.))
                             .font_family(data_font_family())
                             .text_color(palette.accent)
@@ -6266,7 +6512,7 @@ impl GnsscopeApp {
             )
             .child(
                 div()
-                    .h(px(82.))
+                    .h(px(94.))
                     .flex()
                     .child(
                         div()
@@ -6276,9 +6522,18 @@ impl GnsscopeApp {
                             .child(
                                 div()
                                     .relative()
-                                    .h(px(38.))
+                                    .h(px(48.))
                                     .border_b_1()
                                     .border_color(palette.border)
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left(gpui::relative(cursor_percent))
+                                            .top_0()
+                                            .bottom_0()
+                                            .w(px(1.))
+                                            .bg(palette.accent.opacity(0.85)),
+                                    )
                                     .children(markers.into_iter().map(
                                         |(index, percent, label, color)| {
                                             div()
@@ -6290,7 +6545,7 @@ impl GnsscopeApp {
                                                 .bottom(px(0.))
                                                 .ml(px(-10.))
                                                 .w(px(20.))
-                                                .h(px(30.))
+                                                .h(px(40.))
                                                 .flex()
                                                 .flex_col()
                                                 .items_center()
@@ -6312,7 +6567,7 @@ impl GnsscopeApp {
                             )
                             .child(
                                 div()
-                                    .h(px(42.))
+                                    .h(px(44.))
                                     .flex()
                                     .items_center()
                                     .gap(px(8.))
@@ -6351,10 +6606,25 @@ impl GnsscopeApp {
                             .py(px(8.))
                             .child(
                                 div()
-                                    .h(px(28.))
+                                    .h(px(30.))
                                     .flex()
                                     .items_center()
                                     .justify_between()
+                                    .child(
+                                        Button::new("epoch-first")
+                                            .ghost()
+                                            .rounded(px(2.))
+                                            .icon(IconName::ArrowLeft)
+                                            .tooltip(self.localized(
+                                                "跳到第一个 epoch",
+                                                "Jump to first epoch",
+                                            ))
+                                            .disabled(epoch_count == 0)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.jump_selected_epoch(0, window, cx);
+                                                cx.notify();
+                                            })),
+                                    )
                                     .child(
                                         Button::new("epoch-previous")
                                             .ghost()
@@ -6370,13 +6640,6 @@ impl GnsscopeApp {
                                             })),
                                     )
                                     .child(
-                                        div()
-                                            .font_family(data_font_family())
-                                            .text_size(px(9.))
-                                            .text_color(palette.text)
-                                            .child(format!("{epoch_number:04}")),
-                                    )
-                                    .child(
                                         Button::new("epoch-next")
                                             .ghost()
                                             .rounded(px(2.))
@@ -6387,6 +6650,32 @@ impl GnsscopeApp {
                                                 this.step_selected_epoch(1, window, cx);
                                                 cx.notify();
                                             })),
+                                    )
+                                    .child(
+                                        Button::new("epoch-last")
+                                            .ghost()
+                                            .rounded(px(2.))
+                                            .icon(IconName::ArrowRight)
+                                            .tooltip(self.localized(
+                                                "跳到最后一个 epoch",
+                                                "Jump to last epoch",
+                                            ))
+                                            .disabled(epoch_count == 0)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                let last =
+                                                    this.display_epochs().len().saturating_sub(1);
+                                                this.jump_selected_epoch(last, window, cx);
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(44.))
+                                            .font_family(data_font_family())
+                                            .text_size(px(8.))
+                                            .text_right()
+                                            .text_color(palette.text)
+                                            .child(format!("{epoch_number:04}")),
                                     ),
                             )
                             .child(
@@ -6691,7 +6980,7 @@ impl Render for GnsscopeApp {
                                             .into_any_element(),
                                         ),
                                         None => show_epoch_inspector
-                                            .then(|| self.render_epoch_inspector(palette)),
+                                            .then(|| self.render_epoch_inspector(palette, cx)),
                                     }),
                             )
                             .children(
@@ -6812,7 +7101,7 @@ fn pvt_table_row(
     palette: Palette,
 ) -> impl IntoElement {
     div()
-        .h(px(23.))
+        .h(px(17.))
         .px(px(8.))
         .flex()
         .items_center()
@@ -6820,7 +7109,7 @@ fn pvt_table_row(
         .border_r_1()
         .border_b_1()
         .border_color(palette.border)
-        .text_size(px(8.))
+        .text_size(px(7.))
         .child(div().w(px(96.)).text_color(palette.muted).child(label))
         .child(
             div()
@@ -6985,6 +7274,25 @@ fn preview_epoch_history() -> (Vec<GuiPvtViewModel>, Vec<Vec<GuiChannelStatus>>)
                 velocity.speed_mps = 2.6 + (phase * 0.8).sin() * 0.25;
                 velocity.horizontal_speed_mps = velocity.speed_mps;
             }
+            epoch.satellites = base_channels
+                .iter()
+                .enumerate()
+                .map(|(satellite_index, channel)| {
+                    let satellite_phase = index as f64 * 0.012 + satellite_index as f64 * 1.17;
+                    GuiSatelliteGeometry {
+                        prn: channel.prn,
+                        azimuth_deg: (channel.prn as f64 * 37.0 + index as f64 * 0.28) % 360.0,
+                        elevation_deg: 18.0
+                            + satellite_index as f64 * 11.0
+                            + satellite_phase.sin() * 4.0,
+                        residual_m: channel.residual_m.unwrap_or(0.0),
+                        standardized_residual: channel.residual_m.unwrap_or(0.0) / 1.5,
+                        pseudorange_sigma_m: 1.2 + satellite_index as f64 * 0.18,
+                        used_in_solution: channel.nav_locked,
+                        raim_excluded: false,
+                    }
+                })
+                .collect();
             epoch
         })
         .collect::<Vec<_>>();
@@ -7284,8 +7592,9 @@ fn sky_plot(
         .size_full()
         .relative()
         .flex()
-        .justify_center()
+        .justify_start()
         .items_center()
+        .pl(px(16.))
         .child(
             div()
                 .relative()
@@ -7391,6 +7700,34 @@ fn sky_plot(
                 .child(cardinal_label("S", 0.5, 1.0, palette))
                 .child(cardinal_label("W", 0.0, 0.5, palette)),
         )
+        .child(
+            div()
+                .absolute()
+                .right(px(4.))
+                .top(px(8.))
+                .w(px(82.))
+                .text_size(px(7.))
+                .text_color(palette.muted)
+                .child(
+                    div()
+                        .mb(px(5.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("ELEVATION (°)"),
+                )
+                .child(sky_legend_row("75–90", palette.chart_series[0], palette))
+                .child(sky_legend_row("60–75", palette.chart_series[5], palette))
+                .child(sky_legend_row("45–60", palette.chart_series[1], palette))
+                .child(sky_legend_row("30–45", palette.muted, palette))
+                .child(
+                    div()
+                        .mt(px(8.))
+                        .pt(px(6.))
+                        .border_t_1()
+                        .border_color(palette.border)
+                        .child(sky_legend_row("PVT / TRACK", palette.healthy, palette))
+                        .child(sky_legend_row("ACQUIRED", palette.warning, palette)),
+                ),
+        )
         .children((!geometry_available).then(|| {
             div()
                 .absolute()
@@ -7448,6 +7785,21 @@ fn cardinal_label(label: &'static str, x: f32, y: f32, palette: Palette) -> impl
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(palette.muted)
         .child(label)
+}
+
+fn sky_legend_row(label: &'static str, swatch: Hsla, palette: Palette) -> impl IntoElement {
+    div()
+        .h(px(15.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(div().size(px(6.)).rounded_full().bg(swatch))
+        .child(
+            div()
+                .font_family(data_font_family())
+                .text_color(palette.muted)
+                .child(label),
+        )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -7696,6 +8048,25 @@ fn cn0_plot(
                         ),
                 )
         }))
+        .child(
+            div()
+                .absolute()
+                .left(px(42.))
+                .right(px(44.))
+                .bottom(px(0.))
+                .h(px(12.))
+                .px(px(3.))
+                .flex()
+                .items_center()
+                .justify_between()
+                .bg(palette.surface.opacity(0.88))
+                .text_size(px(6.))
+                .font_family(data_font_family())
+                .text_color(palette.muted)
+                .child(format!("−{}", sample_count.saturating_sub(1)))
+                .child(format!("−{}", sample_count.saturating_sub(1) / 2))
+                .child("0 epoch"),
+        )
         .children(series_empty.then(|| {
             div()
                 .absolute()
@@ -7749,6 +8120,36 @@ fn position_plot(
                 plot_bounds.origin.x + plot_bounds.size.width / 2.,
                 plot_bounds.origin.y + plot_bounds.size.height / 2.,
             );
+            for ratio in [0.25_f32, 0.5, 0.75] {
+                let x = plot_bounds.origin.x + plot_bounds.size.width * ratio;
+                let y = plot_bounds.origin.y + plot_bounds.size.height * ratio;
+                window.paint_quad(quad(
+                    bounds(
+                        point(x, plot_bounds.origin.y),
+                        size(px(1.), plot_bounds.size.height),
+                    ),
+                    px(0.),
+                    palette
+                        .border
+                        .opacity(if ratio == 0.5 { 1.0 } else { 0.55 }),
+                    px(0.),
+                    palette.border,
+                    Default::default(),
+                ));
+                window.paint_quad(quad(
+                    bounds(
+                        point(plot_bounds.origin.x, y),
+                        size(plot_bounds.size.width, px(1.)),
+                    ),
+                    px(0.),
+                    palette
+                        .border
+                        .opacity(if ratio == 0.5 { 1.0 } else { 0.55 }),
+                    px(0.),
+                    palette.border,
+                    Default::default(),
+                ));
+            }
             window.paint_quad(quad(
                 bounds(
                     point(center.x, plot_bounds.origin.y),
@@ -7784,6 +8185,30 @@ fn position_plot(
             let extent = extents[robust_index].max(1.0);
             let half_width = plot_bounds.size.width / 2. - px(8.);
             let half_height = plot_bounds.size.height / 2. - px(8.);
+            let visible_points = points
+                .iter()
+                .filter(|(_, east, north)| east.abs() <= extent && north.abs() <= extent)
+                .map(|(index, east, north)| {
+                    (
+                        *index,
+                        point(
+                            center.x + half_width * (*east / extent) as f32,
+                            center.y - half_height * (*north / extent) as f32,
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut trajectory = PathBuilder::stroke(px(1.6));
+            for (point_index, (_, plot_point)) in visible_points.iter().enumerate() {
+                if point_index == 0 {
+                    trajectory.move_to(*plot_point);
+                } else {
+                    trajectory.line_to(*plot_point);
+                }
+            }
+            if let Ok(path) = trajectory.build() {
+                window.paint_path(path, palette.accent);
+            }
             for (index, east, north) in &points {
                 if east.abs() > extent || north.abs() > extent {
                     continue;
@@ -7791,7 +8216,7 @@ fn position_plot(
                 let x = center.x + half_width * (*east / extent) as f32;
                 let y = center.y - half_height * (*north / extent) as f32;
                 let selected = Some(*index) == selected_epoch;
-                let diameter = if selected { px(6.) } else { px(3.) };
+                let diameter = if selected { px(7.) } else { px(2.) };
                 window.paint_quad(quad(
                     bounds(
                         point(x - diameter / 2., y - diameter / 2.),
