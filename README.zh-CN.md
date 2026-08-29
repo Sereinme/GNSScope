@@ -20,7 +20,7 @@ GNSScope 是一个使用 Rust 编写的离线 GPS L1 C/A 软件接收机与桌�
 
 最初定义的 M0–M2 主链路已经实现：录制 IQ 可完整经过捕获、跟踪、导航解码、连续 PVT、结果持久化和 GUI 历史回放。
 
-当前验证覆盖静态 CTTC 与 LabSat 录制数据，这些数据集不随仓库分发。下一优先级是使用带独立轨迹和时间真值的动态、高采样率 IQ 数据，验证快速多普勒、速度恢复、缩短输出周期，以及启动后才进入可见范围的卫星能否加入 PVT。
+当前验证覆盖静态 CTTC 与 LabSat 录制数据，这些数据集不随仓库分发。当前优先级是先结构化重构 App UI，再扩展 GPS L1C、GPS L2C、GPS L5 和北斗 B1I 等多系统、多频点信号处理。动态/高采样率验证和进一步精度评估暂时后移。
 
 优先级请查看[项目路线图](docs/roadmap.md)，实测证据和已知精度边界请查看[接收机就绪审计](docs/receiver-readiness-audit.md)。
 
@@ -92,6 +92,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ## 项目文档
 
 - [项目路线图](docs/roadmap.md)：权威优先级与工作顺序
+- [UI 架构](docs/ui-architecture.md)：应用流程、导航与响应式交互约定
 - [接收机就绪审计](docs/receiver-readiness-audit.md)：真实数据、运行时间、内存与精度证据
 - [领域术语表](CONTEXT.md)：接收机和产品的统一术语
 - [架构决策记录](docs/adr/)：流水线、持久化、GUI 和延期的信号扩展设计

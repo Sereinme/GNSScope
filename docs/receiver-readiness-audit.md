@@ -236,7 +236,7 @@ Risk: low to medium. Expected gain is smaller than tracking and ring-buffer work
 
 ## Recommended Next Work
 
-See `docs/roadmap.md` for the authoritative priority order. Priority 1 PVT recovery and GUI visual polish are complete; Priority 2 accuracy and scenario coverage is next.
+See `docs/roadmap.md` for the authoritative priority order. The active priorities are a structural App UI refactor followed by multi-system and multi-frequency signal processing. The accuracy and scenario-coverage items documented in this audit remain valid receiver gaps, but their expansion is deferred.
 
 ## GUI Gate
 

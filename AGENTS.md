@@ -34,7 +34,7 @@ ADR-0002's signal trait abstraction is accepted design intent but remains deferr
 
 ## Current Priorities
 
-Follow `docs/roadmap.md`. The next work is accuracy and scenario coverage, starting with files ending in an incomplete final 1 ms tracking epoch, followed by dynamic/high-rate datasets, independent reference comparisons, time/ephemeris boundaries, and complete serial-versus-parallel real-data equality. Measure runtime and memory before further optimization.
+Follow `docs/roadmap.md`. The immediate priority is a structural refactor of the App UI while preserving receiver behavior, immutable completed runs, and persistence semantics. The next receiver priority is multi-system and multi-frequency signal processing for GPS L1C, GPS L2C, GPS L5, and BeiDou B1I. Accuracy expansion, dynamic/high-rate scenario coverage, boundary campaigns, and further performance optimization are deferred, but existing correctness and deterministic real-data regressions remain mandatory gates.
 
 ## Conventions
 

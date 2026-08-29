@@ -3,5 +3,7 @@
 /reference/
 /.scratch/
 /artifacts/
+/.reasonix/
+.DS_Store
 
 nul

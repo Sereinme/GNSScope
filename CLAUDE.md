@@ -12,7 +12,7 @@ M0-M2 are implemented. The production path includes streaming IQ input, determin
 
 `docs/roadmap.md` is the authoritative source for current priority and completion status. `docs/receiver-readiness-audit.md` records detailed real-data and performance evidence. `docs/M1-PROGRESS.md`, `docs/M2-PROGRESS.md`, and the PVT research documents are historical investigation records; their open-problem sections have been superseded by later fixes unless the roadmap or readiness audit repeats them.
 
-The current roadmap priority is accuracy and scenario coverage: incomplete final 1 ms epochs, dynamic/high-rate PVT and rapid Doppler changes, independent reference comparisons, ephemeris/GPS-week/leap-second boundaries, and complete real-data serial-versus-parallel equality. Runtime and memory measurement comes before additional optimization.
+The current roadmap priorities are a structural App UI refactor followed by multi-system and multi-frequency signal processing for GPS L1C, GPS L2C, GPS L5, and BeiDou B1I. Production code still uses concrete GPS L1 C/A types; revise and prove the ADR-0002 signal seam before describing multi-signal support as implemented. Accuracy expansion, dynamic/high-rate scenarios, boundary campaigns, and further optimization are deferred while existing correctness and deterministic real-data regressions remain mandatory gates.
 
 ## Commands
 

@@ -20,7 +20,7 @@ GNSScope is an offline GPS L1 C/A software receiver and analysis desktop applica
 
 The original M0–M2 path is implemented: recorded IQ can be processed through acquisition, tracking, navigation decoding, continuous PVT, persistence, and GUI replay.
 
-Current verification includes static CTTC and LabSat recordings. These datasets are not distributed with the repository. The next priority is dynamic/high-rate IQ validation with independent trajectory and time truth, including rapid Doppler, velocity recovery, shortened output epochs, and satellites that become visible after startup.
+Current verification includes static CTTC and LabSat recordings. These datasets are not distributed with the repository. The active priorities are a structural App UI refactor followed by multi-system and multi-frequency signal processing for GPS L1C, GPS L2C, GPS L5, and BeiDou B1I. Dynamic/high-rate validation and additional accuracy campaigns are deferred.
 
 See the [roadmap](docs/roadmap.md) for priorities and the [receiver readiness audit](docs/receiver-readiness-audit.md) for measured evidence and known accuracy limitations.
 
@@ -92,6 +92,7 @@ The result is written to `target/release/bundle/osx/GNSScope.app`. This local de
 ## Documentation
 
 - [Roadmap](docs/roadmap.md) — authoritative priorities and sequencing
+- [UI architecture](docs/ui-architecture.md) — application workflow, navigation, and responsive interaction contract
 - [Receiver readiness audit](docs/receiver-readiness-audit.md) — real-data, runtime, memory, and accuracy evidence
 - [Domain glossary](CONTEXT.md) — canonical receiver and product terminology
 - [Architecture decisions](docs/adr/) — pipeline, persistence, GUI, and deferred signal-extension design
