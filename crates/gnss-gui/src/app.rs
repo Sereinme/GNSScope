@@ -490,13 +490,13 @@ impl Palette {
 
     fn dark() -> Self {
         Self {
-            background: color(0x0e1013),
-            sidebar: color(0x101318),
-            surface: color(0x12151a),
-            surface_alt: color(0x171b21),
-            border: color(0x252b33),
-            text: color(0xe6eaf0),
-            muted: color(0x8b95a3),
+            background: color(0x0c141c),
+            sidebar: color(0x101923),
+            surface: color(0x121d27),
+            surface_alt: color(0x17242f),
+            border: color(0x2a3947),
+            text: color(0xdce6ef),
+            muted: color(0x91a2b2),
             accent: color(0x63c5da),
             healthy: color(0x67c99a),
             warning: color(0xe0b15a),
@@ -553,7 +553,9 @@ pub struct GnsscopeApp {
     settings_category: SettingsCategory,
     compact_library_expanded: bool,
     runs_sidebar_visible: bool,
+    run_configuration_visible: bool,
     timeline_visible: bool,
+    timeline_zoom: usize,
     status_message: String,
 }
 
@@ -746,7 +748,9 @@ impl GnsscopeApp {
             ),
             compact_library_expanded: false,
             runs_sidebar_visible,
+            run_configuration_visible: true,
             timeline_visible,
+            timeline_zoom: 1,
             status_message: "请选择 IQ 文件开始解算".to_string(),
         };
         if let Some(settings) = app.selected_run().map(|run| run.settings.clone()) {
@@ -757,17 +761,41 @@ impl GnsscopeApp {
             .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         {
             let (preview_epochs, preview_channels) = preview_epoch_history();
+            let preview_id = Uuid::from_u128(0x2025_0521_1432_0700_0000_0000_0000_0001);
+            let preview_source = app
+                .settings
+                .iq_file_path
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("2025-05-21_14-32-07_Run01.iqrun"));
+            let preview_total_samples = (app.settings.sample_rate_hz * 300.0) as u64;
             app.history.clear();
             app.queue.clear();
-            app.selected_run_id = None;
-            app.live_run_id = None;
-            app.historical_epochs = preview_epochs;
-            app.historical_channels = preview_channels;
-            app.historical_diagnostic_events = preview_diagnostic_events();
-            app.selected_epoch = app.historical_epochs.len().checked_sub(1);
+            app.active_run = Some(ProcessingRun {
+                id: preview_id,
+                created_at: chrono::DateTime::parse_from_rfc3339("2025-05-21T14:32:07Z")
+                    .expect("valid deterministic preview timestamp")
+                    .with_timezone(&chrono::Utc),
+                source_path: preview_source,
+                status: RunStatus::Processing,
+                progress: 0.63,
+                processed_samples: (preview_total_samples as f64 * 0.63) as u64,
+                total_samples: preview_total_samples,
+                pvt_epoch_count: preview_epochs.len(),
+                message: "Streaming acquisition, tracking and PVT".to_string(),
+                settings: app.settings.clone(),
+            });
+            app.selected_run_id = Some(preview_id);
+            app.live_run_id = Some(preview_id);
+            app.epochs = preview_epochs;
+            app.epoch_channels = preview_channels;
+            app.diagnostic_events = preview_diagnostic_events();
+            app.historical_epochs.clear();
+            app.historical_channels.clear();
+            app.historical_diagnostic_events.clear();
+            app.selected_epoch = app.epochs.len().checked_sub(1);
             app.runs_sidebar_visible = true;
             app.timeline_visible = true;
-            app.status_message = "确定性界面预览".to_string();
+            app.status_message = "确定性活动运行界面预览".to_string();
         }
         if std::env::var_os("GNSSCOPE_AUTORUN").is_some() {
             app.enqueue(cx);
@@ -1540,6 +1568,16 @@ impl GnsscopeApp {
         });
     }
 
+    fn adjust_timeline_zoom(&mut self, zoom_in: bool) {
+        self.timeline_zoom = match (self.timeline_zoom, zoom_in) {
+            (1, true) => 2,
+            (2, true) => 4,
+            (4, false) => 2,
+            (2, false) => 1,
+            (zoom, _) => zoom,
+        };
+    }
+
     fn selected_run(&self) -> Option<&ProcessingRun> {
         self.selected_run_id.and_then(|id| {
             self.active_run
@@ -1985,7 +2023,7 @@ impl GnsscopeApp {
                             div()
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .text_size(px(10.))
+                                .text_size(px(11.))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(palette.text)
                                 .child(run_label),
@@ -2473,7 +2511,7 @@ impl GnsscopeApp {
                         )
                         .child(
                             div()
-                                .text_size(px(9.))
+                                .text_size(px(10.))
                                 .font_family(data_font_family())
                                 .text_color(palette.healthy)
                                 .child(format!("{:.0}%", run.progress * 100.0)),
@@ -2495,7 +2533,7 @@ impl GnsscopeApp {
                         )
                         .child(
                             div()
-                                .text_size(px(8.))
+                                .text_size(px(9.))
                                 .text_color(palette.muted)
                                 .child(self.localized("处理中", "Running")),
                         ),
@@ -2503,8 +2541,8 @@ impl GnsscopeApp {
         });
 
         div()
-            .w(px(272.))
-            .min_w(px(244.))
+            .w(px(316.))
+            .min_w(px(286.))
             .h_full()
             .flex_shrink_0()
             .bg(palette.sidebar)
@@ -2834,7 +2872,7 @@ impl GnsscopeApp {
                     .border_color(palette.border)
                     .flex()
                     .items_center()
-                    .text_size(px(8.))
+                    .text_size(px(9.))
                     .text_color(palette.muted)
                     .child(match self.interface_language {
                         InterfaceLanguage::SimplifiedChinese => {
@@ -4190,94 +4228,6 @@ impl GnsscopeApp {
             .into_any_element()
     }
 
-    fn render_progress(&self, palette: Palette) -> impl IntoElement {
-        let run = self.active_run.as_ref().or_else(|| {
-            self.selected_run_id
-                .and_then(|id| self.history.iter().find(|run| run.id == id))
-        });
-        let progress = run.map(|run| run.progress).unwrap_or(0.0);
-        let elapsed = run
-            .map(|run| run.processed_samples as f64 / run.settings.sample_rate_hz)
-            .unwrap_or(0.0);
-        let total = run
-            .map(|run| run.total_samples as f64 / run.settings.sample_rate_hz)
-            .unwrap_or(0.0);
-        let status_message = if self.active_run.is_some() {
-            self.status_message.clone()
-        } else {
-            run.map(|run| run.message.clone())
-                .unwrap_or_else(|| self.status_message.clone())
-        };
-        let status_color = if self.active_run.is_some() {
-            palette.accent
-        } else if progress >= 1.0 {
-            palette.healthy
-        } else {
-            palette.muted
-        };
-        div()
-            .px(px(16.))
-            .pt(px(8.))
-            .pb(px(7.))
-            .bg(palette.surface_alt)
-            .border_b_1()
-            .border_color(palette.border)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .min_w_0()
-                            .child(div().size(px(6.)).rounded(px(2.)).bg(status_color))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .text_size(px(12.))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(palette.text)
-                                    .child(status_message),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .ml(px(16.))
-                            .flex()
-                            .items_baseline()
-                            .gap(px(12.))
-                            .font_family(data_font_family())
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(palette.muted)
-                                    .child(format!("{elapsed:.1} / {total:.1} s")),
-                            )
-                            .child(
-                                div()
-                                    .min_w(px(54.))
-                                    .text_right()
-                                    .text_size(px(12.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(palette.accent)
-                                    .child(format!("{:.1}%", progress * 100.0)),
-                            ),
-                    ),
-            )
-            .child(
-                Progress::new()
-                    .mt(px(6.))
-                    .h(px(2.))
-                    .bg(palette.accent)
-                    .value((progress * 100.0) as f32),
-            )
-    }
-
     fn setting_issue_message(&self, field: &'static str) -> Option<&'static str> {
         self.setting_parse_errors.get(field).copied().or_else(|| {
             crate::state::validate_settings(&self.settings)
@@ -5049,9 +4999,7 @@ impl GnsscopeApp {
                 _ => self.localized("处理中", "Running"),
             })
             .unwrap_or(self.localized("未选择", "No run"));
-        let status_text = selected_run
-            .map(|run| format!("{status_label}  {:.0}%", run.progress * 100.0))
-            .unwrap_or_else(|| status_label.to_string());
+        let status_text = status_label.to_string();
         let run_metadata = selected_run
             .map(|run| {
                 format!(
@@ -5098,7 +5046,7 @@ impl GnsscopeApp {
                                             .min_w_0()
                                             .overflow_hidden()
                                             .text_ellipsis()
-                                            .text_size(px(17.))
+                                            .text_size(px(20.))
                                             .font_family(data_font_family())
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .text_color(palette.text)
@@ -5107,7 +5055,7 @@ impl GnsscopeApp {
                                     .child(div().size(px(6.)).rounded_full().bg(status_color))
                                     .child(
                                         div()
-                                            .text_size(px(9.))
+                                            .text_size(px(10.))
                                             .font_family(data_font_family())
                                             .text_color(status_color)
                                             .child(status_text),
@@ -5116,7 +5064,7 @@ impl GnsscopeApp {
                             .child(
                                 div()
                                     .mt(px(5.))
-                                    .text_size(px(9.))
+                                    .text_size(px(10.))
                                     .font_family(data_font_family())
                                     .text_color(palette.muted)
                                     .child(run_metadata),
@@ -5159,20 +5107,15 @@ impl GnsscopeApp {
                             .rounded(px(3.))
                             .border_1()
                             .border_color(palette.border)
-                            .text_color(if self.side_drawer == Some(SideDrawer::Settings) {
+                            .text_color(if self.run_configuration_visible {
                                 palette.accent
                             } else {
                                 palette.muted
                             })
                             .icon(IconName::Settings2)
                             .label(self.localized("运行配置", "Run configuration"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                let drawer =
-                                    toggled_side_drawer(this.side_drawer, SideDrawer::Settings);
-                                if drawer == Some(SideDrawer::Settings) {
-                                    this.sync_setting_inputs(window, cx);
-                                }
-                                this.side_drawer = drawer;
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.run_configuration_visible = !this.run_configuration_visible;
                                 cx.notify();
                             })),
                     )
@@ -5428,14 +5371,14 @@ impl GnsscopeApp {
             .child(
                 div()
                     .mt(px(6.))
-                    .h(px(22.))
+                    .h(px(24.))
                     .px(px(8.))
                     .flex()
                     .items_center()
                     .bg(palette.surface_alt)
                     .border_1()
                     .border_color(palette.border)
-                    .text_size(px(7.))
+                    .text_size(px(10.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(palette.muted)
                     .child(div().w(px(96.)).child("PARAMETER"))
@@ -5526,7 +5469,276 @@ impl GnsscopeApp {
             .into_any_element()
     }
 
-    fn render_epoch_inspector(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_run_configuration_rail(
+        &self,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let run = self.selected_run();
+        let settings = run.map(|run| &run.settings).unwrap_or(&self.settings);
+        let enabled = |value: bool| {
+            if value {
+                self.localized("启用", "On")
+            } else {
+                self.localized("关闭", "Off")
+            }
+        };
+        let run_id = run
+            .map(|run| run.id.to_string().chars().take(8).collect::<String>())
+            .unwrap_or_else(|| "DRAFT".to_string());
+        let source = run
+            .map(|run| run.source_path.as_path())
+            .or(settings.iq_file_path.as_deref())
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "--".to_string());
+        let nav_source = settings
+            .rinex_nav_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| {
+                if settings.use_rinex_nav_environment {
+                    "RINEX · ENV".to_string()
+                } else if settings.auto_discover_colocated_nav {
+                    self.localized("RINEX · 自动发现", "RINEX · Auto-discovery")
+                        .to_string()
+                } else {
+                    self.localized("仅 IQ 导航电文", "IQ navigation only")
+                        .to_string()
+                }
+            });
+        let fixed_prns = settings
+            .fixed_prns
+            .as_ref()
+            .map(|prns| {
+                prns.iter()
+                    .map(|prn| format!("G{prn:02}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_else(|| self.localized("自动", "Automatic").to_string());
+
+        div()
+            .w(px(276.))
+            .min_w(px(258.))
+            .h_full()
+            .flex_shrink_0()
+            .overflow_y_scrollbar()
+            .bg(palette.surface)
+            .border_l_1()
+            .border_color(palette.border)
+            .child(
+                div()
+                    .h(px(54.))
+                    .px(px(14.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(palette.border)
+                    .child(
+                        div()
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(palette.text)
+                                    .child(self.localized("运行配置", "Run Configuration")),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(3.))
+                                    .font_family(data_font_family())
+                                    .text_size(px(9.))
+                                    .text_color(palette.muted)
+                                    .child(format!("SNAPSHOT · {run_id}")),
+                            ),
+                    )
+                    .child(
+                        Button::new("close-run-configuration")
+                            .ghost()
+                            .rounded(px(2.))
+                            .icon(IconName::PanelRightClose)
+                            .tooltip(self.localized("折叠运行配置", "Collapse run configuration"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.run_configuration_visible = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .px(px(14.))
+                    .pb(px(16.))
+                    .child(
+                        div()
+                            .mt(px(10.))
+                            .px(px(8.))
+                            .py(px(6.))
+                            .bg(palette.healthy.opacity(0.07))
+                            .border_1()
+                            .border_color(palette.healthy.opacity(0.28))
+                            .text_size(px(9.))
+                            .text_color(palette.healthy)
+                            .child(if run.is_some() {
+                                self.localized(
+                                    "只读 · 完成运行的配置不可变",
+                                    "READ ONLY · Immutable run snapshot",
+                                )
+                            } else {
+                                self.localized(
+                                    "草稿 · 在 New Analysis 中编辑",
+                                    "DRAFT · Edit from New Analysis",
+                                )
+                            }),
+                    )
+                    .child(inspector_section(
+                        self.localized("数据源", "Source"),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("IQ 文件", "IQ file"),
+                        source,
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("格式", "Format"),
+                        format!("{:?}", settings.iq_format),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("信号", "Signal"),
+                        "GPS · L1 C/A".to_string(),
+                        palette,
+                    ))
+                    .child(inspector_section(self.localized("射频", "RF"), palette))
+                    .child(inspector_row(
+                        self.localized("采样率", "Sample rate"),
+                        format!("{:.3} MHz", settings.sample_rate_hz / 1e6),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("中频", "IF"),
+                        format!("{:.3} MHz", settings.intermediate_frequency_hz / 1e6),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("分块", "Chunk"),
+                        format!("{} ms", settings.chunk_ms),
+                        palette,
+                    ))
+                    .child(inspector_section(
+                        self.localized("捕获", "Acquisition"),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("搜索窗", "Window"),
+                        format!("{} ms", settings.acquisition_window_ms),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("非相干积分", "Noncoherent"),
+                        settings.acquisition_noncoherent_integrations.to_string(),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("门限", "Threshold"),
+                        format!("{:.2}", settings.acquisition_threshold),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("多普勒范围", "Doppler span"),
+                        format!("±{:.0} Hz", settings.acquisition_doppler_max_hz),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("多普勒步长", "Doppler step"),
+                        format!("{:.0} Hz", settings.acquisition_doppler_step_hz),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("PRN", "PRNs"),
+                        fixed_prns,
+                        palette,
+                    ))
+                    .child(inspector_section(
+                        self.localized("跟踪", "Tracking"),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        "DLL BW",
+                        format!("{:.2} Hz", settings.dll_bandwidth_hz),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        "PLL BW",
+                        format!("{:.2} Hz", settings.pll_bandwidth_hz),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("早迟间隔", "Early/late"),
+                        format!("{:.2} chips", settings.early_late_spacing_chips),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("载波辅助", "Carrier aiding"),
+                        enabled(settings.carrier_aiding).to_string(),
+                        palette,
+                    ))
+                    .child(inspector_section(
+                        self.localized("导航与 PVT", "Navigation & PVT"),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("导航源", "NAV source"),
+                        nav_source,
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        "Hatch",
+                        enabled(settings.enable_carrier_smoothing).to_string(),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        "Kalman",
+                        enabled(settings.enable_kalman).to_string(),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        "RAIM",
+                        enabled(settings.enable_raim).to_string(),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("整毫秒模糊度", "Integer-ms ambiguity"),
+                        enabled(settings.enable_integer_ms_ambiguity_resolution).to_string(),
+                        palette,
+                    ))
+                    .child(inspector_section(
+                        self.localized("执行", "Execution"),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("PVT 周期", "PVT cadence"),
+                        format!("{} ms", settings.pvt_output_rate_ms),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("并行捕获", "Parallel acquisition"),
+                        enabled(settings.parallel_acquisition).to_string(),
+                        palette,
+                    ))
+                    .child(inspector_row(
+                        self.localized("并行跟踪", "Parallel tracking"),
+                        enabled(settings.parallel_tracking).to_string(),
+                        palette,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn render_navigation_signal_panel(&self, palette: Palette) -> AnyElement {
         let pvt = self.current_pvt();
         let channels = self.display_channels();
         let selected_prn = self
@@ -5584,84 +5796,31 @@ impl GnsscopeApp {
             .unwrap_or(palette.muted);
 
         div()
-            .w(px(278.))
-            .min_w(px(258.))
-            .h_full()
-            .flex_shrink_0()
-            .overflow_y_scrollbar()
             .bg(palette.surface)
-            .border_l_1()
+            .border_1()
             .border_color(palette.border)
             .child(
                 div()
-                    .min_h(px(56.))
+                    .h(px(42.))
                     .px(px(14.))
-                    .py(px(10.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .border_b_1()
                     .border_color(palette.border)
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(palette.text)
-                                    .child(format!("Epoch {epoch_number}")),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(2.))
-                                    .child(
-                                        Button::new("inspector-epoch-previous")
-                                            .ghost()
-                                            .rounded(px(2.))
-                                            .icon(IconName::ChevronLeft)
-                                            .tooltip(
-                                                self.localized("上一个 epoch", "Previous epoch"),
-                                            )
-                                            .disabled(epoch_count == 0)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.step_selected_epoch(-1, window, cx);
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(54.))
-                                            .text_center()
-                                            .text_size(px(8.))
-                                            .font_family(data_font_family())
-                                            .text_color(palette.muted)
-                                            .child(format!("{epoch_number} / {epoch_count}")),
-                                    )
-                                    .child(
-                                        Button::new("inspector-epoch-next")
-                                            .ghost()
-                                            .rounded(px(2.))
-                                            .icon(IconName::ChevronRight)
-                                            .tooltip(self.localized("下一个 epoch", "Next epoch"))
-                                            .disabled(epoch_count == 0)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.step_selected_epoch(1, window, cx);
-                                                cx.notify();
-                                            })),
-                                    ),
-                            ),
+                            .text_size(px(11.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(palette.text)
+                            .child(self.localized("卫星导航详情", "Satellite navigation detail")),
                     )
                     .child(
                         div()
-                            .mt(px(4.))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_size(px(8.))
+                            .text_size(px(9.))
                             .font_family(data_font_family())
                             .text_color(palette.muted)
-                            .child(self.file_label()),
+                            .child(format!("Epoch {epoch_number} / {epoch_count}")),
                     ),
             )
             .child(
@@ -6013,6 +6172,10 @@ impl GnsscopeApp {
         let epochs = self.display_epochs();
         let channels = self.display_channels();
         let epoch_channels = self.display_epoch_channels();
+        let epoch_period_ms = self
+            .selected_run()
+            .map(|run| run.settings.pvt_output_rate_ms)
+            .unwrap_or(self.settings.pvt_output_rate_ms);
         let pvt = self.current_pvt();
         let valid_pvt = pvt.filter(|pvt| pvt_position_is_displayable(pvt));
         let satellites = valid_pvt
@@ -6045,9 +6208,12 @@ impl GnsscopeApp {
                     cn0_plot(
                         epoch_channels,
                         channels,
-                        self.selected_epoch,
-                        self.hovered_prn,
-                        self.pinned_prn,
+                        Cn0PlotSelection {
+                            epoch_period_ms,
+                            selected_epoch: self.selected_epoch,
+                            hovered_prn: self.hovered_prn,
+                            pinned_prn: self.pinned_prn,
+                        },
                         palette,
                         cx,
                     )
@@ -6114,9 +6280,12 @@ impl GnsscopeApp {
                     cn0_plot(
                         epoch_channels,
                         channels,
-                        self.selected_epoch,
-                        self.hovered_prn,
-                        self.pinned_prn,
+                        Cn0PlotSelection {
+                            epoch_period_ms,
+                            selected_epoch: self.selected_epoch,
+                            hovered_prn: self.hovered_prn,
+                            pinned_prn: self.pinned_prn,
+                        },
                         palette,
                         cx,
                     ),
@@ -6135,9 +6304,12 @@ impl GnsscopeApp {
                     cn0_plot(
                         epoch_channels,
                         channels,
-                        self.selected_epoch,
-                        self.hovered_prn,
-                        self.pinned_prn,
+                        Cn0PlotSelection {
+                            epoch_period_ms,
+                            selected_epoch: self.selected_epoch,
+                            hovered_prn: self.hovered_prn,
+                            pinned_prn: self.pinned_prn,
+                        },
                         palette,
                         cx,
                     ),
@@ -6181,7 +6353,35 @@ impl GnsscopeApp {
                         )),
                 )
                 .into_any_element(),
-            WorkspaceView::Navigation => self.render_navigation_events(palette),
+            WorkspaceView::Navigation => {
+                if compact {
+                    div()
+                        .child(self.render_navigation_signal_panel(palette))
+                        .child(
+                            div()
+                                .mt(px(6.))
+                                .child(self.render_navigation_events(palette)),
+                        )
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .w(gpui::relative(0.43))
+                                .child(self.render_navigation_signal_panel(palette)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(self.render_navigation_events(palette)),
+                        )
+                        .into_any_element()
+                }
+            }
             WorkspaceView::Candidates => div()
                 .grid()
                 .grid_cols(if compact { 1 } else { 3 })
@@ -6442,13 +6642,28 @@ impl GnsscopeApp {
         let epochs = self.display_epochs();
         let events = self.display_diagnostic_events();
         let max_event_ms = events.last().map(|event| event.now_ms).unwrap_or(1).max(1);
+        let epoch_count = epochs.len();
+        let epoch_number = self.selected_epoch.map(|index| index + 1).unwrap_or(0);
+        let global_cursor = self
+            .selected_epoch
+            .filter(|_| epoch_count > 1)
+            .map(|index| index as f32 / (epoch_count - 1) as f32)
+            .unwrap_or(0.0);
+        let visible_span = 1.0 / self.timeline_zoom as f32;
+        let visible_start = (global_cursor - visible_span / 2.0).clamp(0.0, 1.0 - visible_span);
+        let visible_end = visible_start + visible_span;
+        let cursor_percent = ((global_cursor - visible_start) / visible_span).clamp(0.0, 1.0);
         let markers = events
             .iter()
             .rev()
-            .take(32)
+            .take(64)
             .enumerate()
-            .map(|(index, event)| {
-                let percent = event.now_ms as f32 / max_event_ms as f32;
+            .filter_map(|(index, event)| {
+                let global_percent = event.now_ms as f32 / max_event_ms as f32;
+                if global_percent < visible_start || global_percent > visible_end {
+                    return None;
+                }
+                let percent = (global_percent - visible_start) / visible_span;
                 let (label, marker_color) = match event.kind {
                     GuiDiagnosticEventKind::Acquisition => ("ACQ", palette.healthy),
                     GuiDiagnosticEventKind::AcquisitionFailed => ("FAIL", palette.danger),
@@ -6457,16 +6672,11 @@ impl GnsscopeApp {
                     GuiDiagnosticEventKind::ChannelState => ("TRK", palette.accent),
                     GuiDiagnosticEventKind::Navigation => ("NAV", palette.warning),
                 };
-                (index, percent, label, marker_color)
+                Some((index, percent, label, marker_color))
             })
             .collect::<Vec<_>>();
-        let epoch_number = self.selected_epoch.map(|index| index + 1).unwrap_or(0);
-        let epoch_count = epochs.len();
-        let cursor_percent = self
-            .selected_epoch
-            .filter(|_| epoch_count > 1)
-            .map(|index| index as f32 / (epoch_count - 1) as f32)
-            .unwrap_or(0.0);
+        let visible_start_ms = (max_event_ms as f32 * visible_start) as u64;
+        let visible_duration_ms = (max_event_ms as f32 * visible_span) as u64;
         let receiver_time = self
             .current_pvt()
             .and_then(|pvt| pvt.time.receiver_time_sow)
@@ -6474,7 +6684,7 @@ impl GnsscopeApp {
             .unwrap_or_else(|| "SOW --".to_string());
         div()
             .flex_shrink_0()
-            .h(px(124.))
+            .h(px(140.))
             .bg(palette.surface)
             .border_t_1()
             .border_color(palette.border)
@@ -6500,7 +6710,7 @@ impl GnsscopeApp {
                             .text_size(px(8.))
                             .font_family(data_font_family())
                             .text_color(palette.muted)
-                            .child(receiver_time),
+                            .child(format!("{receiver_time}  ·  {}×", self.timeline_zoom)),
                     )
                     .child(
                         div()
@@ -6512,7 +6722,7 @@ impl GnsscopeApp {
             )
             .child(
                 div()
-                    .h(px(94.))
+                    .h(px(110.))
                     .flex()
                     .child(
                         div()
@@ -6522,9 +6732,57 @@ impl GnsscopeApp {
                             .child(
                                 div()
                                     .relative()
-                                    .h(px(48.))
+                                    .h(px(72.))
                                     .border_b_1()
                                     .border_color(palette.border)
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left(px(2.))
+                                            .top(px(6.))
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(3.))
+                                            .child(
+                                                Button::new("timeline-zoom-out")
+                                                    .ghost()
+                                                    .rounded(px(2.))
+                                                    .label("−")
+                                                    .tooltip(self.localized(
+                                                        "缩小时间轴",
+                                                        "Zoom timeline out",
+                                                    ))
+                                                    .disabled(self.timeline_zoom == 1)
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.adjust_timeline_zoom(false);
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .child(
+                                                div()
+                                                    .w(px(30.))
+                                                    .text_center()
+                                                    .font_family(data_font_family())
+                                                    .text_size(px(8.))
+                                                    .text_color(palette.muted)
+                                                    .child(format!("{}×", self.timeline_zoom)),
+                                            )
+                                            .child(
+                                                Button::new("timeline-zoom-in")
+                                                    .ghost()
+                                                    .rounded(px(2.))
+                                                    .label("+")
+                                                    .tooltip(self.localized(
+                                                        "放大时间轴",
+                                                        "Zoom timeline in",
+                                                    ))
+                                                    .disabled(self.timeline_zoom == 4)
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.adjust_timeline_zoom(true);
+                                                        cx.notify();
+                                                    })),
+                                            ),
+                                    )
                                     .child(
                                         div()
                                             .absolute()
@@ -6534,6 +6792,20 @@ impl GnsscopeApp {
                                             .w(px(1.))
                                             .bg(palette.accent.opacity(0.85)),
                                     )
+                                    .children((0..=40).map(|tick| {
+                                        let major = tick % 5 == 0;
+                                        div()
+                                            .absolute()
+                                            .left(gpui::relative(tick as f32 / 40.0))
+                                            .bottom_0()
+                                            .w(px(1.))
+                                            .h(if major { px(10.) } else { px(5.) })
+                                            .bg(if major {
+                                                palette.muted.opacity(0.65)
+                                            } else {
+                                                palette.border
+                                            })
+                                    }))
                                     .children(markers.into_iter().map(
                                         |(index, percent, label, color)| {
                                             div()
@@ -6545,7 +6817,7 @@ impl GnsscopeApp {
                                                 .bottom(px(0.))
                                                 .ml(px(-10.))
                                                 .w(px(20.))
-                                                .h(px(40.))
+                                                .h(px(46.))
                                                 .flex()
                                                 .flex_col()
                                                 .items_center()
@@ -6567,31 +6839,31 @@ impl GnsscopeApp {
                             )
                             .child(
                                 div()
-                                    .h(px(44.))
+                                    .h(px(38.))
                                     .flex()
-                                    .items_center()
-                                    .gap(px(8.))
+                                    .flex_col()
                                     .child(
                                         div()
-                                            .text_size(px(8.))
+                                            .h(px(16.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
                                             .font_family(data_font_family())
+                                            .text_size(px(8.))
                                             .text_color(palette.muted)
-                                            .child("0"),
+                                            .children((0..=5).map(|tick| {
+                                                let time_ms = visible_start_ms
+                                                    + visible_duration_ms * tick / 5;
+                                                div().child(format_timeline_time(time_ms))
+                                            })),
                                     )
                                     .child(
-                                        div().flex_1().child(
+                                        div().h(px(22.)).child(
                                             Slider::new(&self.timeline)
                                                 .bg(palette.border)
                                                 .text_color(palette.accent)
                                                 .disabled(epoch_count < 2),
                                         ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(8.))
-                                            .font_family(data_font_family())
-                                            .text_color(palette.muted)
-                                            .child(epoch_count.to_string()),
                                     ),
                             ),
                     )
@@ -6730,18 +7002,24 @@ impl GnsscopeApp {
             .map(|pvt| format!("{:?}", pvt.solution_kind))
             .unwrap_or_else(|| "No fix".to_string());
         let active_label = active
-            .map(|run| format!("{:.0}%", run.progress * 100.0))
+            .map(|run| {
+                format!(
+                    "{}  {:.0}%",
+                    self.localized("处理中", "Running"),
+                    run.progress * 100.0
+                )
+            })
             .unwrap_or_else(|| "Idle".to_string());
 
         div()
-            .h(px(28.))
+            .h(px(32.))
             .flex_shrink_0()
             .bg(palette.background)
             .border_t_1()
             .border_color(palette.border)
             .flex()
             .items_center()
-            .text_size(px(8.))
+            .text_size(px(9.))
             .text_color(palette.muted)
             .child(
                 Button::new("toggle-runs-sidebar")
@@ -6830,7 +7108,7 @@ impl GnsscopeApp {
         let (title, subtitle) = header;
         let expanded = matches!(layout, PlotPanelLayout::Expanded);
         div()
-            .min_h(if expanded { px(580.) } else { px(246.) })
+            .min_h(if expanded { px(620.) } else { px(310.) })
             .rounded(px(0.))
             .bg(palette.surface)
             .border_1()
@@ -6865,7 +7143,7 @@ impl GnsscopeApp {
             .child(
                 div()
                     .mt(px(8.))
-                    .h(if expanded { px(514.) } else { px(200.) })
+                    .h(if expanded { px(554.) } else { px(264.) })
                     .child(plot),
             )
     }
@@ -6887,7 +7165,8 @@ impl Render for GnsscopeApp {
         let compact = viewport_width < 1_180.0;
         let compact_drawer = viewport_width < 900.0;
         let show_workspace = !compact_drawer || self.side_drawer.is_none();
-        let show_epoch_inspector = viewport_width >= 1_320.0
+        let show_run_configuration = self.run_configuration_visible
+            && viewport_width >= 1_320.0
             && self.side_drawer.is_none()
             && self.page == AppPage::Workspace;
         let workspace_empty = self.selected_run_id.is_none()
@@ -6949,7 +7228,6 @@ impl Render for GnsscopeApp {
                                                         .flex_1()
                                                         .min_h_0()
                                                         .overflow_y_scrollbar()
-                                                        .child(self.render_progress(palette))
                                                         .child(self.render_overview(
                                                             palette,
                                                             compact,
@@ -6979,8 +7257,9 @@ impl Render for GnsscopeApp {
                                             )
                                             .into_any_element(),
                                         ),
-                                        None => show_epoch_inspector
-                                            .then(|| self.render_epoch_inspector(palette, cx)),
+                                        None => show_run_configuration.then(|| {
+                                            self.render_run_configuration_rail(palette, cx)
+                                        }),
                                     }),
                             )
                             .children(
@@ -7020,13 +7299,33 @@ fn run_section_header(label: &'static str, count: usize, palette: Palette) -> im
         )
 }
 
+fn format_timeline_time(milliseconds: u64) -> String {
+    let seconds = milliseconds / 1_000;
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn format_timeline_offset(milliseconds: u64) -> String {
+    let seconds = milliseconds / 1_000;
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
 fn inspector_section(label: &'static str, palette: Palette) -> impl IntoElement {
     div()
         .mt(px(12.))
         .pt(px(8.))
         .border_t_1()
         .border_color(palette.border)
-        .text_size(px(9.))
+        .text_size(px(10.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(palette.healthy)
         .child(label)
@@ -7038,14 +7337,14 @@ fn inspector_row(
     palette: Palette,
 ) -> impl IntoElement {
     div()
-        .min_h(px(23.))
+        .min_h(px(26.))
         .flex()
         .items_center()
         .child(
             div()
                 .w(px(118.))
                 .flex_shrink_0()
-                .text_size(px(8.))
+                .text_size(px(10.))
                 .text_color(palette.muted)
                 .child(label),
         )
@@ -7056,7 +7355,7 @@ fn inspector_row(
                 .overflow_hidden()
                 .text_ellipsis()
                 .text_right()
-                .text_size(px(8.))
+                .text_size(px(10.))
                 .font_family(data_font_family())
                 .text_color(palette.text)
                 .child(value.into()),
@@ -7079,13 +7378,13 @@ fn status_bar_item(
         .gap(px(5.))
         .child(
             div()
-                .text_size(px(7.))
+                .text_size(px(8.))
                 .text_color(palette.muted)
                 .child(label),
         )
         .child(
             div()
-                .text_size(px(8.))
+                .text_size(px(9.))
                 .font_family(data_font_family())
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(value_color)
@@ -7101,7 +7400,7 @@ fn pvt_table_row(
     palette: Palette,
 ) -> impl IntoElement {
     div()
-        .h(px(17.))
+        .h(px(22.))
         .px(px(8.))
         .flex()
         .items_center()
@@ -7109,7 +7408,7 @@ fn pvt_table_row(
         .border_r_1()
         .border_b_1()
         .border_color(palette.border)
-        .text_size(px(7.))
+        .text_size(px(10.))
         .child(div().w(px(96.)).text_color(palette.muted).child(label))
         .child(
             div()
@@ -7598,8 +7897,8 @@ fn sky_plot(
         .child(
             div()
                 .relative()
-                .w(px(184.))
-                .h(px(184.))
+                .w(px(224.))
+                .h(px(224.))
                 .child(
                     canvas(
                         move |_, _, _| {},
@@ -7610,7 +7909,8 @@ fn sky_plot(
                                 plot_bounds.origin.x + (plot_bounds.size.width - diameter) / 2.,
                                 plot_bounds.origin.y + (plot_bounds.size.height - diameter) / 2.,
                             );
-                            for ratio in [1.0_f32, 2.0 / 3.0, 1.0 / 3.0] {
+                            for ratio in [1.0_f32, 5.0 / 6.0, 2.0 / 3.0, 0.5, 1.0 / 3.0, 1.0 / 6.0]
+                            {
                                 let ring_diameter = diameter * ratio;
                                 let ring = Bounds {
                                     origin: point(
@@ -7658,22 +7958,22 @@ fn sky_plot(
                         .absolute()
                         .left(gpui::relative(marker.x))
                         .top(gpui::relative(marker.y))
-                        .ml(px(-11.))
-                        .mt(px(-11.))
-                        .w(if active { px(26.) } else { px(22.) })
-                        .h(if active { px(26.) } else { px(22.) })
-                        .rounded(if active { px(13.) } else { px(11.) })
+                        .ml(px(-8.))
+                        .mt(px(-8.))
+                        .w(if active { px(18.) } else { px(16.) })
+                        .h(if active { px(18.) } else { px(16.) })
+                        .rounded(if active { px(9.) } else { px(8.) })
                         .bg(if active {
                             palette.accent
                         } else {
                             palette.surface
                         })
-                        .border_2()
+                        .border_1()
                         .border_color(if active { palette.accent } else { marker.color })
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(8.))
+                        .text_size(px(8.5))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(if active {
                             palette.background
@@ -7698,7 +7998,12 @@ fn sky_plot(
                 .child(cardinal_label("N", 0.5, 0.0, palette))
                 .child(cardinal_label("E", 1.0, 0.5, palette))
                 .child(cardinal_label("S", 0.5, 1.0, palette))
-                .child(cardinal_label("W", 0.0, 0.5, palette)),
+                .child(cardinal_label("W", 0.0, 0.5, palette))
+                .child(sky_elevation_label("75°", 0.57, palette))
+                .child(sky_elevation_label("60°", 0.64, palette))
+                .child(sky_elevation_label("45°", 0.71, palette))
+                .child(sky_elevation_label("30°", 0.78, palette))
+                .child(sky_elevation_label("15°", 0.85, palette)),
         )
         .child(
             div()
@@ -7706,7 +8011,7 @@ fn sky_plot(
                 .right(px(4.))
                 .top(px(8.))
                 .w(px(82.))
-                .text_size(px(7.))
+                .text_size(px(9.))
                 .text_color(palette.muted)
                 .child(
                     div()
@@ -7781,8 +8086,20 @@ fn cardinal_label(label: &'static str, x: f32, y: f32, palette: Palette) -> impl
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(8.))
+        .text_size(px(10.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(palette.muted)
+        .child(label)
+}
+
+fn sky_elevation_label(label: &'static str, y: f32, palette: Palette) -> impl IntoElement {
+    div()
+        .absolute()
+        .left(gpui::relative(0.5))
+        .top(gpui::relative(y))
+        .ml(px(4.))
+        .font_family(data_font_family())
+        .text_size(px(8.))
         .text_color(palette.muted)
         .child(label)
 }
@@ -7806,6 +8123,14 @@ fn sky_legend_row(label: &'static str, swatch: Hsla, palette: Palette) -> impl I
 struct Cn0Series {
     prn: u8,
     samples: Vec<Option<f64>>,
+}
+
+#[derive(Clone, Copy)]
+struct Cn0PlotSelection {
+    epoch_period_ms: u64,
+    selected_epoch: Option<usize>,
+    hovered_prn: Option<u8>,
+    pinned_prn: Option<u8>,
 }
 
 impl Cn0Series {
@@ -7861,9 +8186,7 @@ fn build_cn0_series(
 fn cn0_plot(
     epoch_channels: &[Vec<GuiChannelStatus>],
     current_channels: &[GuiChannelStatus],
-    selected_epoch: Option<usize>,
-    hovered_prn: Option<u8>,
-    pinned_prn: Option<u8>,
+    selection: Cn0PlotSelection,
     palette: Palette,
     cx: &mut Context<GnsscopeApp>,
 ) -> impl IntoElement {
@@ -7874,9 +8197,15 @@ fn cn0_plot(
     } else {
         epoch_channels
     };
-    let series = build_cn0_series(epoch_channels, selected_epoch, pinned_prn, 8);
+    let series = build_cn0_series(
+        epoch_channels,
+        selection.selected_epoch,
+        selection.pinned_prn,
+        8,
+    );
     let series_empty = series.is_empty();
     let sample_count = epoch_channels.len().max(1);
+    let history_duration_ms = sample_count.saturating_sub(1) as u64 * selection.epoch_period_ms;
     let row_count = series.len().max(1);
     let plot_series = series.clone();
     let colors = palette.chart_series;
@@ -7916,7 +8245,10 @@ fn cn0_plot(
                             Default::default(),
                         ));
                     }
-                    if let Some(index) = selected_epoch.filter(|index| *index < sample_count) {
+                    if let Some(index) = selection
+                        .selected_epoch
+                        .filter(|index| *index < sample_count)
+                    {
                         let ratio = if sample_count <= 1 {
                             1.0
                         } else {
@@ -7970,7 +8302,9 @@ fn cn0_plot(
                                 builder.move_to(plot_point);
                                 segment_started = true;
                             }
-                            if selected_epoch == Some(index) || selected_epoch.is_none() {
+                            if selection.selected_epoch == Some(index)
+                                || selection.selected_epoch.is_none()
+                            {
                                 selected_point = Some(plot_point);
                             }
                         }
@@ -7997,8 +8331,8 @@ fn cn0_plot(
         )
         .children(series.into_iter().enumerate().map(|(row, item)| {
             let prn = item.prn;
-            let active = hovered_prn.or(pinned_prn) == Some(prn);
-            let value = item.value_at(selected_epoch);
+            let active = selection.hovered_prn.or(selection.pinned_prn) == Some(prn);
+            let value = item.value_at(selection.selected_epoch);
             let color = palette.chart_series[row % palette.chart_series.len()];
             div()
                 .id(SharedString::from(format!("cn0-line-prn-{prn}")))
@@ -8028,7 +8362,7 @@ fn cn0_plot(
                 .child(
                     div()
                         .w(px(34.))
-                        .text_size(px(8.))
+                        .text_size(px(9.))
                         .font_family(data_font_family())
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(if active { palette.accent } else { color })
@@ -8038,7 +8372,7 @@ fn cn0_plot(
                     div()
                         .w(px(38.))
                         .text_right()
-                        .text_size(px(8.))
+                        .text_size(px(9.))
                         .font_family(data_font_family())
                         .text_color(if active { palette.accent } else { palette.text })
                         .child(
@@ -8060,12 +8394,15 @@ fn cn0_plot(
                 .items_center()
                 .justify_between()
                 .bg(palette.surface.opacity(0.88))
-                .text_size(px(6.))
+                .text_size(px(8.))
                 .font_family(data_font_family())
                 .text_color(palette.muted)
-                .child(format!("−{}", sample_count.saturating_sub(1)))
-                .child(format!("−{}", sample_count.saturating_sub(1) / 2))
-                .child("0 epoch"),
+                .child(format!("−{}", format_timeline_offset(history_duration_ms)))
+                .child(format!(
+                    "−{}",
+                    format_timeline_offset(history_duration_ms / 2)
+                ))
+                .child("Now"),
         )
         .children(series_empty.then(|| {
             div()
@@ -8113,129 +8450,177 @@ fn position_plot(
                 })
                 .collect()
         });
-    canvas(
-        move |_, _, _| {},
-        move |plot_bounds, _, window, _| {
-            let center = point(
-                plot_bounds.origin.x + plot_bounds.size.width / 2.,
-                plot_bounds.origin.y + plot_bounds.size.height / 2.,
-            );
-            for ratio in [0.25_f32, 0.5, 0.75] {
-                let x = plot_bounds.origin.x + plot_bounds.size.width * ratio;
-                let y = plot_bounds.origin.y + plot_bounds.size.height * ratio;
-                window.paint_quad(quad(
-                    bounds(
-                        point(x, plot_bounds.origin.y),
-                        size(px(1.), plot_bounds.size.height),
-                    ),
-                    px(0.),
-                    palette
-                        .border
-                        .opacity(if ratio == 0.5 { 1.0 } else { 0.55 }),
-                    px(0.),
-                    palette.border,
-                    Default::default(),
-                ));
-                window.paint_quad(quad(
-                    bounds(
-                        point(plot_bounds.origin.x, y),
-                        size(plot_bounds.size.width, px(1.)),
-                    ),
-                    px(0.),
-                    palette
-                        .border
-                        .opacity(if ratio == 0.5 { 1.0 } else { 0.55 }),
-                    px(0.),
-                    palette.border,
-                    Default::default(),
-                ));
-            }
-            window.paint_quad(quad(
-                bounds(
-                    point(center.x, plot_bounds.origin.y),
-                    size(px(1.), plot_bounds.size.height),
-                ),
-                px(0.),
-                palette.border,
-                px(0.),
-                palette.border,
-                Default::default(),
-            ));
-            window.paint_quad(quad(
-                bounds(
-                    point(plot_bounds.origin.x, center.y),
-                    size(plot_bounds.size.width, px(1.)),
-                ),
-                px(0.),
-                palette.border,
-                px(0.),
-                palette.border,
-                Default::default(),
-            ));
-            if points.is_empty() {
-                return;
-            }
-            let mut extents = points
-                .iter()
-                .map(|(_, east, north)| east.abs().max(north.abs()))
-                .filter(|extent| extent.is_finite())
-                .collect::<Vec<_>>();
-            extents.sort_by(f64::total_cmp);
-            let robust_index = ((extents.len() - 1) as f64 * 0.95).round() as usize;
-            let extent = extents[robust_index].max(1.0);
-            let half_width = plot_bounds.size.width / 2. - px(8.);
-            let half_height = plot_bounds.size.height / 2. - px(8.);
-            let visible_points = points
-                .iter()
-                .filter(|(_, east, north)| east.abs() <= extent && north.abs() <= extent)
-                .map(|(index, east, north)| {
-                    (
-                        *index,
-                        point(
-                            center.x + half_width * (*east / extent) as f32,
-                            center.y - half_height * (*north / extent) as f32,
+    let has_points = !points.is_empty();
+    let mut extents = points
+        .iter()
+        .map(|(_, east, north)| east.abs().max(north.abs()))
+        .filter(|extent| extent.is_finite())
+        .collect::<Vec<_>>();
+    extents.sort_by(f64::total_cmp);
+    let extent = extents
+        .get(((extents.len().saturating_sub(1)) as f64 * 0.95).round() as usize)
+        .copied()
+        .unwrap_or(1.0)
+        .max(1.0);
+    let extent_label = format!("{extent:.0}");
+    let negative_extent_label = format!("−{extent:.0}");
+    div()
+        .size_full()
+        .relative()
+        .child(
+            canvas(
+                move |_, _, _| {},
+                move |plot_bounds, _, window, _| {
+                    let center = point(
+                        plot_bounds.origin.x + plot_bounds.size.width / 2.,
+                        plot_bounds.origin.y + plot_bounds.size.height / 2.,
+                    );
+                    for ratio in [0.25_f32, 0.5, 0.75] {
+                        let x = plot_bounds.origin.x + plot_bounds.size.width * ratio;
+                        let y = plot_bounds.origin.y + plot_bounds.size.height * ratio;
+                        window.paint_quad(quad(
+                            bounds(
+                                point(x, plot_bounds.origin.y),
+                                size(px(1.), plot_bounds.size.height),
+                            ),
+                            px(0.),
+                            palette
+                                .border
+                                .opacity(if ratio == 0.5 { 1.0 } else { 0.55 }),
+                            px(0.),
+                            palette.border,
+                            Default::default(),
+                        ));
+                        window.paint_quad(quad(
+                            bounds(
+                                point(plot_bounds.origin.x, y),
+                                size(plot_bounds.size.width, px(1.)),
+                            ),
+                            px(0.),
+                            palette
+                                .border
+                                .opacity(if ratio == 0.5 { 1.0 } else { 0.55 }),
+                            px(0.),
+                            palette.border,
+                            Default::default(),
+                        ));
+                    }
+                    window.paint_quad(quad(
+                        bounds(
+                            point(center.x, plot_bounds.origin.y),
+                            size(px(1.), plot_bounds.size.height),
                         ),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let mut trajectory = PathBuilder::stroke(px(1.6));
-            for (point_index, (_, plot_point)) in visible_points.iter().enumerate() {
-                if point_index == 0 {
-                    trajectory.move_to(*plot_point);
-                } else {
-                    trajectory.line_to(*plot_point);
-                }
-            }
-            if let Ok(path) = trajectory.build() {
-                window.paint_path(path, palette.accent);
-            }
-            for (index, east, north) in &points {
-                if east.abs() > extent || north.abs() > extent {
-                    continue;
-                }
-                let x = center.x + half_width * (*east / extent) as f32;
-                let y = center.y - half_height * (*north / extent) as f32;
-                let selected = Some(*index) == selected_epoch;
-                let diameter = if selected { px(7.) } else { px(2.) };
-                window.paint_quad(quad(
-                    bounds(
-                        point(x - diameter / 2., y - diameter / 2.),
-                        size(diameter, diameter),
-                    ),
-                    diameter / 2.,
-                    if selected {
-                        palette.accent
-                    } else {
-                        palette.healthy
-                    },
-                    px(0.),
-                    palette.accent,
-                    Default::default(),
-                ));
-            }
-        },
-    )
-    .size_full()
+                        px(0.),
+                        palette.border,
+                        px(0.),
+                        palette.border,
+                        Default::default(),
+                    ));
+                    window.paint_quad(quad(
+                        bounds(
+                            point(plot_bounds.origin.x, center.y),
+                            size(plot_bounds.size.width, px(1.)),
+                        ),
+                        px(0.),
+                        palette.border,
+                        px(0.),
+                        palette.border,
+                        Default::default(),
+                    ));
+                    if points.is_empty() {
+                        return;
+                    }
+                    let half_width = plot_bounds.size.width / 2. - px(8.);
+                    let half_height = plot_bounds.size.height / 2. - px(8.);
+                    let visible_points = points
+                        .iter()
+                        .filter(|(_, east, north)| east.abs() <= extent && north.abs() <= extent)
+                        .map(|(index, east, north)| {
+                            (
+                                *index,
+                                point(
+                                    center.x + half_width * (*east / extent) as f32,
+                                    center.y - half_height * (*north / extent) as f32,
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let mut trajectory = PathBuilder::stroke(px(1.6));
+                    for (point_index, (_, plot_point)) in visible_points.iter().enumerate() {
+                        if point_index == 0 {
+                            trajectory.move_to(*plot_point);
+                        } else {
+                            trajectory.line_to(*plot_point);
+                        }
+                    }
+                    if let Ok(path) = trajectory.build() {
+                        window.paint_path(path, palette.chart_series[1]);
+                    }
+                    for (index, east, north) in &points {
+                        if east.abs() > extent || north.abs() > extent {
+                            continue;
+                        }
+                        let x = center.x + half_width * (*east / extent) as f32;
+                        let y = center.y - half_height * (*north / extent) as f32;
+                        let selected = Some(*index) == selected_epoch;
+                        let diameter = if selected { px(7.) } else { px(2.) };
+                        window.paint_quad(quad(
+                            bounds(
+                                point(x - diameter / 2., y - diameter / 2.),
+                                size(diameter, diameter),
+                            ),
+                            diameter / 2.,
+                            if selected {
+                                palette.surface
+                            } else {
+                                palette.chart_series[1]
+                            },
+                            if selected { px(2.) } else { px(0.) },
+                            palette.accent,
+                            Default::default(),
+                        ));
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .children(has_points.then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .font_family(data_font_family())
+                .text_size(px(8.))
+                .text_color(palette.muted)
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(5.))
+                        .top(px(3.))
+                        .child(format!("N  {extent_label} m")),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(5.))
+                        .bottom(px(3.))
+                        .child(format!("{negative_extent_label} m")),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(gpui::relative(0.5))
+                        .bottom(px(3.))
+                        .ml(px(-3.))
+                        .child("0"),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .right(px(5.))
+                        .bottom(px(3.))
+                        .child(format!("E  {extent_label} m")),
+                )
+        }))
 }
 
 fn velocity_plot(
@@ -8764,9 +9149,9 @@ mod history_queue_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cn0_series, epoch_index_for_percent, preview_diagnostic_events,
-        preview_epoch_history, toggled_side_drawer, InterfaceLanguage, PlotFocus, SettingsCategory,
-        SideDrawer, ThemePreference, WorkspaceView,
+        build_cn0_series, epoch_index_for_percent, format_timeline_offset, format_timeline_time,
+        preview_diagnostic_events, preview_epoch_history, toggled_side_drawer, InterfaceLanguage,
+        PlotFocus, SettingsCategory, SideDrawer, ThemePreference, WorkspaceView,
     };
 
     #[test]
@@ -8776,6 +9161,14 @@ mod tests {
         assert_eq!(epoch_index_for_percent(101, 0.0), Some(0));
         assert_eq!(epoch_index_for_percent(101, 50.0), Some(50));
         assert_eq!(epoch_index_for_percent(101, 100.0), Some(100));
+    }
+
+    #[test]
+    fn timeline_labels_use_instrument_time_format() {
+        assert_eq!(format_timeline_time(0), "00:00:00");
+        assert_eq!(format_timeline_time(3_661_000), "01:01:01");
+        assert_eq!(format_timeline_offset(179_000), "02:59");
+        assert_eq!(format_timeline_offset(3_661_000), "01:01:01");
     }
 
     #[test]

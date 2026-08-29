@@ -38,8 +38,10 @@ application shell has four persistent regions:
 2. **Selected-run workbench**: the central surface with Overview, Channels, Position,
    Navigation, and Candidates tabs. These tabs always describe the selected run, not
    the application globally.
-3. **Epoch/PRN inspector**: an optional right pane for the selected epoch and linked
-   signal, tracking, geometry, PVT, and navigation details.
+3. **Run Configuration rail**: an optional right pane containing the selected run's
+   read-only source, RF, acquisition, tracking, navigation/PVT, and execution snapshot.
+   Linked signal, tracking, geometry, events, and ephemeris details belong inside the
+   run-local Navigation workbench rather than this persistent rail.
 4. **Epoch and status dock**: a persistent selected-run timeline above a global status
    strip that keeps active processing visible even while history is inspected. The
    timeline spans beneath both the analysis panes and the right inspector; the
@@ -74,9 +76,10 @@ when another run is active, it enters the queue instead.
 
 ## Responsive Behavior
 
-- At desktop width, use a roughly 272 px Runs dock, flexible workbench, and roughly
-  278 px inspector when space permits. The analysis canvas receives the saved space;
-  measurements stay dense rather than shrinking into dashboard cards.
+- At the 1568 px reference width, use a roughly 316 px Runs dock, flexible workbench,
+  and roughly 276 px Run Configuration rail. At smaller desktop widths these may
+  contract before collapsing; measurements stay dense rather than shrinking into
+  dashboard cards.
 - At narrower widths, collapse the inspector first and then the Runs dock. Do not
   stack the run library above plots or introduce a replacement activity bar.
 - Configuration pages become vertically stacked at compact widths.

@@ -62,6 +62,22 @@ and measurements dominate the canvas; controls remain quiet, dense, and contextu
 Decorative gradients, glass effects, excessive cards, large calls to action, and
 generic "space" styling are explicitly out of scope.
 
+**2026-08-29 concept-parity correction:** implementation must now be judged against
+`docs/Codex 图像 2026年8月29日 22_07_48.png`, not merely against the broad pane-and-dock
+idea. The reference controls proportion, typography, plot treatment, timeline density,
+and alignment, with the following deliberate product corrections. The selected-run
+workbench must not contain a separate progress strip: active progress belongs in the
+Runs dock and the bottom-left status readout. The persistent right rail shows the
+selected run's immutable configuration snapshot rather than per-satellite telemetry.
+Per-satellite signal, tracking, navigation-message, geometry, and ephemeris details
+belong to the run-local Navigation workbench. Overview may retain the bounded multi-PRN
+C/N0 history shown in the concept, but not the detailed signal inspector. The timeline
+must be a GNSScope-owned event/time instrument with labeled time ticks, event stems,
+an explicit cursor, zoom controls, precise epoch stepping, and live-follow state—not a
+generic slider presented as the primary visualization. The previously approved compact
+Runs-header New Analysis action remains authoritative even though the reference image
+contains an earlier full-width treatment.
+
 #### 1.1 Freeze the behavior contract before replacing the UI
 
 - Inventory every current workflow and encode it in a preservation matrix before
@@ -160,6 +176,29 @@ next/last controls and an explicit epoch readout while preserving slider and liv
 behavior. Remaining UI work is keyboard command coverage, light-theme and full
 responsive screenshot coverage, and removal of dormant legacy render paths after
 parity tests.
+
+**Concept-parity implementation target (2026-08-29):** remove the center progress
+surface; preserve active progress in the Runs dock and status bar; replace the epoch/
+PRN right inspector with a scrollable, read-only Run Configuration rail backed by the
+selected run snapshot; rebuild Navigation as the home for signal, tracking, decoded
+navigation, geometry, events, and ephemeris availability; and redraw the timeline,
+sky plot, ENU trajectory, C/N0 history, and PVT table using the proportions, tick marks,
+legends, measurement typography, and restrained graphite contrast of the approved
+reference. Do not fabricate ephemeris parameters, hardware utilization, or receiver
+events when production snapshots do not expose them.
+
+**Concept-parity implementation checkpoint (2026-08-29):** the center progress strip
+has been removed; active progress remains in the Runs dock and bottom status strip.
+The wide-layout right rail now renders the selected run's immutable configuration
+snapshot, while Navigation contains the linked signal, tracking, geometry/quality,
+position, receiver-event, and ephemeris-availability diagnostics. The timeline now has
+event stems, dense minor/major ticks, receiver-time labels, a shared cursor, functional
+1x/2x/4x zoom, exact epoch stepping, and live follow. Overview proportions, graphite
+contrast, Sky Plot elevation rings and marker scale, ENU grid/trajectory treatment,
+C/N0 time labels, PVT row density, and deterministic active-run preview data have been
+retuned against the 1568x1003 reference. Full light-theme, language, state, and
+cross-platform screenshot/package coverage remains open; ephemeris parameters also
+remain unavailable until the immutable run snapshot persists them.
 
 #### 1.4 Rebuild workflows inside the workbench
 
@@ -373,21 +412,25 @@ These remain outside the active roadmap:
 
 ## Current Next Actions
 
-1. Verify the integrated four-region shell against the approved graphite concept at
+1. Verify the concept-parity implementation with active, completed, failed, queued,
+   no-fix, and historical runs at the reference 1568x1003 size and at
    1440x900, 1100x800, and 800x720 in both themes and languages; fix density,
-   overflow, and hierarchy defects found in real screenshots.
-2. Complete keyboard commands and interaction regressions for New Analysis, Runs-dock
+   overflow, hierarchy, plot scale, and typography defects found in real screenshots.
+2. Extend the immutable run snapshot with decoded navigation/ephemeris records so the
+   Navigation workbench can render real parameters instead of an honest unavailable
+   state; migrate old databases without altering completed results.
+3. Complete keyboard commands and interaction regressions for New Analysis, Runs-dock
    collapse, epoch stepping, live-follow restoration, linked PRN selection, queue
    operations, and selected-run versus active-run independence.
-3. Refine the New Analysis central surface to the same pane-and-instrument density and
+4. Refine the New Analysis central surface to the same pane-and-instrument density and
    finish run-local Channels, Navigation, Candidates, and configuration detail views.
-4. Remove dormant legacy page and drawer render paths after parity tests prove that no
+5. Remove dormant legacy page and drawer render paths after parity tests prove that no
    workflow depends on them; keep `gpui-component` only for the focused behavior
    primitives recorded in ADR-0005.
-5. Complete the cross-theme, cross-language, cross-size screenshot matrix and
+6. Complete the cross-theme, cross-language, cross-size screenshot matrix and
    cross-platform packaging checks before removing the legacy shell.
-6. In parallel with UI verification only, inventory recorded/generated IQ data and independent
+7. In parallel with UI verification only, inventory recorded/generated IQ data and independent
    references for GPS L1C, L2C, L5, and BeiDou B1I; use that evidence to select the first
    new signal adapter.
-7. Before multi-signal production code, revise ADR-0002 to define the proven seam and
+8. Before multi-signal production code, revise ADR-0002 to define the proven seam and
    migration constraints described above.
