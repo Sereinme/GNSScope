@@ -762,14 +762,112 @@ impl GnsscopeApp {
         {
             let (preview_epochs, preview_channels) = preview_epoch_history();
             let preview_id = Uuid::from_u128(0x2025_0521_1432_0700_0000_0000_0000_0001);
-            let preview_source = app
-                .settings
-                .iq_file_path
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("2025-05-21_14-32-07_Run01.iqrun"));
-            let preview_total_samples = (app.settings.sample_rate_hz * 300.0) as u64;
-            app.history.clear();
-            app.queue.clear();
+            let preview_source = PathBuf::from("2025-05-21_14-32-07_Run01.iqrun");
+            let mut preview_settings = app.settings.clone();
+            preview_settings.iq_file_path = Some(preview_source.clone());
+            let preview_duration_seconds = 1_220.0;
+            let preview_total_samples =
+                (app.settings.sample_rate_hz * preview_duration_seconds) as u64;
+            let preview_run = |id_offset: u128,
+                               timestamp: &str,
+                               source: &str,
+                               status: RunStatus,
+                               progress: f64,
+                               pvt_epoch_count: usize| {
+                let duration_seconds = match id_offset {
+                    9 => 621.0,
+                    8 => 936.0,
+                    7 => 558.0,
+                    6 => 663.0,
+                    5 => 252.0,
+                    4 => 527.0,
+                    _ => preview_duration_seconds,
+                };
+                let total_samples = (preview_settings.sample_rate_hz * duration_seconds) as u64;
+                ProcessingRun {
+                    id: Uuid::from_u128(preview_id.as_u128() + id_offset),
+                    created_at: chrono::DateTime::parse_from_rfc3339(timestamp)
+                        .expect("valid deterministic preview timestamp")
+                        .with_timezone(&chrono::Utc),
+                    source_path: PathBuf::from(source),
+                    status,
+                    progress,
+                    processed_samples: (total_samples as f64 * progress) as u64,
+                    total_samples,
+                    pvt_epoch_count,
+                    message: "Deterministic visual preview".to_string(),
+                    settings: preview_settings.clone(),
+                }
+            };
+            app.queue = vec![
+                preview_run(
+                    2,
+                    "2025-05-21T14:45:00Z",
+                    "2025-05-21_14-45-00_Run02.iqrun",
+                    RunStatus::Queued,
+                    0.0,
+                    0,
+                ),
+                preview_run(
+                    3,
+                    "2025-05-21T15:00:00Z",
+                    "2025-05-21_15-00-00_Run03.iqrun",
+                    RunStatus::Queued,
+                    0.0,
+                    0,
+                ),
+            ]
+            .into();
+            app.history = vec![
+                preview_run(
+                    9,
+                    "2025-05-21T13:50:00Z",
+                    "2025-05-21_13-50-00_Run09.iqrun",
+                    RunStatus::Completed,
+                    1.0,
+                    182,
+                ),
+                preview_run(
+                    8,
+                    "2025-05-21T13:20:00Z",
+                    "2025-05-21_13-20-00_Run08.iqrun",
+                    RunStatus::Completed,
+                    1.0,
+                    180,
+                ),
+                preview_run(
+                    7,
+                    "2025-05-21T12:40:00Z",
+                    "2025-05-21_12-40-00_Run07.iqrun",
+                    RunStatus::Completed,
+                    1.0,
+                    176,
+                ),
+                preview_run(
+                    6,
+                    "2025-05-21T12:05:00Z",
+                    "2025-05-21_12-05-00_Run06.iqrun",
+                    RunStatus::Completed,
+                    1.0,
+                    181,
+                ),
+                preview_run(
+                    5,
+                    "2025-05-21T11:30:00Z",
+                    "2025-05-21_11-30-00_Run05.iqrun",
+                    RunStatus::Failed,
+                    1.0,
+                    74,
+                ),
+                preview_run(
+                    4,
+                    "2025-05-21T11:00:00Z",
+                    "2025-05-21_11-00-00_Run04.iqrun",
+                    RunStatus::Completed,
+                    1.0,
+                    179,
+                ),
+            ];
             app.active_run = Some(ProcessingRun {
                 id: preview_id,
                 created_at: chrono::DateTime::parse_from_rfc3339("2025-05-21T14:32:07Z")
@@ -782,7 +880,7 @@ impl GnsscopeApp {
                 total_samples: preview_total_samples,
                 pvt_epoch_count: preview_epochs.len(),
                 message: "Streaming acquisition, tracking and PVT".to_string(),
-                settings: app.settings.clone(),
+                settings: preview_settings,
             });
             app.selected_run_id = Some(preview_id);
             app.live_run_id = Some(preview_id);
@@ -2208,6 +2306,7 @@ impl GnsscopeApp {
                             )
                             .child(
                                 div()
+                                    .w_full()
                                     .flex()
                                     .items_center()
                                     .child(
@@ -2465,10 +2564,11 @@ impl GnsscopeApp {
         let active = self.active_run.as_ref().map(|run| {
             let id = run.id;
             let selected = self.selected_run_id == Some(id);
+            let elapsed = format_timeline_time(processing_run_elapsed_ms(run));
             div()
                 .id(SharedString::from(format!("active-run-{id}")))
                 .px(px(12.))
-                .py(px(9.))
+                .py(px(10.))
                 .cursor_pointer()
                 .bg(if selected {
                     palette.accent.opacity(0.11)
@@ -2519,24 +2619,39 @@ impl GnsscopeApp {
                 )
                 .child(
                     div()
-                        .mt(px(7.))
+                        .mt(px(6.))
                         .flex()
                         .items_center()
-                        .gap(px(8.))
+                        .gap(px(7.))
+                        .child(
+                            div()
+                                .w(px(48.))
+                                .flex_shrink_0()
+                                .text_size(px(9.))
+                                .text_color(palette.healthy)
+                                .child(self.localized("处理中", "Running")),
+                        )
                         .child(
                             div().flex_1().child(
                                 Progress::new()
-                                    .h(px(3.))
+                                    .h(px(4.))
                                     .bg(palette.accent)
                                     .value((run.progress * 100.0) as f32),
                             ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(9.))
-                                .text_color(palette.muted)
-                                .child(self.localized("处理中", "Running")),
                         ),
+                )
+                .child(
+                    div()
+                        .mt(px(5.))
+                        .ml(px(13.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .font_family(data_font_family())
+                        .text_size(px(8.5))
+                        .text_color(palette.muted)
+                        .child(run.created_at.format("%H:%M:%S").to_string())
+                        .child(format!("{elapsed} elapsed")),
                 )
         });
 
@@ -2747,9 +2862,10 @@ impl GnsscopeApp {
                                     }
                                     _ => (self.localized("处理中", "Processing"), palette.accent),
                                 };
+                                let elapsed = format_timeline_time(processing_run_elapsed_ms(run));
                                 div()
                                     .id(SharedString::from(format!("dock-run-{id}")))
-                                    .min_h(px(48.))
+                                    .min_h(px(64.))
                                     .px(px(12.))
                                     .py(px(7.))
                                     .cursor_pointer()
@@ -2804,21 +2920,35 @@ impl GnsscopeApp {
                                     )
                                     .child(
                                         div()
-                                            .mt(px(3.))
+                                            .mt(px(5.))
                                             .ml(px(13.))
                                             .flex()
                                             .items_center()
+                                            .gap(px(7.))
                                             .child(
                                                 div()
-                                                    .flex_1()
+                                                    .w(px(50.))
+                                                    .flex_shrink_0()
                                                     .text_size(px(8.))
+                                                    .text_color(status_color)
+                                                    .child(status),
+                                            )
+                                            .child(
+                                                div().flex_1().child(
+                                                    Progress::new()
+                                                        .h(px(3.))
+                                                        .bg(status_color)
+                                                        .value((run.progress * 100.0) as f32),
+                                                ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .w(px(30.))
+                                                    .text_right()
                                                     .font_family(data_font_family())
-                                                    .text_color(palette.muted)
-                                                    .child(format!(
-                                                        "{} epochs · {:.0}%",
-                                                        run.pvt_epoch_count,
-                                                        run.progress * 100.0
-                                                    )),
+                                                    .text_size(px(8.))
+                                                    .text_color(status_color)
+                                                    .child(format!("{:.0}%", run.progress * 100.0)),
                                             )
                                             .children(selected.then(|| {
                                                 div()
@@ -2859,6 +2989,26 @@ impl GnsscopeApp {
                                                         )),
                                                     )
                                             })),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt(px(4.))
+                                            .ml(px(13.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .font_family(data_font_family())
+                                            .text_size(px(8.))
+                                            .text_color(palette.muted)
+                                            .child(
+                                                run.created_at
+                                                    .format("%Y-%m-%d  %H:%M:%S")
+                                                    .to_string(),
+                                            )
+                                            .child(format!(
+                                                "{elapsed} · {} epochs",
+                                                run.pvt_epoch_count
+                                            )),
                                     )
                             }),
                     ),
@@ -4975,7 +5125,12 @@ impl GnsscopeApp {
             }))
     }
 
-    fn render_workspace_tabs(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_workspace_tabs(
+        &self,
+        palette: Palette,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let selected_run = self.selected_run();
         let selected_is_active = self.selected_run_id.is_some()
             && self.selected_run_id == self.active_run.as_ref().map(|run| run.id);
@@ -5038,32 +5193,37 @@ impl GnsscopeApp {
                             .min_w_0()
                             .child(
                                 div()
+                                    .w_full()
                                     .flex()
                                     .items_center()
                                     .gap(px(8.))
                                     .child(
                                         div()
+                                            .flex_1()
                                             .min_w_0()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .text_size(px(20.))
+                                            .when(compact, |this| {
+                                                this.h(px(20.)).overflow_hidden().text_size(px(14.))
+                                            })
+                                            .when(!compact, |this| this.text_size(px(20.)))
                                             .font_family(data_font_family())
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .text_color(palette.text)
                                             .child(self.file_label()),
                                     )
                                     .child(div().size(px(6.)).rounded_full().bg(status_color))
-                                    .child(
+                                    .children((!compact).then(|| {
                                         div()
                                             .text_size(px(10.))
                                             .font_family(data_font_family())
                                             .text_color(status_color)
-                                            .child(status_text),
-                                    ),
+                                            .child(status_text)
+                                    })),
                             )
                             .child(
                                 div()
                                     .mt(px(5.))
+                                    .h(px(14.))
+                                    .overflow_hidden()
                                     .text_size(px(10.))
                                     .font_family(data_font_family())
                                     .text_color(palette.muted)
@@ -5094,7 +5254,10 @@ impl GnsscopeApp {
                             .border_color(palette.border)
                             .text_color(palette.muted)
                             .icon(IconName::Inbox)
-                            .label(self.localized("事件日志", "Event log"))
+                            .when(!compact, |this| {
+                                this.label(self.localized("事件日志", "Event log"))
+                            })
+                            .tooltip(self.localized("事件日志", "Event log"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.workspace_view = WorkspaceView::Navigation;
                                 this.focused_plot = None;
@@ -5113,7 +5276,10 @@ impl GnsscopeApp {
                                 palette.muted
                             })
                             .icon(IconName::Settings2)
-                            .label(self.localized("运行配置", "Run configuration"))
+                            .when(!compact, |this| {
+                                this.label(self.localized("运行配置", "Run configuration"))
+                            })
+                            .tooltip(self.localized("运行配置", "Run configuration"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.run_configuration_visible = !this.run_configuration_visible;
                                 cx.notify();
@@ -5328,6 +5494,20 @@ impl GnsscopeApp {
         let dops = valid_pvt
             .map(|p| format!("{:.2} / {:.2}", p.quality.gdop, p.quality.hdop))
             .unwrap_or_else(|| "--".to_string());
+        let fix_type = pvt
+            .map(|p| format!("{:?}", p.solution_kind))
+            .unwrap_or_else(|| "--".to_string());
+        let satellites_used = valid_pvt
+            .map(|p| format!("{} / {}", p.quality.used_prns.len(), p.satellites.len()))
+            .unwrap_or_else(|| "--".to_string());
+        let residual_quality = valid_pvt
+            .map(|p| {
+                format!(
+                    "{:.2} / {:.2}",
+                    p.quality.residual_rms_m, p.quality.horizontal_sigma_m
+                )
+            })
+            .unwrap_or_else(|| "--".to_string());
         div()
             .bg(palette.surface)
             .border_1()
@@ -5463,6 +5643,27 @@ impl GnsscopeApp {
                 "GDOP / HDOP",
                 dops,
                 "- / -",
+                valid_pvt.is_some(),
+                palette,
+            ))
+            .child(pvt_table_row(
+                self.localized("定位类型", "Fix type"),
+                fix_type,
+                "-",
+                valid_pvt.is_some(),
+                palette,
+            ))
+            .child(pvt_table_row(
+                self.localized("使用 / 可见卫星", "SV used / visible"),
+                satellites_used,
+                "SV",
+                valid_pvt.is_some(),
+                palette,
+            ))
+            .child(pvt_table_row(
+                self.localized("残差 RMS / 水平 σ", "Residual RMS / H σ"),
+                residual_quality,
+                "m / m",
                 valid_pvt.is_some(),
                 palette,
             ))
@@ -6641,8 +6842,18 @@ impl GnsscopeApp {
     fn render_timeline_bar(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let epochs = self.display_epochs();
         let events = self.display_diagnostic_events();
-        let max_event_ms = events.last().map(|event| event.now_ms).unwrap_or(1).max(1);
         let epoch_count = epochs.len();
+        let epoch_period_ms = self
+            .selected_run()
+            .map(|run| run.settings.pvt_output_rate_ms)
+            .unwrap_or(self.settings.pvt_output_rate_ms);
+        let epoch_duration_ms = epoch_count.saturating_sub(1) as u64 * epoch_period_ms;
+        let timeline_duration_ms = events
+            .last()
+            .map(|event| event.now_ms)
+            .unwrap_or(0)
+            .max(epoch_duration_ms)
+            .max(1);
         let epoch_number = self.selected_epoch.map(|index| index + 1).unwrap_or(0);
         let global_cursor = self
             .selected_epoch
@@ -6659,7 +6870,7 @@ impl GnsscopeApp {
             .take(64)
             .enumerate()
             .filter_map(|(index, event)| {
-                let global_percent = event.now_ms as f32 / max_event_ms as f32;
+                let global_percent = event.now_ms as f32 / timeline_duration_ms as f32;
                 if global_percent < visible_start || global_percent > visible_end {
                     return None;
                 }
@@ -6675,8 +6886,8 @@ impl GnsscopeApp {
                 Some((index, percent, label, marker_color))
             })
             .collect::<Vec<_>>();
-        let visible_start_ms = (max_event_ms as f32 * visible_start) as u64;
-        let visible_duration_ms = (max_event_ms as f32 * visible_span) as u64;
+        let visible_start_ms = (timeline_duration_ms as f32 * visible_start) as u64;
+        let visible_duration_ms = (timeline_duration_ms as f32 * visible_span) as u64;
         let receiver_time = self
             .current_pvt()
             .and_then(|pvt| pvt.time.receiver_time_sow)
@@ -6691,7 +6902,7 @@ impl GnsscopeApp {
             .child(
                 div()
                     .h(px(30.))
-                    .px(px(12.))
+                    .px(px(14.))
                     .flex()
                     .items_center()
                     .border_b_1()
@@ -6699,22 +6910,22 @@ impl GnsscopeApp {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(9.))
+                            .text_size(px(10.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(palette.text)
                             .child(self.localized("选中运行时间线", "Selected run timeline")),
                     )
                     .child(
                         div()
-                            .mr(px(16.))
+                            .mr(px(18.))
                             .text_size(px(8.))
                             .font_family(data_font_family())
                             .text_color(palette.muted)
-                            .child(format!("{receiver_time}  ·  {}×", self.timeline_zoom)),
+                            .child(format!("{receiver_time}  ·  {}× view", self.timeline_zoom)),
                     )
                     .child(
                         div()
-                            .text_size(px(10.))
+                            .text_size(px(11.))
                             .font_family(data_font_family())
                             .text_color(palette.accent)
                             .child(format!("{epoch_number} / {epoch_count}")),
@@ -6728,61 +6939,15 @@ impl GnsscopeApp {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .px(px(12.))
+                            .px(px(14.))
+                            .pt(px(6.))
                             .child(
                                 div()
                                     .relative()
-                                    .h(px(72.))
+                                    .h(px(66.))
+                                    .bg(palette.surface_alt.opacity(0.34))
                                     .border_b_1()
-                                    .border_color(palette.border)
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .left(px(2.))
-                                            .top(px(6.))
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(3.))
-                                            .child(
-                                                Button::new("timeline-zoom-out")
-                                                    .ghost()
-                                                    .rounded(px(2.))
-                                                    .label("−")
-                                                    .tooltip(self.localized(
-                                                        "缩小时间轴",
-                                                        "Zoom timeline out",
-                                                    ))
-                                                    .disabled(self.timeline_zoom == 1)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.adjust_timeline_zoom(false);
-                                                        cx.notify();
-                                                    })),
-                                            )
-                                            .child(
-                                                div()
-                                                    .w(px(30.))
-                                                    .text_center()
-                                                    .font_family(data_font_family())
-                                                    .text_size(px(8.))
-                                                    .text_color(palette.muted)
-                                                    .child(format!("{}×", self.timeline_zoom)),
-                                            )
-                                            .child(
-                                                Button::new("timeline-zoom-in")
-                                                    .ghost()
-                                                    .rounded(px(2.))
-                                                    .label("+")
-                                                    .tooltip(self.localized(
-                                                        "放大时间轴",
-                                                        "Zoom timeline in",
-                                                    ))
-                                                    .disabled(self.timeline_zoom == 4)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.adjust_timeline_zoom(true);
-                                                        cx.notify();
-                                                    })),
-                                            ),
-                                    )
+                                    .border_color(palette.muted.opacity(0.65))
                                     .child(
                                         div()
                                             .absolute()
@@ -6790,7 +6955,16 @@ impl GnsscopeApp {
                                             .top_0()
                                             .bottom_0()
                                             .w(px(1.))
-                                            .bg(palette.accent.opacity(0.85)),
+                                            .bg(palette.accent)
+                                            .child(
+                                                div()
+                                                    .absolute()
+                                                    .top(px(-2.))
+                                                    .left(px(-4.))
+                                                    .text_size(px(9.))
+                                                    .text_color(palette.accent)
+                                                    .child("▼"),
+                                            ),
                                     )
                                     .children((0..=40).map(|tick| {
                                         let major = tick % 5 == 0;
@@ -6801,9 +6975,9 @@ impl GnsscopeApp {
                                             .w(px(1.))
                                             .h(if major { px(10.) } else { px(5.) })
                                             .bg(if major {
-                                                palette.muted.opacity(0.65)
+                                                palette.muted.opacity(0.75)
                                             } else {
-                                                palette.border
+                                                palette.border.opacity(0.8)
                                             })
                                     }))
                                     .children(markers.into_iter().map(
@@ -6815,25 +6989,26 @@ impl GnsscopeApp {
                                                 .absolute()
                                                 .left(gpui::relative(percent))
                                                 .bottom(px(0.))
-                                                .ml(px(-10.))
-                                                .w(px(20.))
-                                                .h(px(46.))
+                                                .ml(px(-16.))
+                                                .w(px(32.))
+                                                .h(px(48.))
                                                 .flex()
                                                 .flex_col()
                                                 .items_center()
                                                 .justify_end()
-                                                .text_size(px(6.))
+                                                .text_size(px(7.))
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
                                                 .font_family(data_font_family())
                                                 .text_color(color)
                                                 .child(label)
                                                 .child(
                                                     div()
                                                         .mt(px(3.))
-                                                        .size(px(5.))
+                                                        .size(px(6.))
                                                         .rounded_full()
                                                         .bg(color),
                                                 )
-                                                .child(div().w(px(1.)).h(px(7.)).bg(color))
+                                                .child(div().w(px(1.)).h(px(9.)).bg(color))
                                         },
                                     )),
                             )
@@ -6844,12 +7019,12 @@ impl GnsscopeApp {
                                     .flex_col()
                                     .child(
                                         div()
-                                            .h(px(16.))
+                                            .h(px(17.))
                                             .flex()
                                             .items_center()
                                             .justify_between()
                                             .font_family(data_font_family())
-                                            .text_size(px(8.))
+                                            .text_size(px(8.5))
                                             .text_color(palette.muted)
                                             .children((0..=5).map(|tick| {
                                                 let time_ms = visible_start_ms
@@ -6858,9 +7033,9 @@ impl GnsscopeApp {
                                             })),
                                     )
                                     .child(
-                                        div().h(px(22.)).child(
+                                        div().h(px(21.)).child(
                                             Slider::new(&self.timeline)
-                                                .bg(palette.border)
+                                                .bg(palette.muted.opacity(0.55))
                                                 .text_color(palette.accent)
                                                 .disabled(epoch_count < 2),
                                         ),
@@ -6869,16 +7044,16 @@ impl GnsscopeApp {
                     )
                     .child(
                         div()
-                            .w(px(196.))
+                            .w(px(204.))
                             .h_full()
                             .flex_shrink_0()
                             .border_l_1()
                             .border_color(palette.border)
-                            .px(px(10.))
-                            .py(px(8.))
+                            .px(px(9.))
+                            .py(px(7.))
                             .child(
                                 div()
-                                    .h(px(30.))
+                                    .h(px(32.))
                                     .flex()
                                     .items_center()
                                     .justify_between()
@@ -6939,46 +7114,96 @@ impl GnsscopeApp {
                                                 this.jump_selected_epoch(last, window, cx);
                                                 cx.notify();
                                             })),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(44.))
-                                            .font_family(data_font_family())
-                                            .text_size(px(8.))
-                                            .text_right()
-                                            .text_color(palette.text)
-                                            .child(format!("{epoch_number:04}")),
                                     ),
                             )
                             .child(
-                                Button::new("epoch-follow-live")
-                                    .mt(px(4.))
-                                    .w_full()
-                                    .ghost()
-                                    .rounded(px(2.))
-                                    .border_1()
-                                    .border_color(if self.follow_live {
-                                        palette.accent
-                                    } else {
-                                        palette.border
-                                    })
-                                    .text_color(if self.follow_live {
-                                        palette.accent
-                                    } else {
-                                        palette.muted
-                                    })
-                                    .bg(if self.follow_live {
-                                        palette.accent.opacity(0.08)
-                                    } else {
-                                        palette.surface
-                                    })
-                                    .icon(IconName::Redo2)
-                                    .label(self.localized("跟随实时", "Follow live"))
-                                    .disabled(self.live_run_id.is_none())
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.return_to_live(window, cx);
-                                        cx.notify();
-                                    })),
+                                div()
+                                    .mt(px(5.))
+                                    .h(px(31.))
+                                    .flex()
+                                    .gap(px(5.))
+                                    .child(
+                                        div()
+                                            .w(px(82.))
+                                            .h_full()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .rounded(px(2.))
+                                            .border_1()
+                                            .border_color(palette.border)
+                                            .child(
+                                                Button::new("timeline-zoom-out")
+                                                    .h_full()
+                                                    .ghost()
+                                                    .rounded(px(0.))
+                                                    .label("−")
+                                                    .tooltip(self.localized(
+                                                        "缩小时间轴",
+                                                        "Zoom timeline out",
+                                                    ))
+                                                    .disabled(self.timeline_zoom == 1)
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.adjust_timeline_zoom(false);
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .child(
+                                                div()
+                                                    .w(px(28.))
+                                                    .text_center()
+                                                    .font_family(data_font_family())
+                                                    .text_size(px(8.))
+                                                    .text_color(palette.text)
+                                                    .child(format!("{}×", self.timeline_zoom)),
+                                            )
+                                            .child(
+                                                Button::new("timeline-zoom-in")
+                                                    .h_full()
+                                                    .ghost()
+                                                    .rounded(px(0.))
+                                                    .label("+")
+                                                    .tooltip(self.localized(
+                                                        "放大时间轴",
+                                                        "Zoom timeline in",
+                                                    ))
+                                                    .disabled(self.timeline_zoom == 4)
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.adjust_timeline_zoom(true);
+                                                        cx.notify();
+                                                    })),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("epoch-follow-live")
+                                            .h_full()
+                                            .flex_1()
+                                            .ghost()
+                                            .rounded(px(2.))
+                                            .border_1()
+                                            .border_color(if self.follow_live {
+                                                palette.accent
+                                            } else {
+                                                palette.border
+                                            })
+                                            .text_color(if self.follow_live {
+                                                palette.accent
+                                            } else {
+                                                palette.muted
+                                            })
+                                            .bg(if self.follow_live {
+                                                palette.accent.opacity(0.08)
+                                            } else {
+                                                palette.surface
+                                            })
+                                            .icon(IconName::Redo2)
+                                            .label(self.localized("跟随", "Follow"))
+                                            .disabled(self.live_run_id.is_none())
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.return_to_live(window, cx);
+                                                cx.notify();
+                                            })),
+                                    ),
                             ),
                     ),
             )
@@ -7109,6 +7334,9 @@ impl GnsscopeApp {
         let expanded = matches!(layout, PlotPanelLayout::Expanded);
         div()
             .min_h(if expanded { px(620.) } else { px(310.) })
+            .h_full()
+            .flex()
+            .flex_col()
             .rounded(px(0.))
             .bg(palette.surface)
             .border_1()
@@ -7143,7 +7371,8 @@ impl GnsscopeApp {
             .child(
                 div()
                     .mt(px(8.))
-                    .h(if expanded { px(554.) } else { px(264.) })
+                    .flex_1()
+                    .min_h(if expanded { px(554.) } else { px(264.) })
                     .child(plot),
             )
     }
@@ -7199,74 +7428,78 @@ impl Render for GnsscopeApp {
                         AppPage::InterfaceSettings => self
                             .render_interface_settings(palette, cx)
                             .into_any_element(),
-                        AppPage::Workspace => div()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .min_h_0()
-                                    .flex()
-                                    .children(show_workspace.then(|| {
-                                        if workspace_empty {
-                                            self.render_workspace_empty(palette, cx)
-                                        } else {
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .min_h_0()
-                                                .h_full()
-                                                .flex()
-                                                .flex_col()
-                                                .child(self.render_workspace_tabs(palette, cx))
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_h_0()
-                                                        .overflow_y_scrollbar()
-                                                        .child(self.render_overview(
-                                                            palette,
-                                                            compact,
-                                                            viewport_height,
-                                                            cx,
-                                                        )),
+                        AppPage::Workspace => {
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .min_h_0()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .min_h_0()
+                                        .flex()
+                                        .children(show_workspace.then(|| {
+                                            if workspace_empty {
+                                                self.render_workspace_empty(palette, cx)
+                                            } else {
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .min_h_0()
+                                                    .h_full()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .child(self.render_workspace_tabs(
+                                                        palette, compact, cx,
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_h_0()
+                                                            .overflow_y_scrollbar()
+                                                            .child(self.render_overview(
+                                                                palette,
+                                                                compact,
+                                                                viewport_height,
+                                                                cx,
+                                                            )),
+                                                    )
+                                                    .into_any_element()
+                                            }
+                                        }))
+                                        .children(match self.side_drawer {
+                                            Some(SideDrawer::Settings) => Some(
+                                                self.render_config_drawer(
+                                                    palette,
+                                                    compact,
+                                                    compact_drawer,
+                                                    cx,
                                                 )
-                                                .into_any_element()
-                                        }
-                                    }))
-                                    .children(match self.side_drawer {
-                                        Some(SideDrawer::Settings) => Some(
-                                            self.render_config_drawer(
-                                                palette,
-                                                compact,
-                                                compact_drawer,
-                                                cx,
-                                            )
-                                            .into_any_element(),
-                                        ),
-                                        Some(SideDrawer::CandidateComparison) => Some(
-                                            self.render_candidate_drawer(
-                                                palette,
-                                                compact,
-                                                compact_drawer,
-                                                cx,
-                                            )
-                                            .into_any_element(),
-                                        ),
-                                        None => show_run_configuration.then(|| {
-                                            self.render_run_configuration_rail(palette, cx)
+                                                .into_any_element(),
+                                            ),
+                                            Some(SideDrawer::CandidateComparison) => Some(
+                                                self.render_candidate_drawer(
+                                                    palette,
+                                                    compact,
+                                                    compact_drawer,
+                                                    cx,
+                                                )
+                                                .into_any_element(),
+                                            ),
+                                            None => show_run_configuration.then(|| {
+                                                self.render_run_configuration_rail(palette, cx)
+                                            }),
                                         }),
-                                    }),
-                            )
-                            .children(
-                                (self.timeline_visible && !workspace_empty)
-                                    .then(|| self.render_timeline_bar(palette, cx)),
-                            )
-                            .into_any_element(),
+                                )
+                                .children(
+                                    (self.timeline_visible && !workspace_empty)
+                                        .then(|| self.render_timeline_bar(palette, cx)),
+                                )
+                                .into_any_element()
+                        }
                     }),
             )
             .child(self.render_status_bar(palette, cx))
@@ -7305,6 +7538,13 @@ fn format_timeline_time(milliseconds: u64) -> String {
     let minutes = (seconds % 3_600) / 60;
     let seconds = seconds % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn processing_run_elapsed_ms(run: &ProcessingRun) -> u64 {
+    if !run.settings.sample_rate_hz.is_finite() || run.settings.sample_rate_hz <= 0.0 {
+        return 0;
+    }
+    ((run.processed_samples as f64 / run.settings.sample_rate_hz) * 1_000.0) as u64
 }
 
 fn format_timeline_offset(milliseconds: u64) -> String {
@@ -7560,14 +7800,39 @@ fn event_kind_color(event: &GuiDiagnosticEvent, palette: Palette) -> Hsla {
 
 fn preview_epoch_history() -> (Vec<GuiPvtViewModel>, Vec<Vec<GuiChannelStatus>>) {
     let base_epoch = crate::sample_pvt_view_model();
-    let base_channels = crate::state::sample_channel_statuses();
-    let epochs = (0..180)
+    let mut base_channels = crate::state::sample_channel_statuses();
+    let template = base_channels
+        .first()
+        .cloned()
+        .expect("sample preview must provide at least one channel");
+    base_channels.extend(
+        [
+            (3, 42.6, -1_253.7, Some(0.024)),
+            (8, 44.8, 2_180.0, Some(-0.031)),
+            (22, 39.5, -3_420.0, Some(0.087)),
+        ]
+        .into_iter()
+        .map(
+            |(prn, cn0_db_hz, doppler_hz, residual_m)| GuiChannelStatus {
+                prn,
+                cn0_db_hz,
+                doppler_hz,
+                residual_m,
+                ..template.clone()
+            },
+        ),
+    );
+    let epoch_count = 769;
+    let latitude_scale_m = 111_111.0;
+    let longitude_scale_m = latitude_scale_m * base_epoch.latitude_deg.to_radians().cos();
+    let epochs = (0..epoch_count)
         .map(|index| {
             let phase = index as f64 * 0.055;
+            let (east_m, north_m) = preview_enu_position(index, epoch_count);
             let mut epoch = base_epoch.clone();
             epoch.epoch_index = index;
-            epoch.latitude_deg += phase.sin() * 0.000_012;
-            epoch.longitude_deg += (phase * 0.7).cos() * 0.000_018;
+            epoch.latitude_deg += north_m / latitude_scale_m;
+            epoch.longitude_deg += east_m / longitude_scale_m;
             epoch.altitude_m += (phase * 0.45).sin() * 1.8;
             if let Some(velocity) = &mut epoch.velocity {
                 velocity.speed_mps = 2.6 + (phase * 0.8).sin() * 0.25;
@@ -7602,7 +7867,9 @@ fn preview_epoch_history() -> (Vec<GuiPvtViewModel>, Vec<Vec<GuiChannelStatus>>)
                 .cloned()
                 .map(|mut channel| {
                     let phase = index as f64 * 0.075 + channel.prn as f64 * 0.43;
-                    channel.cn0_db_hz += phase.sin() * 1.8 + (phase * 0.31).cos() * 0.7;
+                    let ripple = (index as f64 * 1.73 + channel.prn as f64).sin() * 0.35
+                        + (index as f64 * 2.47 + channel.prn as f64 * 0.31).cos() * 0.22;
+                    channel.cn0_db_hz += phase.sin() * 0.75 + (phase * 0.31).cos() * 0.35 + ripple;
                     channel.doppler_hz += (phase * 0.2).sin() * 18.0;
                     channel
                 })
@@ -7610,6 +7877,42 @@ fn preview_epoch_history() -> (Vec<GuiPvtViewModel>, Vec<Vec<GuiChannelStatus>>)
         })
         .collect::<Vec<_>>();
     (epochs, channels)
+}
+
+fn preview_enu_position(index: usize, count: usize) -> (f64, f64) {
+    const CONTROL_POINTS: [(f64, f64); 8] = [
+        (0.0, 0.0),
+        (-42.0, -14.0),
+        (-20.0, -24.0),
+        (-14.0, 12.0),
+        (42.0, 6.0),
+        (24.0, 0.0),
+        (17.0, -15.0),
+        (20.0, 1.0),
+    ];
+    if count <= 1 {
+        return CONTROL_POINTS[0];
+    }
+    let scaled =
+        index.min(count - 1) as f64 / (count - 1) as f64 * (CONTROL_POINTS.len() - 1) as f64;
+    let segment = (scaled.floor() as usize).min(CONTROL_POINTS.len() - 2);
+    let t = scaled - segment as f64;
+    let p0 = CONTROL_POINTS[segment.saturating_sub(1)];
+    let p1 = CONTROL_POINTS[segment];
+    let p2 = CONTROL_POINTS[segment + 1];
+    let p3 = CONTROL_POINTS[(segment + 2).min(CONTROL_POINTS.len() - 1)];
+    let interpolate = |a: f64, b: f64, c: f64, d: f64| {
+        let t2 = t * t;
+        let t3 = t2 * t;
+        0.5 * ((2.0 * b)
+            + (-a + c) * t
+            + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
+            + (-a + 3.0 * b - 3.0 * c + d) * t3)
+    };
+    (
+        interpolate(p0.0, p1.0, p2.0, p3.0),
+        interpolate(p0.1, p1.1, p2.1, p3.1),
+    )
 }
 
 fn preview_diagnostic_events() -> Vec<GuiDiagnosticEvent> {
@@ -7621,25 +7924,49 @@ fn preview_diagnostic_events() -> Vec<GuiDiagnosticEvent> {
             "Doppler +7000 Hz · metric 4.82",
         ),
         (
-            6_200,
+            95_000,
+            Some(17),
+            GuiDiagnosticEventKind::Acquisition,
+            "Doppler -2200 Hz · metric 4.46",
+        ),
+        (
+            182_000,
+            Some(32),
+            GuiDiagnosticEventKind::Acquisition,
+            "Doppler +3100 Hz · metric 4.19",
+        ),
+        (
+            260_000,
+            Some(1),
+            GuiDiagnosticEventKind::ChannelState,
+            "PullIn -> TrackingLocked",
+        ),
+        (
+            370_000,
+            Some(11),
+            GuiDiagnosticEventKind::ChannelState,
+            "PullIn -> TrackingLocked",
+        ),
+        (
+            510_000,
             Some(1),
             GuiDiagnosticEventKind::Navigation,
             "Subframe synchronization established",
         ),
         (
-            8_300,
-            Some(11),
-            GuiDiagnosticEventKind::ChannelState,
-            "TrackingLocked -> Lost",
+            548_000,
+            Some(20),
+            GuiDiagnosticEventKind::Navigation,
+            "Ephemeris decoded",
         ),
         (
-            9_300,
+            680_000,
             Some(11),
             GuiDiagnosticEventKind::Reacquisition,
             "Doppler +5400 Hz · metric 4.31",
         ),
         (
-            10_300,
+            742_000,
             Some(24),
             GuiDiagnosticEventKind::AcquisitionFailed,
             "Peak metric 1.72 below threshold",
@@ -7893,12 +8220,12 @@ fn sky_plot(
         .flex()
         .justify_start()
         .items_center()
-        .pl(px(16.))
+        .pl(px(12.))
         .child(
             div()
                 .relative()
-                .w(px(224.))
-                .h(px(224.))
+                .w(px(260.))
+                .h(px(260.))
                 .child(
                     canvas(
                         move |_, _, _| {},
@@ -7922,30 +8249,43 @@ fn sky_plot(
                                 window.paint_quad(quad(
                                     ring,
                                     ring_diameter / 2.,
-                                    palette.surface_alt,
+                                    palette.surface,
                                     px(1.),
-                                    palette.border,
+                                    if ratio == 1.0 {
+                                        palette.muted.opacity(0.9)
+                                    } else {
+                                        palette.border.opacity(0.72)
+                                    },
                                     Default::default(),
                                 ));
                             }
                             let center_x = origin.x + diameter / 2.;
                             let center_y = origin.y + diameter / 2.;
-                            window.paint_quad(quad(
-                                bounds(point(center_x - px(0.5), origin.y), size(px(1.), diameter)),
-                                px(0.),
-                                palette.border,
-                                px(0.),
-                                palette.border,
-                                Default::default(),
-                            ));
-                            window.paint_quad(quad(
-                                bounds(point(origin.x, center_y - px(0.5)), size(diameter, px(1.))),
-                                px(0.),
-                                palette.border,
-                                px(0.),
-                                palette.border,
-                                Default::default(),
-                            ));
+                            let radius = diameter / 2.;
+                            for spoke in 0..8 {
+                                let angle = spoke as f32 * std::f32::consts::FRAC_PI_4;
+                                let end = point(
+                                    center_x + radius * angle.sin(),
+                                    center_y - radius * angle.cos(),
+                                );
+                                let mut builder = PathBuilder::stroke(px(if spoke % 2 == 0 {
+                                    1.0
+                                } else {
+                                    0.75
+                                }));
+                                builder.move_to(point(center_x, center_y));
+                                builder.line_to(end);
+                                if let Ok(path) = builder.build() {
+                                    window.paint_path(
+                                        path,
+                                        palette.border.opacity(if spoke % 2 == 0 {
+                                            0.82
+                                        } else {
+                                            0.5
+                                        }),
+                                    );
+                                }
+                            }
                         },
                     )
                     .size_full(),
@@ -7958,28 +8298,13 @@ fn sky_plot(
                         .absolute()
                         .left(gpui::relative(marker.x))
                         .top(gpui::relative(marker.y))
-                        .ml(px(-8.))
-                        .mt(px(-8.))
-                        .w(if active { px(18.) } else { px(16.) })
-                        .h(if active { px(18.) } else { px(16.) })
-                        .rounded(if active { px(9.) } else { px(8.) })
-                        .bg(if active {
-                            palette.accent
-                        } else {
-                            palette.surface
-                        })
-                        .border_1()
-                        .border_color(if active { palette.accent } else { marker.color })
+                        .ml(px(-19.))
+                        .mt(px(-14.))
+                        .w(px(38.))
+                        .h(px(28.))
                         .flex()
-                        .items_center()
+                        .items_start()
                         .justify_center()
-                        .text_size(px(8.5))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(if active {
-                            palette.background
-                        } else {
-                            palette.text
-                        })
                         .cursor_pointer()
                         .on_hover(cx.listener(move |this, hovered, _, cx| {
                             if *hovered {
@@ -7993,7 +8318,30 @@ fn sky_plot(
                             this.pinned_prn = (this.pinned_prn != Some(prn)).then_some(prn);
                             cx.notify();
                         }))
-                        .child(format!("{:02}", marker.prn))
+                        .child(
+                            div()
+                                .mt(px(9.))
+                                .size(if active { px(10.) } else { px(8.) })
+                                .rounded_full()
+                                .bg(marker.color)
+                                .border_1()
+                                .border_color(if active {
+                                    palette.text
+                                } else {
+                                    marker.color.opacity(0.6)
+                                }),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(18.))
+                                .w_full()
+                                .text_center()
+                                .text_size(px(9.))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(if active { palette.accent } else { palette.text })
+                                .child(format!("G{:02}", marker.prn)),
+                        )
                 }))
                 .child(cardinal_label("N", 0.5, 0.0, palette))
                 .child(cardinal_label("E", 1.0, 0.5, palette))
@@ -8008,9 +8356,9 @@ fn sky_plot(
         .child(
             div()
                 .absolute()
-                .right(px(4.))
-                .top(px(8.))
-                .w(px(82.))
+                .right(px(8.))
+                .top(px(18.))
+                .w(px(94.))
                 .text_size(px(9.))
                 .text_color(palette.muted)
                 .child(
@@ -8022,7 +8370,9 @@ fn sky_plot(
                 .child(sky_legend_row("75–90", palette.chart_series[0], palette))
                 .child(sky_legend_row("60–75", palette.chart_series[5], palette))
                 .child(sky_legend_row("45–60", palette.chart_series[1], palette))
-                .child(sky_legend_row("30–45", palette.muted, palette))
+                .child(sky_legend_row("30–45", palette.chart_series[3], palette))
+                .child(sky_legend_row("15–30", palette.muted, palette))
+                .child(sky_legend_row("0–15", palette.border, palette))
                 .child(
                     div()
                         .mt(px(8.))
@@ -8056,7 +8406,7 @@ fn sky_plot(
         }))
 }
 
-const SKY_PLOT_RADIUS_FRACTION: f32 = 0.43;
+const SKY_PLOT_RADIUS_FRACTION: f32 = 0.48;
 const SKY_PLOT_DIAMETER_FRACTION: f32 = SKY_PLOT_RADIUS_FRACTION * 2.0;
 
 fn sky_plot_position(azimuth_deg: f64, elevation_deg: f64) -> Option<(f32, f32)> {
@@ -8086,7 +8436,7 @@ fn cardinal_label(label: &'static str, x: f32, y: f32, palette: Palette) -> impl
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(10.))
+        .text_size(px(11.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(palette.muted)
         .child(label)
@@ -8106,11 +8456,11 @@ fn sky_elevation_label(label: &'static str, y: f32, palette: Palette) -> impl In
 
 fn sky_legend_row(label: &'static str, swatch: Hsla, palette: Palette) -> impl IntoElement {
     div()
-        .h(px(15.))
+        .h(px(17.))
         .flex()
         .items_center()
         .gap(px(6.))
-        .child(div().size(px(6.)).rounded_full().bg(swatch))
+        .child(div().size(px(8.)).rounded_full().bg(swatch))
         .child(
             div()
                 .font_family(data_font_family())
@@ -8327,7 +8677,11 @@ fn cn0_plot(
                     }
                 },
             )
-            .size_full(),
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom(px(12.)),
         )
         .children(series.into_iter().enumerate().map(|(row, item)| {
             let prn = item.prn;
@@ -8457,13 +8811,26 @@ fn position_plot(
         .filter(|extent| extent.is_finite())
         .collect::<Vec<_>>();
     extents.sort_by(f64::total_cmp);
-    let extent = extents
+    let raw_extent = extents
         .get(((extents.len().saturating_sub(1)) as f64 * 0.95).round() as usize)
         .copied()
         .unwrap_or(1.0)
         .max(1.0);
-    let extent_label = format!("{extent:.0}");
-    let negative_extent_label = format!("−{extent:.0}");
+    let extent = nice_enu_extent(raw_extent);
+    let y_ticks = [
+        (0.055_f32, extent),
+        (0.275, extent / 2.0),
+        (0.5, 0.0),
+        (0.725, -extent / 2.0),
+        (0.91, -extent),
+    ];
+    let x_ticks = [
+        (0.10_f32, -extent),
+        (0.30, -extent / 2.0),
+        (0.50, 0.0),
+        (0.70, extent / 2.0),
+        (0.90, extent),
+    ];
     div()
         .size_full()
         .relative()
@@ -8471,67 +8838,68 @@ fn position_plot(
             canvas(
                 move |_, _, _| {},
                 move |plot_bounds, _, window, _| {
-                    let center = point(
-                        plot_bounds.origin.x + plot_bounds.size.width / 2.,
-                        plot_bounds.origin.y + plot_bounds.size.height / 2.,
-                    );
-                    for ratio in [0.25_f32, 0.5, 0.75] {
-                        let x = plot_bounds.origin.x + plot_bounds.size.width * ratio;
-                        let y = plot_bounds.origin.y + plot_bounds.size.height * ratio;
+                    let plot_left = plot_bounds.origin.x + px(38.);
+                    let plot_right = plot_bounds.origin.x + plot_bounds.size.width - px(12.);
+                    let plot_top = plot_bounds.origin.y + px(10.);
+                    let plot_bottom = plot_bounds.origin.y + plot_bounds.size.height - px(30.);
+                    let plot_width = (plot_right - plot_left).max(px(1.));
+                    let plot_height = (plot_bottom - plot_top).max(px(1.));
+                    let center = point(plot_left + plot_width / 2., plot_top + plot_height / 2.);
+                    for grid_index in 0..=8 {
+                        if grid_index == 4 {
+                            continue;
+                        }
+                        let x = plot_left + plot_width * (grid_index as f32 / 8.0);
                         window.paint_quad(quad(
-                            bounds(
-                                point(x, plot_bounds.origin.y),
-                                size(px(1.), plot_bounds.size.height),
-                            ),
+                            bounds(point(x, plot_top), size(px(1.), plot_height)),
                             px(0.),
-                            palette
-                                .border
-                                .opacity(if ratio == 0.5 { 1.0 } else { 0.55 }),
-                            px(0.),
-                            palette.border,
-                            Default::default(),
-                        ));
-                        window.paint_quad(quad(
-                            bounds(
-                                point(plot_bounds.origin.x, y),
-                                size(plot_bounds.size.width, px(1.)),
-                            ),
-                            px(0.),
-                            palette
-                                .border
-                                .opacity(if ratio == 0.5 { 1.0 } else { 0.55 }),
+                            palette.border.opacity(0.58),
                             px(0.),
                             palette.border,
                             Default::default(),
                         ));
                     }
-                    window.paint_quad(quad(
-                        bounds(
-                            point(center.x, plot_bounds.origin.y),
-                            size(px(1.), plot_bounds.size.height),
-                        ),
-                        px(0.),
-                        palette.border,
-                        px(0.),
-                        palette.border,
-                        Default::default(),
-                    ));
-                    window.paint_quad(quad(
-                        bounds(
-                            point(plot_bounds.origin.x, center.y),
-                            size(plot_bounds.size.width, px(1.)),
-                        ),
-                        px(0.),
-                        palette.border,
-                        px(0.),
-                        palette.border,
-                        Default::default(),
-                    ));
+                    for grid_index in 0..=6 {
+                        if grid_index == 3 {
+                            continue;
+                        }
+                        let y = plot_top + plot_height * (grid_index as f32 / 6.0);
+                        window.paint_quad(quad(
+                            bounds(point(plot_left, y), size(plot_width, px(1.))),
+                            px(0.),
+                            palette.border.opacity(0.58),
+                            px(0.),
+                            palette.border,
+                            Default::default(),
+                        ));
+                    }
+                    for segment in (0..28).step_by(2) {
+                        let y = plot_top + plot_height * (segment as f32 / 28.0);
+                        window.paint_quad(quad(
+                            bounds(point(center.x, y), size(px(1.), plot_height / 28.0)),
+                            px(0.),
+                            palette.muted.opacity(0.95),
+                            px(0.),
+                            palette.muted,
+                            Default::default(),
+                        ));
+                    }
+                    for segment in (0..36).step_by(2) {
+                        let x = plot_left + plot_width * (segment as f32 / 36.0);
+                        window.paint_quad(quad(
+                            bounds(point(x, center.y), size(plot_width / 36.0, px(1.))),
+                            px(0.),
+                            palette.muted.opacity(0.95),
+                            px(0.),
+                            palette.muted,
+                            Default::default(),
+                        ));
+                    }
                     if points.is_empty() {
                         return;
                     }
-                    let half_width = plot_bounds.size.width / 2. - px(8.);
-                    let half_height = plot_bounds.size.height / 2. - px(8.);
+                    let half_width = plot_width / 2.;
+                    let half_height = plot_height / 2.;
                     let visible_points = points
                         .iter()
                         .filter(|(_, east, north)| east.abs() <= extent && north.abs() <= extent)
@@ -8545,7 +8913,7 @@ fn position_plot(
                             )
                         })
                         .collect::<Vec<_>>();
-                    let mut trajectory = PathBuilder::stroke(px(1.6));
+                    let mut trajectory = PathBuilder::stroke(px(2.0));
                     for (point_index, (_, plot_point)) in visible_points.iter().enumerate() {
                         if point_index == 0 {
                             trajectory.move_to(*plot_point);
@@ -8563,7 +8931,7 @@ fn position_plot(
                         let x = center.x + half_width * (*east / extent) as f32;
                         let y = center.y - half_height * (*north / extent) as f32;
                         let selected = Some(*index) == selected_epoch;
-                        let diameter = if selected { px(7.) } else { px(2.) };
+                        let diameter = if selected { px(9.) } else { px(2.5) };
                         window.paint_quad(quad(
                             bounds(
                                 point(x - diameter / 2., y - diameter / 2.),
@@ -8589,38 +8957,72 @@ fn position_plot(
                 .absolute()
                 .inset_0()
                 .font_family(data_font_family())
-                .text_size(px(8.))
+                .text_size(px(8.5))
                 .text_color(palette.muted)
                 .child(
                     div()
                         .absolute()
-                        .left(px(5.))
-                        .top(px(3.))
-                        .child(format!("N  {extent_label} m")),
+                        .left(px(2.))
+                        .top(px(0.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("North (m)"),
                 )
+                .children(y_ticks.into_iter().map(|(position, value)| {
+                    div()
+                        .absolute()
+                        .left(px(4.))
+                        .top(gpui::relative(position))
+                        .mt(px(-5.))
+                        .w(px(29.))
+                        .text_right()
+                        .child(format_enu_tick(value))
+                }))
+                .children(x_ticks.into_iter().map(|(position, value)| {
+                    div()
+                        .absolute()
+                        .left(gpui::relative(position))
+                        .bottom(px(14.))
+                        .ml(px(-14.))
+                        .w(px(28.))
+                        .text_center()
+                        .child(format_enu_tick(value))
+                }))
                 .child(
                     div()
                         .absolute()
-                        .left(px(5.))
-                        .bottom(px(3.))
-                        .child(format!("{negative_extent_label} m")),
-                )
-                .child(
-                    div()
-                        .absolute()
+                        .bottom(px(0.))
                         .left(gpui::relative(0.5))
-                        .bottom(px(3.))
-                        .ml(px(-3.))
-                        .child("0"),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .right(px(5.))
-                        .bottom(px(3.))
-                        .child(format!("E  {extent_label} m")),
+                        .ml(px(-28.))
+                        .w(px(56.))
+                        .text_center()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("East (m)"),
                 )
         }))
+}
+
+fn nice_enu_extent(raw_extent: f64) -> f64 {
+    let raw_extent = raw_extent.max(1.0);
+    let magnitude = 10_f64.powf(raw_extent.log10().floor());
+    let normalized = raw_extent / magnitude;
+    let nice = if normalized <= 1.0 {
+        1.0
+    } else if normalized <= 2.0 {
+        2.0
+    } else if normalized <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    nice * magnitude
+}
+
+fn format_enu_tick(value: f64) -> String {
+    if value.abs() >= 10.0 || value.fract().abs() < f64::EPSILON {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
 }
 
 fn velocity_plot(
@@ -9150,8 +9552,9 @@ mod history_queue_tests {
 mod tests {
     use super::{
         build_cn0_series, epoch_index_for_percent, format_timeline_offset, format_timeline_time,
-        preview_diagnostic_events, preview_epoch_history, toggled_side_drawer, InterfaceLanguage,
-        PlotFocus, SettingsCategory, SideDrawer, ThemePreference, WorkspaceView,
+        nice_enu_extent, preview_diagnostic_events, preview_enu_position, preview_epoch_history,
+        toggled_side_drawer, InterfaceLanguage, PlotFocus, SettingsCategory, SideDrawer,
+        ThemePreference, WorkspaceView,
     };
 
     #[test]
@@ -9169,6 +9572,15 @@ mod tests {
         assert_eq!(format_timeline_time(3_661_000), "01:01:01");
         assert_eq!(format_timeline_offset(179_000), "02:59");
         assert_eq!(format_timeline_offset(3_661_000), "01:01:01");
+    }
+
+    #[test]
+    fn enu_extent_rounds_outward_to_instrument_ticks() {
+        assert_eq!(nice_enu_extent(0.4), 1.0);
+        assert_eq!(nice_enu_extent(1.3), 2.0);
+        assert_eq!(nice_enu_extent(3.1), 5.0);
+        assert_eq!(nice_enu_extent(8.2), 10.0);
+        assert_eq!(nice_enu_extent(42.0), 50.0);
     }
 
     #[test]
@@ -9218,7 +9630,7 @@ mod tests {
     fn visual_preview_uses_bounded_deterministic_diagnostics() {
         let events = preview_diagnostic_events();
 
-        assert_eq!(events.len(), 5);
+        assert_eq!(events.len(), 9);
         assert_eq!(events.first().and_then(|event| event.prn), Some(1));
         assert_eq!(events.last().and_then(|event| event.prn), Some(24));
         assert!(events
@@ -9231,7 +9643,7 @@ mod tests {
         let (epochs, channels) = preview_epoch_history();
         let series = build_cn0_series(&channels, epochs.len().checked_sub(1), Some(20), 8);
 
-        assert_eq!(epochs.len(), 180);
+        assert_eq!(epochs.len(), 769);
         assert_eq!(channels.len(), epochs.len());
         assert_eq!(series.first().map(|series| series.prn), Some(20));
         assert!(series
@@ -9243,6 +9655,18 @@ mod tests {
                 .windows(2)
                 .any(|window| (window[0] - window[1]).abs() > 1e-6)
         }));
+    }
+
+    #[test]
+    fn visual_preview_trajectory_uses_concept_scale_and_selected_endpoint() {
+        let points = (0..180)
+            .map(|index| preview_enu_position(index, 180))
+            .collect::<Vec<_>>();
+
+        assert_eq!(points.first(), Some(&(0.0, 0.0)));
+        assert_eq!(points.last(), Some(&(20.0, 1.0)));
+        assert!(points.iter().any(|(east, _)| *east > 40.0));
+        assert!(points.iter().any(|(_, north)| *north < -20.0));
     }
 
     #[test]
