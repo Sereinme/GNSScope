@@ -1634,7 +1634,9 @@ impl GnsscopeApp {
     fn select_epoch_percent(&mut self, percent: f32) {
         let count = self.display_epochs().len();
         self.selected_epoch = epoch_index_for_percent(count, percent);
-        self.follow_live = false;
+        self.follow_live = percent >= 99.95
+            && self.active_run.is_some()
+            && self.selected_run_id == self.live_run_id;
     }
 
     fn step_selected_epoch(&mut self, delta: i32, window: &mut Window, cx: &mut Context<Self>) {
@@ -1976,6 +1978,7 @@ impl GnsscopeApp {
         };
 
         TitleBar::new()
+            .h(px(40.))
             .bg(palette.background)
             .border_color(palette.border)
             .text_color(palette.text)
@@ -1996,7 +1999,7 @@ impl GnsscopeApp {
                             .flex_shrink_0()
                             .child(
                                 div()
-                                    .size(px(22.))
+                                    .size(px(24.))
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -2005,7 +2008,7 @@ impl GnsscopeApp {
                             )
                             .child(
                                 div()
-                                    .text_size(px(13.))
+                                    .text_size(px(15.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(palette.text)
                                     .child("GNSScope"),
@@ -2591,14 +2594,21 @@ impl GnsscopeApp {
                         .flex()
                         .items_center()
                         .gap(px(7.))
-                        .child(div().size(px(6.)).rounded_full().bg(palette.healthy))
+                        .child(
+                            div()
+                                .w(px(8.))
+                                .flex_shrink_0()
+                                .text_size(px(9.))
+                                .text_color(palette.healthy)
+                                .child("▶"),
+                        )
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .text_size(px(10.))
+                                .text_size(px(11.))
                                 .font_family(data_font_family())
                                 .text_color(palette.text)
                                 .child(
@@ -2611,7 +2621,7 @@ impl GnsscopeApp {
                         )
                         .child(
                             div()
-                                .text_size(px(10.))
+                                .text_size(px(10.5))
                                 .font_family(data_font_family())
                                 .text_color(palette.healthy)
                                 .child(format!("{:.0}%", run.progress * 100.0)),
@@ -2900,7 +2910,7 @@ impl GnsscopeApp {
                                                     .min_w_0()
                                                     .overflow_hidden()
                                                     .text_ellipsis()
-                                                    .text_size(px(9.))
+                                                    .text_size(px(10.))
                                                     .font_family(data_font_family())
                                                     .text_color(palette.text)
                                                     .child(
@@ -2913,7 +2923,7 @@ impl GnsscopeApp {
                                             )
                                             .child(
                                                 div()
-                                                    .text_size(px(8.))
+                                                    .text_size(px(9.))
                                                     .text_color(status_color)
                                                     .child(status),
                                             ),
@@ -6895,13 +6905,13 @@ impl GnsscopeApp {
             .unwrap_or_else(|| "SOW --".to_string());
         div()
             .flex_shrink_0()
-            .h(px(140.))
+            .h(px(154.))
             .bg(palette.surface)
             .border_t_1()
             .border_color(palette.border)
             .child(
                 div()
-                    .h(px(30.))
+                    .h(px(32.))
                     .px(px(14.))
                     .flex()
                     .items_center()
@@ -6910,7 +6920,7 @@ impl GnsscopeApp {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(10.))
+                            .text_size(px(11.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(palette.text)
                             .child(self.localized("选中运行时间线", "Selected run timeline")),
@@ -6933,18 +6943,82 @@ impl GnsscopeApp {
             )
             .child(
                 div()
-                    .h(px(110.))
+                    .h(px(122.))
                     .flex()
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .px(px(14.))
-                            .pt(px(6.))
+                            .pt(px(4.))
+                            .child(
+                                div()
+                                    .h(px(24.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(3.))
+                                    .child(
+                                        Button::new("timeline-tools-zoom-in")
+                                            .h(px(22.))
+                                            .w(px(26.))
+                                            .ghost()
+                                            .rounded(px(2.))
+                                            .border_1()
+                                            .border_color(palette.border)
+                                            .label("+")
+                                            .tooltip(
+                                                self.localized("放大时间轴", "Zoom timeline in"),
+                                            )
+                                            .disabled(self.timeline_zoom == 4)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.adjust_timeline_zoom(true);
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("timeline-tools-zoom-out")
+                                            .h(px(22.))
+                                            .w(px(26.))
+                                            .ghost()
+                                            .rounded(px(2.))
+                                            .border_1()
+                                            .border_color(palette.border)
+                                            .label("−")
+                                            .tooltip(
+                                                self.localized("缩小时间轴", "Zoom timeline out"),
+                                            )
+                                            .disabled(self.timeline_zoom == 1)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.adjust_timeline_zoom(false);
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("timeline-tools-reset-zoom")
+                                            .h(px(22.))
+                                            .w(px(32.))
+                                            .ghost()
+                                            .rounded(px(2.))
+                                            .border_1()
+                                            .border_color(palette.border)
+                                            .label("1×")
+                                            .tooltip(
+                                                self.localized(
+                                                    "重置时间轴缩放",
+                                                    "Reset timeline zoom",
+                                                ),
+                                            )
+                                            .disabled(self.timeline_zoom == 1)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.timeline_zoom = 1;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
                             .child(
                                 div()
                                     .relative()
-                                    .h(px(66.))
+                                    .h(px(60.))
                                     .bg(palette.surface_alt.opacity(0.34))
                                     .border_b_1()
                                     .border_color(palette.muted.opacity(0.65))
@@ -6996,7 +7070,7 @@ impl GnsscopeApp {
                                                 .flex_col()
                                                 .items_center()
                                                 .justify_end()
-                                                .text_size(px(7.))
+                                                .text_size(px(9.))
                                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                                 .font_family(data_font_family())
                                                 .text_color(color)
@@ -7014,17 +7088,17 @@ impl GnsscopeApp {
                             )
                             .child(
                                 div()
-                                    .h(px(38.))
+                                    .h(px(34.))
                                     .flex()
                                     .flex_col()
                                     .child(
                                         div()
-                                            .h(px(17.))
+                                            .h(px(15.))
                                             .flex()
                                             .items_center()
                                             .justify_between()
                                             .font_family(data_font_family())
-                                            .text_size(px(8.5))
+                                            .text_size(px(9.))
                                             .text_color(palette.muted)
                                             .children((0..=5).map(|tick| {
                                                 let time_ms = visible_start_ms
@@ -7033,7 +7107,7 @@ impl GnsscopeApp {
                                             })),
                                     )
                                     .child(
-                                        div().h(px(21.)).child(
+                                        div().h(px(19.)).child(
                                             Slider::new(&self.timeline)
                                                 .bg(palette.muted.opacity(0.55))
                                                 .text_color(palette.accent)
@@ -7825,6 +7899,8 @@ fn preview_epoch_history() -> (Vec<GuiPvtViewModel>, Vec<Vec<GuiChannelStatus>>)
     let epoch_count = 769;
     let latitude_scale_m = 111_111.0;
     let longitude_scale_m = latitude_scale_m * base_epoch.latitude_deg.to_radians().cos();
+    let preview_azimuths = [338.0, 258.0, 112.0, 24.0, 198.0, 78.0, 146.0, 304.0];
+    let preview_elevations = [68.0, 42.0, 31.0, 53.0, 24.0, 61.0, 37.0, 47.0];
     let epochs = (0..epoch_count)
         .map(|index| {
             let phase = index as f64 * 0.055;
@@ -7845,10 +7921,11 @@ fn preview_epoch_history() -> (Vec<GuiPvtViewModel>, Vec<Vec<GuiChannelStatus>>)
                     let satellite_phase = index as f64 * 0.012 + satellite_index as f64 * 1.17;
                     GuiSatelliteGeometry {
                         prn: channel.prn,
-                        azimuth_deg: (channel.prn as f64 * 37.0 + index as f64 * 0.28) % 360.0,
-                        elevation_deg: 18.0
-                            + satellite_index as f64 * 11.0
-                            + satellite_phase.sin() * 4.0,
+                        azimuth_deg: (preview_azimuths[satellite_index]
+                            + index as f64 * (0.06 + satellite_index as f64 * 0.006))
+                            % 360.0,
+                        elevation_deg: preview_elevations[satellite_index]
+                            + satellite_phase.sin() * 3.5,
                         residual_m: channel.residual_m.unwrap_or(0.0),
                         standardized_residual: channel.residual_m.unwrap_or(0.0) / 1.5,
                         pseudorange_sigma_m: 1.2 + satellite_index as f64 * 0.18,
@@ -7867,9 +7944,10 @@ fn preview_epoch_history() -> (Vec<GuiPvtViewModel>, Vec<Vec<GuiChannelStatus>>)
                 .cloned()
                 .map(|mut channel| {
                     let phase = index as f64 * 0.075 + channel.prn as f64 * 0.43;
-                    let ripple = (index as f64 * 1.73 + channel.prn as f64).sin() * 0.35
-                        + (index as f64 * 2.47 + channel.prn as f64 * 0.31).cos() * 0.22;
-                    channel.cn0_db_hz += phase.sin() * 0.75 + (phase * 0.31).cos() * 0.35 + ripple;
+                    let noise = preview_noise(index, channel.prn) * 0.55
+                        + preview_noise(index / 3, channel.prn + 41) * 0.22;
+                    channel.cn0_db_hz +=
+                        (phase * 0.11).sin() * 0.42 + (phase * 0.037).cos() * 0.24 + noise;
                     channel.doppler_hz += (phase * 0.2).sin() * 18.0;
                     channel
                 })
@@ -7877,6 +7955,18 @@ fn preview_epoch_history() -> (Vec<GuiPvtViewModel>, Vec<Vec<GuiChannelStatus>>)
         })
         .collect::<Vec<_>>();
     (epochs, channels)
+}
+
+fn preview_noise(index: usize, salt: u8) -> f64 {
+    let mut value = (index as u64 + 1)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add((salt as u64 + 1).wrapping_mul(0xBF58_476D_1CE4_E5B9));
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^= value >> 31;
+    value as f64 / u64::MAX as f64 * 2.0 - 1.0
 }
 
 fn preview_enu_position(index: usize, count: usize) -> (f64, f64) {
