@@ -1735,9 +1735,10 @@ impl GnsscopeApp {
             )
             .child(
                 div()
+                    .flex_1()
                     .min_w_0()
+                    .h(px(14.))
                     .overflow_hidden()
-                    .text_ellipsis()
                     .text_size(px(10.))
                     .text_color(palette.muted)
                     .child(subtitle),
@@ -5214,7 +5215,7 @@ impl GnsscopeApp {
                                             .when(compact, |this| {
                                                 this.h(px(20.)).overflow_hidden().text_size(px(14.))
                                             })
-                                            .when(!compact, |this| this.text_size(px(20.)))
+                                            .when(!compact, |this| this.text_size(px(22.)))
                                             .font_family(data_font_family())
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .text_color(palette.text)
@@ -5234,7 +5235,7 @@ impl GnsscopeApp {
                                     .mt(px(5.))
                                     .h(px(14.))
                                     .overflow_hidden()
-                                    .text_size(px(10.))
+                                    .text_size(px(11.))
                                     .font_family(data_font_family())
                                     .text_color(palette.muted)
                                     .child(run_metadata),
@@ -5529,10 +5530,16 @@ impl GnsscopeApp {
                     .items_start()
                     .justify_between()
                     .child(Self::section_title(
-                        self.localized("当前 PVT", "Current PVT"),
+                        self.localized("PVT 解算", "PVT solution"),
                         if valid_pvt.is_some() {
-                            pvt.map(|p| format!("{:?}", p.solution_kind))
-                                .unwrap_or_else(|| "等待解算".to_string())
+                            pvt.map(|p| {
+                                format!(
+                                    "{} · {:?}",
+                                    self.localized("选中 Epoch", "Selected epoch"),
+                                    p.solution_kind
+                                )
+                            })
+                            .unwrap_or_else(|| "等待解算".to_string())
                         } else if pvt.is_some() {
                             self.localized("质量门限拒绝", "Rejected by quality gate")
                                 .to_string()
@@ -6397,7 +6404,7 @@ impl GnsscopeApp {
             let (title, subtitle, plot) = match focus {
                 PlotFocus::Sky => (
                     "卫星天空图".to_string(),
-                    "真实方位/仰角".to_string(),
+                    "GPS L1 C/A".to_string(),
                     sky_plot(
                         satellites,
                         channels,
@@ -6410,7 +6417,7 @@ impl GnsscopeApp {
                 ),
                 PlotFocus::Position => (
                     "ENU 位置".to_string(),
-                    "首个有效 epoch 为原点".to_string(),
+                    "局部切平面 · m".to_string(),
                     position_plot(epochs, self.selected_epoch, palette).into_any_element(),
                 ),
                 PlotFocus::Cn0 => (
@@ -6460,7 +6467,7 @@ impl GnsscopeApp {
                 .grid_cols(if compact { 1 } else { 2 })
                 .gap(px(6.))
                 .child(self.plot_panel(
-                    ("卫星天空图", "真实方位/仰角"),
+                    ("卫星天空图", "GPS L1 C/A"),
                     sky_plot(
                         satellites,
                         channels,
@@ -6475,7 +6482,7 @@ impl GnsscopeApp {
                     cx,
                 ))
                 .child(self.plot_panel(
-                    ("ENU 位置", "首个有效 epoch 为原点"),
+                    ("ENU 位置", "局部切平面 · m"),
                     position_plot(epochs, self.selected_epoch, palette),
                     palette,
                     PlotFocus::Position,
@@ -6533,7 +6540,7 @@ impl GnsscopeApp {
                 .into_any_element(),
             WorkspaceView::Position => div()
                 .child(self.plot_panel(
-                    ("ENU 位置", "首个有效 epoch 为原点"),
+                    ("ENU 位置", "局部切平面 · m"),
                     position_plot(epochs, self.selected_epoch, palette),
                     palette,
                     PlotFocus::Position,
@@ -7423,23 +7430,49 @@ impl GnsscopeApp {
                     .justify_between()
                     .child(Self::section_title(title, subtitle, palette))
                     .child(
-                        Button::new(SharedString::from(format!("plot-focus-{}", focus.id())))
-                            .ghost()
-                            .icon(if expanded {
-                                IconName::Minimize
-                            } else {
-                                IconName::Maximize
-                            })
-                            .tooltip(if expanded {
-                                "退出聚焦"
-                            } else {
-                                "聚焦图表"
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.workspace_view = WorkspaceView::for_plot(focus);
-                                this.focused_plot = if expanded { None } else { Some(focus) };
-                                cx.notify();
-                            })),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .children((focus == PlotFocus::Position).then(|| {
+                                div()
+                                    .h(px(24.))
+                                    .px(px(7.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(2.))
+                                    .border_1()
+                                    .border_color(palette.border)
+                                    .font_family(data_font_family())
+                                    .text_size(px(9.))
+                                    .text_color(palette.muted)
+                                    .child("ENU")
+                            }))
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "plot-focus-{}",
+                                    focus.id()
+                                )))
+                                .ghost()
+                                .icon(if expanded {
+                                    IconName::Minimize
+                                } else {
+                                    IconName::Maximize
+                                })
+                                .tooltip(if expanded {
+                                    "退出聚焦"
+                                } else {
+                                    "聚焦图表"
+                                })
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.workspace_view = WorkspaceView::for_plot(focus);
+                                        this.focused_plot =
+                                            if expanded { None } else { Some(focus) };
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
                     ),
             )
             .child(
@@ -8411,7 +8444,7 @@ fn sky_plot(
                         .child(
                             div()
                                 .mt(px(9.))
-                                .size(if active { px(10.) } else { px(8.) })
+                                .size(if active { px(12.) } else { px(10.) })
                                 .rounded_full()
                                 .bg(marker.color)
                                 .border_1()
@@ -8427,7 +8460,7 @@ fn sky_plot(
                                 .top(px(18.))
                                 .w_full()
                                 .text_center()
-                                .text_size(px(9.))
+                                .text_size(px(10.))
                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                 .text_color(if active { palette.accent } else { palette.text })
                                 .child(format!("G{:02}", marker.prn)),
@@ -9003,7 +9036,7 @@ fn position_plot(
                             )
                         })
                         .collect::<Vec<_>>();
-                    let mut trajectory = PathBuilder::stroke(px(2.0));
+                    let mut trajectory = PathBuilder::stroke(px(2.2));
                     for (point_index, (_, plot_point)) in visible_points.iter().enumerate() {
                         if point_index == 0 {
                             trajectory.move_to(*plot_point);
@@ -9021,7 +9054,7 @@ fn position_plot(
                         let x = center.x + half_width * (*east / extent) as f32;
                         let y = center.y - half_height * (*north / extent) as f32;
                         let selected = Some(*index) == selected_epoch;
-                        let diameter = if selected { px(9.) } else { px(2.5) };
+                        let diameter = if selected { px(10.) } else { px(2.8) };
                         window.paint_quad(quad(
                             bounds(
                                 point(x - diameter / 2., y - diameter / 2.),
@@ -9047,7 +9080,7 @@ fn position_plot(
                 .absolute()
                 .inset_0()
                 .font_family(data_font_family())
-                .text_size(px(8.5))
+                .text_size(px(9.5))
                 .text_color(palette.muted)
                 .child(
                     div()
