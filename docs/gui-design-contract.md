@@ -28,7 +28,7 @@ Visible strings are addressed through stable message keys so English can be adde
 
 ## UI Technology Boundary
 
-As recorded by ADR-0004, `gpui-component` owns standard desktop controls, themes, forms, menus, progress, drawers, virtualized lists/tables, title bar, and focus/keyboard behavior. `gpui-component-assets` supplies the embedded icon bundle. Familiar commands use icon buttons with concise hover tooltips; text remains on primary commands whose meaning or consequence is not obvious from an icon alone. Native GPUI drawing is reserved for GNSS domain plots: sky plot, ENU scatter/track, C/N0 bars and history, velocity/clock charts, and the shared epoch cursor. Standard buttons, inputs, menus, and dialogs must not be reimplemented as custom canvas elements.
+As recorded by ADR-0005, GNSScope owns the application shell, semantic visual tokens, surface hierarchy, and domain composition. `gpui-component` supplies standard control behavior, forms, progress, title-bar mechanics, and focus/keyboard behavior; its stock product palette is translated through GNSScope's visual-system adapter rather than becoming the application's visual language. `gpui-component-assets` supplies the embedded icon bundle. Familiar commands use icon buttons with concise hover tooltips; text remains on primary commands whose meaning or consequence is not obvious from an icon alone. Native GPUI drawing is reserved for GNSS domain plots: sky plot, ENU scatter/track, C/N0 history, velocity/clock charts, and the shared epoch cursor. Standard buttons, inputs, menus, and dialogs must not be reimplemented as custom canvas elements.
 
 This document defines the first GUI boundary before wiring gpui widgets. The GUI should consume structured state from `gnss-gui` instead of reading test-only logs.
 
@@ -88,7 +88,7 @@ GNSScope opens directly into the receiver workspace, not a landing page.
 - Quality pane: satellites used/excluded, residual RMS, standardized residual RMS, HDOP/GDOP, horizontal/vertical sigma.
 - Lower diagnostics: per-channel C/N0, Doppler, lock state, and residual chart.
 
-The main workspace is a desktop analysis workbench with four stable top-level views: `Overview`, `Channels`, `Position`, and `Navigation`. Overview keeps the highest-value correlation visible together: satellite geometry, ENU position, and the selected-epoch PVT summary. Channels combines the stable C/N0 comparison with the same epoch's per-PRN acquisition, tracking, navigation-lock, Doppler, and residual telemetry. Position contains ENU, velocity/clock, altitude history, and the selected-epoch PVT summary. Navigation exposes the persisted acquisition, loss, reacquisition, channel-state, and navigation-message event stream. Switching views never changes the selected run, epoch, PRN, or live-follow state.
+The main workspace is a desktop analysis workbench with five stable run-local views: `Overview`, `Channels`, `Position`, `Navigation`, and `Candidates`. Overview keeps the highest-value correlation visible together: satellite geometry, ENU position, the selected-epoch PVT summary, and bounded multi-PRN C/N0 history. Channels contains the same epoch's per-PRN acquisition, tracking, navigation-lock, Doppler, residual, and signal-quality telemetry. Position contains ENU, velocity/clock, altitude history, and the selected-epoch PVT summary. Navigation exposes persisted acquisition, loss, reacquisition, channel-state, and navigation-message events. Candidates compares the persisted Raw, Smoothed, and Kalman solutions without changing the selected run. Switching views never changes the selected run, epoch, PRN, or live-follow state.
 
 The shared epoch timeline is a fixed bottom status bar outside the scroll container, so it remains operable in every workbench view. Its visibility is controlled only from the dedicated interface-settings page. Height history reports mean, population standard deviation, and valid range. Major plots remain linked through the shared epoch and PRN selections even when they live in different views.
 
@@ -96,11 +96,11 @@ Major plots expose a focus command that temporarily expands one visualization to
 
 The recommended initial window is `1440 x 900`. A client-decorated `gpui-component::TitleBar` provides the draggable region, double-click maximize/restore behavior, and native minimize, maximize/restore, and close controls. Below `1180 px`, sky/position and velocity/altitude plots stack and metric rows reflow; the receiver inspector narrows and its category rail becomes icon-only. Below `840 px`, the run library collapses to a `50 px` task-status strip with icon commands for new task, library expansion, and interface settings. Expanding it reveals the bounded, vertically scrollable library and an explicit collapse command. Typography does not shrink to force content into narrow widths; vertical scrolling and plot-focus mode preserve legibility. The fixed epoch bar stays outside the main scroll container at every breakpoint. Mobile layout is outside the first release scope.
 
-`GNSSCOPE_WINDOW_WIDTH`, `GNSSCOPE_WINDOW_HEIGHT`, `GNSSCOPE_WORKSPACE_VIEW`, `GNSSCOPE_OPEN_SETTINGS`, `GNSSCOPE_OPEN_INTERFACE_SETTINGS`, `GNSSCOPE_THEME`, and `GNSSCOPE_LANGUAGE` make visual states deterministic. `GNSSCOPE_WORKSPACE_VIEW` accepts `overview`, `channels`, `position`, or `navigation`. `scripts/capture-gui-layouts.ps1` builds and captures the Windows matrix. On macOS, `scripts/package-macos.sh` creates a bundle with the stable `io.gnsscope.desktop` identifier and `scripts/run-gui-preview-macos.sh` launches each deterministic state for accessibility-based capture. Generated images live under ignored `artifacts/` directories.
+`GNSSCOPE_WINDOW_WIDTH`, `GNSSCOPE_WINDOW_HEIGHT`, `GNSSCOPE_WORKSPACE_VIEW`, `GNSSCOPE_OPEN_SETTINGS`, `GNSSCOPE_OPEN_COMPARISON`, `GNSSCOPE_OPEN_INTERFACE_SETTINGS`, `GNSSCOPE_THEME`, and `GNSSCOPE_LANGUAGE` make visual states deterministic. `GNSSCOPE_WORKSPACE_VIEW` accepts `overview`, `channels`, `position`, `navigation`, or `candidates`. `scripts/capture-gui-layouts.ps1` builds and captures the Windows matrix. On macOS, `scripts/package-macos.sh` creates a bundle with the stable `io.gnsscope.desktop` identifier and `scripts/run-gui-preview-macos.sh` launches each deterministic state for accessibility-based capture. Generated images live under ignored `artifacts/` directories.
 
 ## Processing Run Sidebar
 
-The persistent left sidebar is approximately `216-236 px` wide. Product identity appears only in the title command bar; the sidebar begins directly with the New task command and the run library. Below it are three ordered regions: the pinned active run, queued runs, and history. The active row shows filename, live state, compact progress, and percentage. Queued rows show queue order and may be reordered or cancelled. Historical rows show filename, terminal status, epoch count, and progress; detailed receiver values remain in the main workspace.
+The persistent Runs dock is `316 px` wide at the reference desktop size and may contract to `286 px` before collapsing. Product identity appears only in the title command bar; a compact `+` in the Runs header opens New Analysis. Below it are three ordered regions: the pinned active run, queued runs, and history. The active row shows filename, live state, compact progress, and percentage. Queued rows show queue order and may be reordered or cancelled. Historical rows show filename, terminal status, epoch count, and progress; detailed receiver values remain in the main workspace.
 
 History supports filename search and terminal-status filtering. Row actions include viewing results, duplicating configuration into a new run, revealing the source IQ file, and deleting the derived run record. Deletion never deletes the source IQ file. The sidebar may collapse to a narrow task-status rail, but complete history remains available through expansion rather than being reduced to ambiguous icons.
 
@@ -108,7 +108,7 @@ History supports filename search and terminal-status filtering. Row actions incl
 
 Determinate progress is computed from processed IQ samples divided by total file samples and must be monotonic. PVT availability, acquisition success, and channel loss do not change file-processing progress. Indeterminate motion is reserved for short phases before the file length is known.
 
-The main run header combines a refined progress rail, tabular percentage, processed/total signal duration, and a concise phase label such as opening, initializing, acquiring, tracking/navigation, solving, or finalizing. The active sidebar row uses a compact progress rail and percentage. A spinner is not shown continuously beside determinate progress.
+The active Runs-dock row owns the compact progress rail, percentage, elapsed signal duration, and current lifecycle label. The selected-run header identifies the viewed run and its immutable signal/configuration summary; it does not duplicate a global progress bar. A spinner is not shown continuously beside determinate progress.
 
 Progress styling must remain precise in both themes: stable geometry, restrained accent fill, no rainbow gradient or glow, smooth transform-based interpolation, and reduced-motion support. Percentage alignment must not shift as digits change, and status text must remain readable at narrow window widths.
 
@@ -128,9 +128,9 @@ The sky plot should read as a precise instrument, not a decorative illustration:
 
 ## C/N0 Presentation
 
-The primary signal-quality view is a dynamic vertical bar chart with stable PRN 1-32 positions and C/N0 in dB-Hz. It draws bars only for channels whose epoch state is `Healthy`; probation, suspect, lost, reacquiring, and absent channels remain visible in channel-state diagnostics but do not enter the stable C/N0 comparison. Empty PRN slots preserve axis stability without implying a measurement. The active run updates bars at each PVT output epoch; moving the historical epoch cursor restores the bar snapshot for that time.
+The primary signal-quality view is a bounded multi-PRN C/N0 time series in dB-Hz. It shows persisted channel snapshots over the selected run, keeps gaps where lock or measurements are absent, and shares the epoch cursor with the rest of the workbench. Probation, suspect, lost, reacquiring, and absent states remain visible in channel diagnostics without inventing signal measurements. The active run extends the series at each PVT output epoch; moving the historical epoch cursor restores the aligned snapshot for that time.
 
-Selecting a bar links the PRN across the sky plot and channel details, and reveals that PRN's C/N0 history below the bar chart. A small set of PRNs may be pinned for historical comparison. State is not encoded by arbitrary per-PRN rainbow colors: acquisition/tracking/navigation/PVT state uses semantic markers and styling, while selection uses the primary interaction accent.
+Selecting a line or legend item links the PRN across the sky plot and channel details. A small set of PRNs may be pinned for historical comparison. State is not encoded by arbitrary per-PRN rainbow colors: acquisition/tracking/navigation/PVT state uses semantic markers and styling, while selection uses the primary interaction accent.
 
 ## Settings Contract
 
@@ -218,7 +218,7 @@ Application state must distinguish `active_run_id` from `selected_run_id`. Recei
 - `channels` feeds the channel diagnostics panel.
 - `apply_event` accepts backend/worker events so the GUI updates state without parsing logs or calling receiver internals directly.
 
-While processing is active, users may select and inspect any completed run without pausing the worker. The active run stays pinned at the top of the sidebar with live progress, a narrow global activity indicator remains visible, and a clear command returns the workspace to the live run. Completion updates the sidebar without forcing navigation away from the selected historical run.
+While processing is active, users may select and inspect any completed run without pausing the worker. The active run stays pinned at the top of the Runs dock with live progress, the persistent bottom status strip reports global activity, and a clear command returns the workspace to the live run. Completion updates the dock without forcing navigation away from the selected historical run.
 
 ## Epoch Timeline
 

@@ -1,10 +1,15 @@
 # GNSScope Roadmap
 
-Date: 2026-08-29
+Date: 2026-09-04
 
 This is the authoritative product roadmap. Detailed receiver evidence remains in
 `docs/receiver-readiness-audit.md`; historical M1/M2 progress notes and performance
 experiments are not the current backlog.
+
+The detailed execution plan for Priority 1 is
+`docs/ui-visual-refactor-roadmap.md`. This roadmap remains authoritative for priority
+and completion status; the detailed plan owns the UI phase breakdown, reference-code
+policy, and evidence matrix.
 
 ## Product Direction
 
@@ -77,6 +82,42 @@ an explicit cursor, zoom controls, precise epoch stepping, and live-follow state
 generic slider presented as the primary visualization. The previously approved compact
 Runs-header New Analysis action remains authoritative even though the reference image
 contains an earlier full-width treatment.
+
+**2026-09-04 visual synthesis decision:** the concept image and the GNSScope domain
+contracts remain authoritative for information architecture. Waku is the reference for
+compact native density, quiet structural controls, platform typography, focus/keyboard
+discipline, sidebar treatment, and performance-conscious motion. Comet is the reference
+for surface elevation, three-layer design tokens, complete component states,
+light/dark construction, overlays, and a bounded motion catalogue. GNSScope retains its
+cyan interaction color, receiver semantic colors, scientific plots, and product
+identity. It must not adopt Waku's coral identity, Comet's chat-like roundness or broad
+glass treatment, or either project's navigation model. Detailed implementation order,
+upstream file references, licensing constraints, and acceptance gates are recorded in
+`docs/ui-visual-refactor-roadmap.md`.
+
+**Phase 0 checkpoint (2026-09-04):** the behavior-preservation matrix, source/module
+inventory, hardcoded visual-value census, historical screenshot classification, and
+scoped Phase 1-9 issues are recorded under `.scratch/ui-visual-refactor/`. Formatting,
+GUI tests, complete workspace tests, strict Clippy, the release GUI build, macOS
+packaging, and signature verification pass. Fresh 1440x900, 1100x800, and 800x720
+packaged-app baselines were captured in both themes under
+`artifacts/ui-visual-refactor-baseline/`. Phase 0 is complete. The baseline confirms the
+concept-led structure while identifying Phase 1-3 work: third-party purple leakage,
+overused light-theme borders, weak small-text contrast, overly strong active-row wash,
+and failure to collapse the Runs dock at 800 px.
+
+**Phase 1 checkpoint (2026-09-04):** the visual system is now split into raw primitive,
+semantic, and component layers under `crates/gnss-gui/src/visual_system/`. Light and
+dark themes are authored independently and define surface, text, interaction,
+solid/inverse, overlay/dialog, focus/disabled, receiver-status wash, plot, and chart
+roles. `gpui-component::Theme` is translated only through GNSScope component tokens,
+and feature rendering contains no raw product colors. Theme contrast, completeness,
+and containment tests pass; the full workspace reports 242 passed, 8 ignored, and 0
+failed tests, with formatting, strict Clippy, release packaging, and light/dark visual
+inspection also passing. Independent macOS captures showed that the earlier rounded
+purple element was a screen-control overlay rather than an application theme leak.
+Evidence is recorded in `.scratch/ui-visual-refactor/phase1-evidence.md`. Phase 1 is
+complete and Phase 2 component-state work is next.
 
 #### 1.1 Freeze the behavior contract before replacing the UI
 
@@ -412,25 +453,19 @@ These remain outside the active roadmap:
 
 ## Current Next Actions
 
-1. Verify the concept-parity implementation with active, completed, failed, queued,
-   no-fix, and historical runs at the reference 1568x1003 size and at
-   1440x900, 1100x800, and 800x720 in both themes and languages; fix density,
-   overflow, hierarchy, plot scale, and typography defects found in real screenshots.
-2. Extend the immutable run snapshot with decoded navigation/ephemeris records so the
-   Navigation workbench can render real parameters instead of an honest unavailable
-   state; migrate old databases without altering completed results.
-3. Complete keyboard commands and interaction regressions for New Analysis, Runs-dock
-   collapse, epoch stepping, live-follow restoration, linked PRN selection, queue
-   operations, and selected-run versus active-run independence.
-4. Refine the New Analysis central surface to the same pane-and-instrument density and
-   finish run-local Channels, Navigation, Candidates, and configuration detail views.
-5. Remove dormant legacy page and drawer render paths after parity tests prove that no
-   workflow depends on them; keep `gpui-component` only for the focused behavior
-   primitives recorded in ADR-0005.
-6. Complete the cross-theme, cross-language, cross-size screenshot matrix and
-   cross-platform packaging checks before removing the legacy shell.
-7. In parallel with UI verification only, inventory recorded/generated IQ data and independent
-   references for GPS L1C, L2C, L5, and BeiDou B1I; use that evidence to select the first
-   new signal adapter.
-8. Before multi-signal production code, revise ADR-0002 to define the proven seam and
-   migration constraints described above.
+1. Build the Phase 2 deterministic component-state gallery and keyboard coverage before another
+   broad visual pass. Prove default, hover, pressed, focus-visible, selected, disabled,
+   busy, and error states in both themes.
+2. Extract the persistent shell, Runs dock, Run Configuration rail, epoch dock, status
+   strip, and plot frame from `app.rs` in behavior-preserving slices; keep receiver and
+   persistence ownership unchanged.
+3. Refine Runs/New Analysis first, then the selected-run workbench and domain plots,
+   then the timeline, overlays, command access, and optional native platform material.
+4. Add shared, reduced-motion-aware animation only after static layout, focus, state,
+   and responsive gates pass; the idle application must not continuously redraw.
+5. Complete the required size/theme/language/lifecycle/view screenshot and interaction
+   matrices in the freshly built packaged app before removing dormant legacy render
+   paths.
+6. After Priority 1 gates pass, inventory recorded/generated IQ data and independent
+   references for GPS L1C, L2C, L5, and BeiDou B1I, then revise ADR-0002 before
+   multi-signal production code.

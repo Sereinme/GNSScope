@@ -1,3 +1,6 @@
+use crate::visual_system::{
+    apply_component_theme, data_font_family, interface_font_family, metrics, Palette,
+};
 use crate::{
     spawn_streaming_worker, ActiveWorker, GuiChannelStatus, GuiDiagnosticEvent,
     GuiDiagnosticEventKind, GuiProcessingSettings, GuiPvtViewModel, GuiSatelliteGeometry,
@@ -7,7 +10,7 @@ use crate::{
 use gnss_core::pvt::{PvtCandidateDisposition, PvtEpochSolutionKind};
 use gpui::prelude::*;
 use gpui::{
-    bounds, canvas, div, point, px, quad, rgb, size, AnyElement, Bounds, Context, Entity, Hsla,
+    bounds, canvas, div, point, px, quad, size, AnyElement, Bounds, Context, Entity, Hsla,
     InteractiveElement, IntoElement, ParentElement, PathBuilder, PathPromptOptions, Render,
     SharedString, Styled, Timer, Window,
 };
@@ -51,40 +54,6 @@ const EDITABLE_SETTING_FIELDS: &[&str] = &[
     "probation_good_epochs",
     "fixed_prns",
 ];
-
-fn color(value: u32) -> Hsla {
-    rgb(value).into()
-}
-
-fn interface_font_family() -> &'static str {
-    #[cfg(target_os = "macos")]
-    {
-        "SF Pro Text"
-    }
-    #[cfg(target_os = "windows")]
-    {
-        "Segoe UI Variable Text"
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        "Noto Sans"
-    }
-}
-
-fn data_font_family() -> &'static str {
-    #[cfg(target_os = "macos")]
-    {
-        "SF Mono"
-    }
-    #[cfg(target_os = "windows")]
-    {
-        "Cascadia Mono"
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        "monospace"
-    }
-}
 
 fn setting_text_value(settings: &GuiProcessingSettings, field: &str) -> String {
     match field {
@@ -445,76 +414,6 @@ impl InterfaceLanguage {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Palette {
-    background: Hsla,
-    sidebar: Hsla,
-    surface: Hsla,
-    surface_alt: Hsla,
-    border: Hsla,
-    text: Hsla,
-    muted: Hsla,
-    accent: Hsla,
-    healthy: Hsla,
-    warning: Hsla,
-    danger: Hsla,
-    chart_series: [Hsla; 8],
-}
-
-impl Palette {
-    fn light() -> Self {
-        Self {
-            background: color(0xf4f5f7),
-            sidebar: color(0xf8f9fa),
-            surface: color(0xffffff),
-            surface_alt: color(0xf1f3f5),
-            border: color(0xd8dce2),
-            text: color(0x20242a),
-            muted: color(0x66707c),
-            accent: color(0x167a94),
-            healthy: color(0x16845f),
-            warning: color(0xa9630c),
-            danger: color(0xb83f49),
-            chart_series: [
-                color(0x16845f),
-                color(0x3578c8),
-                color(0xa9630c),
-                color(0x7446a6),
-                color(0xc65f17),
-                color(0x167a94),
-                color(0x66707c),
-                color(0xb83f49),
-            ],
-        }
-    }
-
-    fn dark() -> Self {
-        Self {
-            background: color(0x0c141c),
-            sidebar: color(0x101923),
-            surface: color(0x121d27),
-            surface_alt: color(0x17242f),
-            border: color(0x2a3947),
-            text: color(0xdce6ef),
-            muted: color(0x91a2b2),
-            accent: color(0x63c5da),
-            healthy: color(0x67c99a),
-            warning: color(0xe0b15a),
-            danger: color(0xe06c75),
-            chart_series: [
-                color(0x67c99a),
-                color(0x7ab8ff),
-                color(0xe0b15a),
-                color(0xb792f4),
-                color(0xed8a4b),
-                color(0x63c5da),
-                color(0xa7b0bd),
-                color(0xe06c75),
-            ],
-        }
-    }
-}
-
 pub struct GnsscopeApp {
     settings: GuiProcessingSettings,
     library: Option<RunLibrary>,
@@ -593,6 +492,15 @@ impl GnsscopeApp {
             ThemePreference::Light => Theme::change(ThemeMode::Light, Some(window), cx),
             ThemePreference::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
         }
+        let system_dark = cx.theme().mode.is_dark();
+        apply_component_theme(
+            Theme::global_mut(cx),
+            if system_dark {
+                Palette::dark()
+            } else {
+                Palette::light()
+            },
+        );
         let timeline_visible = library
             .as_ref()
             .and_then(|library| library.preference("timeline_visible").ok().flatten())
@@ -731,7 +639,7 @@ impl GnsscopeApp {
             workspace_view: WorkspaceView::parse(
                 std::env::var("GNSSCOPE_WORKSPACE_VIEW").ok().as_deref(),
             ),
-            system_dark: cx.theme().mode.is_dark(),
+            system_dark,
             side_drawer: if std::env::var("GNSSCOPE_OPEN_COMPARISON")
                 .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             {
@@ -928,6 +836,8 @@ impl GnsscopeApp {
             ThemePreference::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
         }
         self.system_dark = cx.theme().mode.is_dark();
+        apply_component_theme(Theme::global_mut(cx), self.palette());
+        window.refresh();
         if let Some(library) = &self.library {
             let _ = library.set_preference("theme", self.theme_preference.value());
         }
@@ -1712,37 +1622,16 @@ impl GnsscopeApp {
             .into()
     }
 
-    fn section_title(
-        title: impl Into<SharedString>,
-        subtitle: impl Into<SharedString>,
-        palette: Palette,
-    ) -> impl IntoElement {
+    fn section_title(title: impl Into<SharedString>, palette: Palette) -> impl IntoElement {
         let title = title.into();
-        let subtitle = subtitle.into();
-        div()
-            .flex()
-            .flex_1()
-            .items_baseline()
-            .gap(px(7.))
-            .min_w_0()
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(px(13.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(palette.text)
-                    .child(title),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h(px(14.))
-                    .overflow_hidden()
-                    .text_size(px(10.))
-                    .text_color(palette.muted)
-                    .child(subtitle),
-            )
+        div().flex().flex_1().items_baseline().min_w_0().child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(13.5))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(palette.text)
+                .child(title),
+        )
     }
 
     #[allow(dead_code)]
@@ -1885,7 +1774,7 @@ impl GnsscopeApp {
                         Button::new("start-analysis")
                             .primary()
                             .bg(palette.accent)
-                            .text_color(color(0xffffff))
+                            .text_color(palette.on_accent)
                             .icon(IconName::SquareTerminal)
                             .label(self.localized("开始处理", "Start processing"))
                             .disabled(!self.can_enqueue())
@@ -1907,7 +1796,7 @@ impl GnsscopeApp {
                                     Button::new("enqueue")
                                         .primary()
                                         .bg(palette.accent)
-                                        .text_color(color(0xffffff))
+                                        .text_color(palette.on_accent)
                                         .icon(IconName::Plus)
                                         .tooltip(self.localized("加入等待队列", "Add to queue"))
                                         .disabled(!self.can_enqueue())
@@ -1934,7 +1823,7 @@ impl GnsscopeApp {
                             Button::new("run")
                                 .primary()
                                 .bg(palette.accent)
-                                .text_color(color(0xffffff))
+                                .text_color(palette.on_accent)
                                 .icon(IconName::Replace)
                                 .tooltip(self.localized(
                                     "按此配置重新解算",
@@ -1951,7 +1840,7 @@ impl GnsscopeApp {
                             Button::new("workspace-new-analysis")
                                 .primary()
                                 .bg(palette.accent)
-                                .text_color(color(0xffffff))
+                                .text_color(palette.on_accent)
                                 .icon(IconName::Plus)
                                 .label(self.localized("新建分析", "New analysis"))
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -1979,8 +1868,8 @@ impl GnsscopeApp {
         };
 
         TitleBar::new()
-            .h(px(40.))
-            .bg(palette.background)
+            .h(px(metrics::TITLE_BAR_HEIGHT))
+            .bg(palette.sidebar)
             .border_color(palette.border)
             .text_color(palette.text)
             .child(
@@ -2046,8 +1935,8 @@ impl GnsscopeApp {
                         div().w(px(360.)).h(px(28.)).flex_shrink_0().child(
                             Input::new(&self.history_search)
                                 .prefix(IconName::Search)
-                                .bg(palette.surface)
-                                .border_color(palette.border),
+                                .bg(palette.surface_raised)
+                                .border_color(palette.border_strong),
                         )
                     }))
                     .child(div().flex_1())
@@ -2061,9 +1950,9 @@ impl GnsscopeApp {
                                 palette.muted
                             })
                             .bg(if self.page == AppPage::InterfaceSettings {
-                                palette.accent.opacity(0.10)
+                                palette.accent_wash
                             } else {
-                                palette.background
+                                palette.sidebar
                             })
                             .icon(IconName::Settings2)
                             .label(self.localized("设置", "Settings"))
@@ -2575,9 +2464,12 @@ impl GnsscopeApp {
                 .py(px(10.))
                 .cursor_pointer()
                 .bg(if selected {
-                    palette.accent.opacity(0.11)
+                    palette.accent_wash
                 } else {
                     palette.sidebar
+                })
+                .when(!selected, |this| {
+                    this.hover(|style| style.bg(palette.hover))
                 })
                 .border_l_2()
                 .border_color(if selected {
@@ -2667,8 +2559,8 @@ impl GnsscopeApp {
         });
 
         div()
-            .w(px(316.))
-            .min_w(px(286.))
+            .w(px(metrics::RUNS_DOCK_WIDTH))
+            .min_w(px(metrics::RUNS_DOCK_MIN_WIDTH))
             .h_full()
             .flex_shrink_0()
             .bg(palette.sidebar)
@@ -2678,7 +2570,7 @@ impl GnsscopeApp {
             .flex_col()
             .child(
                 div()
-                    .h(px(38.))
+                    .h(px(metrics::RUNS_HEADER_HEIGHT))
                     .flex_shrink_0()
                     .px(px(12.))
                     .flex()
@@ -2696,7 +2588,7 @@ impl GnsscopeApp {
                     .child(
                         Button::new("runs-new-analysis")
                             .ghost()
-                            .rounded(px(3.))
+                            .rounded(px(metrics::CONTROL_RADIUS))
                             .text_color(palette.muted)
                             .icon(IconName::Plus)
                             .tooltip(self.localized("新建分析 · ⌘N", "New analysis · Cmd+N"))
@@ -2708,7 +2600,7 @@ impl GnsscopeApp {
                     .child(
                         Button::new("runs-filter-menu")
                             .ghost()
-                            .rounded(px(3.))
+                            .rounded(px(metrics::CONTROL_RADIUS))
                             .text_color(palette.muted)
                             .icon(IconName::Ellipsis)
                             .tooltip(self.localized("切换运行筛选", "Cycle run filter"))
@@ -2720,7 +2612,7 @@ impl GnsscopeApp {
             )
             .child(
                 div()
-                    .h(px(42.))
+                    .h(px(metrics::RUNS_SEARCH_HEIGHT))
                     .flex_shrink_0()
                     .px(px(9.))
                     .py(px(7.))
@@ -2729,7 +2621,8 @@ impl GnsscopeApp {
                     .child(
                         Input::new(&self.history_search)
                             .prefix(IconName::Search)
-                            .bg(palette.background),
+                            .bg(palette.surface_raised)
+                            .border_color(palette.border_strong),
                     ),
             )
             .child(
@@ -2881,9 +2774,12 @@ impl GnsscopeApp {
                                     .py(px(7.))
                                     .cursor_pointer()
                                     .bg(if selected {
-                                        palette.accent.opacity(0.09)
+                                        palette.accent_wash
                                     } else {
                                         palette.sidebar
+                                    })
+                                    .when(!selected, |this| {
+                                        this.hover(|style| style.bg(palette.hover))
                                     })
                                     .border_l_2()
                                     .border_b_1()
@@ -3034,7 +2930,7 @@ impl GnsscopeApp {
                     .flex()
                     .items_center()
                     .text_size(px(9.))
-                    .text_color(palette.muted)
+                    .text_color(palette.faint)
                     .child(match self.interface_language {
                         InterfaceLanguage::SimplifiedChinese => {
                             format!(
@@ -3205,7 +3101,7 @@ impl GnsscopeApp {
                             .justify_start()
                             .rounded(px(5.))
                             .bg(palette.accent)
-                            .text_color(color(0xffffff))
+                            .text_color(palette.on_accent)
                             .icon(IconName::Plus)
                             .label(self.localized("新建分析", "New analysis"))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -3434,7 +3330,7 @@ impl GnsscopeApp {
                                             .text_size(px(9.))
                                             .font_family(data_font_family())
                                             .text_color(if complete {
-                                                color(0xffffff)
+                                                palette.on_accent
                                             } else {
                                                 palette.muted
                                             })
@@ -3482,10 +3378,6 @@ impl GnsscopeApp {
                                                     .justify_between()
                                                     .child(Self::section_title(
                                                         self.localized("IQ 数据源", "IQ source"),
-                                                        self.localized(
-                                                            "本地文件，不会上传",
-                                                            "Local file, never uploaded",
-                                                        ),
                                                         palette,
                                                     ))
                                                     .child(
@@ -3559,10 +3451,6 @@ impl GnsscopeApp {
                                             .border_color(palette.border)
                                             .child(Self::section_title(
                                                 self.localized("信号方案", "Signal profile"),
-                                                self.localized(
-                                                    "当前生产管线",
-                                                    "Current production pipeline",
-                                                ),
                                                 palette,
                                             ))
                                             .child(
@@ -3622,10 +3510,6 @@ impl GnsscopeApp {
                                                 self.localized(
                                                     "接收机配置",
                                                     "Receiver configuration",
-                                                ),
-                                                self.localized(
-                                                    "默认值适用于常见离线记录",
-                                                    "Defaults suit typical offline recordings",
                                                 ),
                                                 palette,
                                             ))
@@ -3747,7 +3631,7 @@ impl GnsscopeApp {
                                                 Button::new("new-analysis-start")
                                                     .primary()
                                                     .bg(palette.accent)
-                                                    .text_color(color(0xffffff))
+                                                    .text_color(palette.on_accent)
                                                     .icon(IconName::SquareTerminal)
                                                     .label(self.localized(
                                                         "开始处理",
@@ -3828,7 +3712,7 @@ impl GnsscopeApp {
                                 Button::new("library-new-analysis")
                                     .primary()
                                     .bg(palette.accent)
-                                    .text_color(color(0xffffff))
+                                    .text_color(palette.on_accent)
                                     .icon(IconName::Plus)
                                     .label(self.localized("新建分析", "New analysis"))
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -3888,14 +3772,6 @@ impl GnsscopeApp {
                             .border_color(palette.border)
                             .child(Self::section_title(
                                 self.localized("等待队列", "Queue"),
-                                match self.interface_language {
-                                    InterfaceLanguage::SimplifiedChinese => {
-                                        format!("{} 项等待处理", self.queue.len())
-                                    }
-                                    InterfaceLanguage::English => {
-                                        format!("{} waiting", self.queue.len())
-                                    }
-                                },
                                 palette,
                             ))
                             .children(self.queue.iter().enumerate().map(|(index, run)| {
@@ -5186,15 +5062,16 @@ impl GnsscopeApp {
             });
 
         div()
-            .h(px(96.))
+            .h(px(metrics::WORKSPACE_HEADER_HEIGHT))
             .flex_shrink_0()
             .bg(palette.surface)
             .border_b_1()
             .border_color(palette.border)
             .child(
                 div()
-                    .h(px(56.))
+                    .h(px(metrics::WORKSPACE_CONTEXT_HEIGHT))
                     .px(px(14.))
+                    .bg(palette.surface_raised)
                     .flex()
                     .items_center()
                     .gap(px(10.))
@@ -5260,9 +5137,9 @@ impl GnsscopeApp {
                     .child(
                         Button::new("workspace-event-log")
                             .ghost()
-                            .rounded(px(3.))
+                            .rounded(px(metrics::CONTROL_RADIUS))
                             .border_1()
-                            .border_color(palette.border)
+                            .border_color(palette.border_strong)
                             .text_color(palette.muted)
                             .icon(IconName::Inbox)
                             .when(!compact, |this| {
@@ -5278,9 +5155,13 @@ impl GnsscopeApp {
                     .child(
                         Button::new("workspace-run-configuration")
                             .ghost()
-                            .rounded(px(3.))
+                            .rounded(px(metrics::CONTROL_RADIUS))
                             .border_1()
-                            .border_color(palette.border)
+                            .border_color(if self.run_configuration_visible {
+                                palette.accent
+                            } else {
+                                palette.border_strong
+                            })
                             .text_color(if self.run_configuration_visible {
                                 palette.accent
                             } else {
@@ -5327,7 +5208,7 @@ impl GnsscopeApp {
             )
             .child(
                 div()
-                    .h(px(40.))
+                    .h(px(metrics::WORKSPACE_TABS_HEIGHT))
                     .px(px(14.))
                     .flex()
                     .items_center()
@@ -5344,7 +5225,11 @@ impl GnsscopeApp {
                             } else {
                                 palette.muted
                             })
-                            .bg(palette.surface)
+                            .bg(if selected {
+                                palette.active
+                            } else {
+                                palette.surface
+                            })
                             .border_b_2()
                             .border_color(if selected {
                                 palette.accent
@@ -5419,7 +5304,7 @@ impl GnsscopeApp {
                                 Button::new("empty-new-analysis")
                                     .primary()
                                     .bg(palette.accent)
-                                    .text_color(color(0xffffff))
+                                    .text_color(palette.on_accent)
                                     .icon(IconName::Plus)
                                     .label(self.localized("新建分析", "New analysis"))
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -5531,22 +5416,6 @@ impl GnsscopeApp {
                     .justify_between()
                     .child(Self::section_title(
                         self.localized("PVT 解算", "PVT solution"),
-                        if valid_pvt.is_some() {
-                            pvt.map(|p| {
-                                format!(
-                                    "{} · {:?}",
-                                    self.localized("选中 Epoch", "Selected epoch"),
-                                    p.solution_kind
-                                )
-                            })
-                            .unwrap_or_else(|| "等待解算".to_string())
-                        } else if pvt.is_some() {
-                            self.localized("质量门限拒绝", "Rejected by quality gate")
-                                .to_string()
-                        } else {
-                            self.localized("等待解算", "Waiting for solution")
-                                .to_string()
-                        },
                         palette,
                     ))
                     .child(
@@ -6285,10 +6154,6 @@ impl GnsscopeApp {
 
     fn render_channel_table(&self, palette: Palette) -> AnyElement {
         let channels = self.display_channels();
-        let locked = channels
-            .iter()
-            .filter(|channel| channel.tracking_locked)
-            .count();
         div()
             .bg(palette.surface)
             .border_1()
@@ -6304,7 +6169,6 @@ impl GnsscopeApp {
                     .border_color(palette.border)
                     .child(Self::section_title(
                         self.localized("通道诊断", "Channel diagnostics"),
-                        format!("{locked} / {} locked", channels.len()),
                         palette,
                     )),
             )
@@ -6347,12 +6211,6 @@ impl GnsscopeApp {
                     .border_color(palette.border)
                     .child(Self::section_title(
                         self.localized("接收机事件", "Receiver events"),
-                        match self.interface_language {
-                            InterfaceLanguage::SimplifiedChinese => {
-                                format!("已持久化 {} 条", events.len())
-                            }
-                            InterfaceLanguage::English => format!("{} persisted", events.len()),
-                        },
                         palette,
                     )),
             )
@@ -6401,10 +6259,9 @@ impl GnsscopeApp {
             .unwrap_or(&[]);
         let _ = viewport_height;
         if let Some(focus) = self.focused_plot {
-            let (title, subtitle, plot) = match focus {
+            let (title, plot) = match focus {
                 PlotFocus::Sky => (
                     "卫星天空图".to_string(),
-                    "GPS L1 C/A".to_string(),
                     sky_plot(
                         satellites,
                         channels,
@@ -6416,13 +6273,11 @@ impl GnsscopeApp {
                     .into_any_element(),
                 ),
                 PlotFocus::Position => (
-                    "ENU 位置".to_string(),
-                    "局部切平面 · m".to_string(),
+                    "ENU 位置 (m)".to_string(),
                     position_plot(epochs, self.selected_epoch, palette).into_any_element(),
                 ),
                 PlotFocus::Cn0 => (
                     "C/N0 (dB-Hz) · GPS L1 C/A".to_string(),
-                    format!("最近 {} 个 epoch", epoch_channels.len()),
                     cn0_plot(
                         epoch_channels,
                         channels,
@@ -6439,26 +6294,17 @@ impl GnsscopeApp {
                 ),
                 PlotFocus::Velocity => (
                     "速度与钟漂".to_string(),
-                    "共享 epoch 时间轴".to_string(),
                     velocity_plot(epochs, self.selected_epoch, palette).into_any_element(),
                 ),
                 PlotFocus::Altitude => (
-                    "高度历史".to_string(),
-                    altitude_statistics(epochs),
+                    "高度历史 (m)".to_string(),
                     altitude_plot(epochs, self.selected_epoch, palette).into_any_element(),
                 ),
             };
             return div()
                 .px(px(12.))
                 .pb(px(20.))
-                .child(self.plot_panel(
-                    (title, subtitle),
-                    plot,
-                    palette,
-                    focus,
-                    PlotPanelLayout::Expanded,
-                    cx,
-                ))
+                .child(self.plot_panel(title, plot, palette, focus, PlotPanelLayout::Expanded, cx))
                 .into_any_element();
         }
         let content = match self.workspace_view {
@@ -6467,7 +6313,7 @@ impl GnsscopeApp {
                 .grid_cols(if compact { 1 } else { 2 })
                 .gap(px(6.))
                 .child(self.plot_panel(
-                    ("卫星天空图", "GPS L1 C/A"),
+                    "卫星天空图",
                     sky_plot(
                         satellites,
                         channels,
@@ -6482,7 +6328,7 @@ impl GnsscopeApp {
                     cx,
                 ))
                 .child(self.plot_panel(
-                    ("ENU 位置", "局部切平面 · m"),
+                    "ENU 位置 (m)",
                     position_plot(epochs, self.selected_epoch, palette),
                     palette,
                     PlotFocus::Position,
@@ -6491,10 +6337,7 @@ impl GnsscopeApp {
                 ))
                 .child(self.render_pvt_summary(palette, false, cx))
                 .child(self.plot_panel(
-                    (
-                        "C/N0 (dB-Hz) · GPS L1 C/A",
-                        format!("最近 {} 个 epoch", epoch_channels.len()),
-                    ),
+                    "C/N0 (dB-Hz) · GPS L1 C/A",
                     cn0_plot(
                         epoch_channels,
                         channels,
@@ -6515,10 +6358,7 @@ impl GnsscopeApp {
                 .into_any_element(),
             WorkspaceView::Channels => div()
                 .child(self.plot_panel(
-                    (
-                        "稳定通道 C/N0 历史",
-                        format!("{} epochs · 最多 8 个 Healthy PRN", epoch_channels.len()),
-                    ),
+                    "稳定通道 C/N0 历史",
                     cn0_plot(
                         epoch_channels,
                         channels,
@@ -6540,7 +6380,7 @@ impl GnsscopeApp {
                 .into_any_element(),
             WorkspaceView::Position => div()
                 .child(self.plot_panel(
-                    ("ENU 位置", "局部切平面 · m"),
+                    "ENU 位置 (m)",
                     position_plot(epochs, self.selected_epoch, palette),
                     palette,
                     PlotFocus::Position,
@@ -6554,7 +6394,7 @@ impl GnsscopeApp {
                         .grid_cols(if compact { 1 } else { 2 })
                         .gap(px(6.))
                         .child(self.plot_panel(
-                            ("速度与钟漂", "共享 epoch 时间轴"),
+                            "速度与钟漂",
                             velocity_plot(epochs, self.selected_epoch, palette),
                             palette,
                             PlotFocus::Velocity,
@@ -6562,7 +6402,7 @@ impl GnsscopeApp {
                             cx,
                         ))
                         .child(self.plot_panel(
-                            ("高度历史", altitude_statistics(epochs)),
+                            "高度历史 (m)",
                             altitude_plot(epochs, self.selected_epoch, palette),
                             palette,
                             PlotFocus::Altitude,
@@ -6905,11 +6745,6 @@ impl GnsscopeApp {
             .collect::<Vec<_>>();
         let visible_start_ms = (timeline_duration_ms as f32 * visible_start) as u64;
         let visible_duration_ms = (timeline_duration_ms as f32 * visible_span) as u64;
-        let receiver_time = self
-            .current_pvt()
-            .and_then(|pvt| pvt.time.receiver_time_sow)
-            .map(|sow| format!("SOW {sow:.3}"))
-            .unwrap_or_else(|| "SOW --".to_string());
         div()
             .flex_shrink_0()
             .h(px(154.))
@@ -6918,7 +6753,7 @@ impl GnsscopeApp {
             .border_color(palette.border)
             .child(
                 div()
-                    .h(px(32.))
+                    .h(px(34.))
                     .px(px(14.))
                     .flex()
                     .items_center()
@@ -6927,138 +6762,63 @@ impl GnsscopeApp {
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(11.))
+                            .text_size(px(12.5))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(palette.text)
                             .child(self.localized("选中运行时间线", "Selected run timeline")),
                     )
                     .child(
                         div()
-                            .mr(px(18.))
-                            .text_size(px(8.))
-                            .font_family(data_font_family())
-                            .text_color(palette.muted)
-                            .child(format!("{receiver_time}  ·  {}× view", self.timeline_zoom)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
+                            .text_size(px(11.5))
                             .font_family(data_font_family())
                             .text_color(palette.accent)
                             .child(format!("{epoch_number} / {epoch_count}")),
                     ),
             )
             .child(
-                div()
-                    .h(px(122.))
-                    .flex()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .px(px(14.))
-                            .pt(px(4.))
-                            .child(
-                                div()
-                                    .h(px(24.))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(3.))
-                                    .child(
-                                        Button::new("timeline-tools-zoom-in")
-                                            .h(px(22.))
-                                            .w(px(26.))
-                                            .ghost()
-                                            .rounded(px(2.))
-                                            .border_1()
-                                            .border_color(palette.border)
-                                            .label("+")
-                                            .tooltip(
-                                                self.localized("放大时间轴", "Zoom timeline in"),
-                                            )
-                                            .disabled(self.timeline_zoom == 4)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.adjust_timeline_zoom(true);
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("timeline-tools-zoom-out")
-                                            .h(px(22.))
-                                            .w(px(26.))
-                                            .ghost()
-                                            .rounded(px(2.))
-                                            .border_1()
-                                            .border_color(palette.border)
-                                            .label("−")
-                                            .tooltip(
-                                                self.localized("缩小时间轴", "Zoom timeline out"),
-                                            )
-                                            .disabled(self.timeline_zoom == 1)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.adjust_timeline_zoom(false);
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("timeline-tools-reset-zoom")
-                                            .h(px(22.))
-                                            .w(px(32.))
-                                            .ghost()
-                                            .rounded(px(2.))
-                                            .border_1()
-                                            .border_color(palette.border)
-                                            .label("1×")
-                                            .tooltip(
-                                                self.localized(
-                                                    "重置时间轴缩放",
-                                                    "Reset timeline zoom",
-                                                ),
-                                            )
-                                            .disabled(self.timeline_zoom == 1)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.timeline_zoom = 1;
-                                                cx.notify();
-                                            })),
-                                    ),
-                            )
-                            .child(
+                div().h(px(120.)).px(px(12.)).pt(px(7.)).pb(px(9.)).child(
+                    div()
+                        .h_full()
+                        .flex()
+                        .border_1()
+                        .border_color(palette.border)
+                        .bg(palette.background.opacity(0.16))
+                        .child(
+                            div().flex_1().min_w_0().px(px(12.)).py(px(8.)).child(
                                 div()
                                     .relative()
-                                    .h(px(60.))
-                                    .bg(palette.surface_alt.opacity(0.34))
-                                    .border_b_1()
-                                    .border_color(palette.muted.opacity(0.65))
+                                    .h_full()
+                                    .bg(palette.surface_alt.opacity(0.18))
                                     .child(
                                         div()
                                             .absolute()
-                                            .left(gpui::relative(cursor_percent))
-                                            .top_0()
-                                            .bottom_0()
-                                            .w(px(1.))
-                                            .bg(palette.accent)
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .top(px(-2.))
-                                                    .left(px(-4.))
-                                                    .text_size(px(9.))
-                                                    .text_color(palette.accent)
-                                                    .child("▼"),
-                                            ),
+                                            .left_0()
+                                            .right_0()
+                                            .top(px(42.))
+                                            .h(px(1.))
+                                            .bg(palette.muted.opacity(0.82)),
                                     )
-                                    .children((0..=40).map(|tick| {
-                                        let major = tick % 5 == 0;
+                                    .child(
                                         div()
                                             .absolute()
-                                            .left(gpui::relative(tick as f32 / 40.0))
-                                            .bottom_0()
+                                            .left_0()
+                                            .right_0()
+                                            .top(px(48.))
+                                            .h(px(1.))
+                                            .bg(palette.muted.opacity(0.42)),
+                                    )
+                                    .children((0..=50).map(|tick| {
+                                        let major = tick % 10 == 0;
+                                        div()
+                                            .absolute()
+                                            .left(gpui::relative(tick as f32 / 50.0))
+                                            .top(if major { px(40.) } else { px(45.) })
                                             .w(px(1.))
-                                            .h(if major { px(10.) } else { px(5.) })
+                                            .h(if major { px(11.) } else { px(4.) })
                                             .bg(if major {
-                                                palette.muted.opacity(0.75)
+                                                palette.text.opacity(0.58)
                                             } else {
-                                                palette.border.opacity(0.8)
+                                                palette.muted.opacity(0.42)
                                             })
                                     }))
                                     .children(markers.into_iter().map(
@@ -7069,37 +6829,40 @@ impl GnsscopeApp {
                                                 )))
                                                 .absolute()
                                                 .left(gpui::relative(percent))
-                                                .bottom(px(0.))
+                                                .top(px(4.))
                                                 .ml(px(-16.))
                                                 .w(px(32.))
-                                                .h(px(48.))
+                                                .h(px(34.))
                                                 .flex()
                                                 .flex_col()
                                                 .items_center()
-                                                .justify_end()
-                                                .text_size(px(9.))
+                                                .justify_start()
+                                                .text_size(px(8.5))
                                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                                 .font_family(data_font_family())
                                                 .text_color(color)
                                                 .child(label)
                                                 .child(
                                                     div()
-                                                        .mt(px(3.))
+                                                        .mt(px(2.))
                                                         .size(px(6.))
                                                         .rounded_full()
                                                         .bg(color),
                                                 )
-                                                .child(div().w(px(1.)).h(px(9.)).bg(color))
+                                                .child(
+                                                    div()
+                                                        .w(px(1.))
+                                                        .h(px(11.))
+                                                        .bg(color.opacity(0.88)),
+                                                )
                                         },
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .h(px(34.))
-                                    .flex()
-                                    .flex_col()
+                                    ))
                                     .child(
                                         div()
+                                            .absolute()
+                                            .left_0()
+                                            .right_0()
+                                            .top(px(58.))
                                             .h(px(15.))
                                             .flex()
                                             .items_center()
@@ -7114,179 +6877,222 @@ impl GnsscopeApp {
                                             })),
                                     )
                                     .child(
-                                        div().h(px(19.)).child(
-                                            Slider::new(&self.timeline)
-                                                .bg(palette.muted.opacity(0.55))
-                                                .text_color(palette.accent)
-                                                .disabled(epoch_count < 2),
-                                        ),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w(px(204.))
-                            .h_full()
-                            .flex_shrink_0()
-                            .border_l_1()
-                            .border_color(palette.border)
-                            .px(px(9.))
-                            .py(px(7.))
-                            .child(
-                                div()
-                                    .h(px(32.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        Button::new("epoch-first")
-                                            .ghost()
-                                            .rounded(px(2.))
-                                            .icon(IconName::ArrowLeft)
-                                            .tooltip(self.localized(
-                                                "跳到第一个 epoch",
-                                                "Jump to first epoch",
-                                            ))
-                                            .disabled(epoch_count == 0)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.jump_selected_epoch(0, window, cx);
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("epoch-previous")
-                                            .ghost()
-                                            .rounded(px(2.))
-                                            .icon(IconName::ChevronLeft)
-                                            .tooltip(
-                                                self.localized("上一个 epoch", "Previous epoch"),
-                                            )
-                                            .disabled(epoch_count == 0)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.step_selected_epoch(-1, window, cx);
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("epoch-next")
-                                            .ghost()
-                                            .rounded(px(2.))
-                                            .icon(IconName::ChevronRight)
-                                            .tooltip(self.localized("下一个 epoch", "Next epoch"))
-                                            .disabled(epoch_count == 0)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.step_selected_epoch(1, window, cx);
-                                                cx.notify();
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("epoch-last")
-                                            .ghost()
-                                            .rounded(px(2.))
-                                            .icon(IconName::ArrowRight)
-                                            .tooltip(self.localized(
-                                                "跳到最后一个 epoch",
-                                                "Jump to last epoch",
-                                            ))
-                                            .disabled(epoch_count == 0)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                let last =
-                                                    this.display_epochs().len().saturating_sub(1);
-                                                this.jump_selected_epoch(last, window, cx);
-                                                cx.notify();
-                                            })),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(5.))
-                                    .h(px(31.))
-                                    .flex()
-                                    .gap(px(5.))
-                                    .child(
                                         div()
-                                            .w(px(82.))
-                                            .h_full()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .rounded(px(2.))
-                                            .border_1()
-                                            .border_color(palette.border)
-                                            .child(
-                                                Button::new("timeline-zoom-out")
-                                                    .h_full()
-                                                    .ghost()
-                                                    .rounded(px(0.))
-                                                    .label("−")
-                                                    .tooltip(self.localized(
-                                                        "缩小时间轴",
-                                                        "Zoom timeline out",
-                                                    ))
-                                                    .disabled(self.timeline_zoom == 1)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.adjust_timeline_zoom(false);
-                                                        cx.notify();
-                                                    })),
-                                            )
+                                            .absolute()
+                                            .left(gpui::relative(cursor_percent))
+                                            .top(px(8.))
+                                            .bottom_0()
+                                            .ml(px(-1.))
+                                            .w(px(2.))
+                                            .bg(palette.accent)
                                             .child(
                                                 div()
-                                                    .w(px(28.))
-                                                    .text_center()
-                                                    .font_family(data_font_family())
-                                                    .text_size(px(8.))
-                                                    .text_color(palette.text)
-                                                    .child(format!("{}×", self.timeline_zoom)),
-                                            )
-                                            .child(
-                                                Button::new("timeline-zoom-in")
-                                                    .h_full()
-                                                    .ghost()
-                                                    .rounded(px(0.))
-                                                    .label("+")
-                                                    .tooltip(self.localized(
-                                                        "放大时间轴",
-                                                        "Zoom timeline in",
-                                                    ))
-                                                    .disabled(self.timeline_zoom == 4)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.adjust_timeline_zoom(true);
-                                                        cx.notify();
-                                                    })),
+                                                    .absolute()
+                                                    .top(px(-10.))
+                                                    .left(px(-5.))
+                                                    .text_size(px(11.))
+                                                    .text_color(palette.accent)
+                                                    .child("▼"),
                                             ),
                                     )
                                     .child(
-                                        Button::new("epoch-follow-live")
-                                            .h_full()
-                                            .flex_1()
-                                            .ghost()
-                                            .rounded(px(2.))
-                                            .border_1()
-                                            .border_color(if self.follow_live {
-                                                palette.accent
-                                            } else {
-                                                palette.border
-                                            })
-                                            .text_color(if self.follow_live {
-                                                palette.accent
-                                            } else {
-                                                palette.muted
-                                            })
-                                            .bg(if self.follow_live {
-                                                palette.accent.opacity(0.08)
-                                            } else {
-                                                palette.surface
-                                            })
-                                            .icon(IconName::Redo2)
-                                            .label(self.localized("跟随", "Follow"))
-                                            .disabled(self.live_run_id.is_none())
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.return_to_live(window, cx);
-                                                cx.notify();
-                                            })),
+                                        div()
+                                            .absolute()
+                                            .left_0()
+                                            .right_0()
+                                            .top_0()
+                                            .h(px(24.))
+                                            .flex()
+                                            .items_center()
+                                            .cursor_ew_resize()
+                                            .child(
+                                                Slider::new(&self.timeline)
+                                                    .bg(gpui::transparent_black())
+                                                    .text_color(gpui::transparent_black())
+                                                    .disabled(epoch_count < 2),
+                                            ),
                                     ),
                             ),
-                    ),
+                        )
+                        .child(
+                            div()
+                                .w(px(204.))
+                                .h_full()
+                                .flex_shrink_0()
+                                .border_l_1()
+                                .border_color(palette.border)
+                                .px(px(10.))
+                                .py(px(8.))
+                                .flex()
+                                .flex_col()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .h(px(32.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            Button::new("epoch-first")
+                                                .ghost()
+                                                .rounded(px(2.))
+                                                .icon(IconName::ArrowLeft)
+                                                .tooltip(self.localized(
+                                                    "跳到第一个 epoch",
+                                                    "Jump to first epoch",
+                                                ))
+                                                .disabled(epoch_count == 0)
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.jump_selected_epoch(0, window, cx);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("epoch-previous")
+                                                .ghost()
+                                                .rounded(px(2.))
+                                                .icon(IconName::ChevronLeft)
+                                                .tooltip(
+                                                    self.localized(
+                                                        "上一个 epoch",
+                                                        "Previous epoch",
+                                                    ),
+                                                )
+                                                .disabled(epoch_count == 0)
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.step_selected_epoch(-1, window, cx);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("epoch-next")
+                                                .ghost()
+                                                .rounded(px(2.))
+                                                .icon(IconName::ChevronRight)
+                                                .tooltip(
+                                                    self.localized("下一个 epoch", "Next epoch"),
+                                                )
+                                                .disabled(epoch_count == 0)
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.step_selected_epoch(1, window, cx);
+                                                    cx.notify();
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new("epoch-last")
+                                                .ghost()
+                                                .rounded(px(2.))
+                                                .icon(IconName::ArrowRight)
+                                                .tooltip(self.localized(
+                                                    "跳到最后一个 epoch",
+                                                    "Jump to last epoch",
+                                                ))
+                                                .disabled(epoch_count == 0)
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    let last = this
+                                                        .display_epochs()
+                                                        .len()
+                                                        .saturating_sub(1);
+                                                    this.jump_selected_epoch(last, window, cx);
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                )
+                                .child(div().h(px(1.)).w_full().bg(palette.border))
+                                .child(
+                                    div()
+                                        .h(px(31.))
+                                        .flex()
+                                        .gap(px(5.))
+                                        .child(
+                                            div()
+                                                .w(px(82.))
+                                                .h_full()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .rounded(px(2.))
+                                                .border_1()
+                                                .border_color(palette.border)
+                                                .child(
+                                                    Button::new("timeline-zoom-out")
+                                                        .h_full()
+                                                        .w(px(26.))
+                                                        .flex_shrink_0()
+                                                        .ghost()
+                                                        .rounded(px(0.))
+                                                        .label("−")
+                                                        .tooltip(self.localized(
+                                                            "缩小时间轴",
+                                                            "Zoom timeline out",
+                                                        ))
+                                                        .disabled(self.timeline_zoom == 1)
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.adjust_timeline_zoom(false);
+                                                            cx.notify();
+                                                        })),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .w(px(28.))
+                                                        .text_center()
+                                                        .font_family(data_font_family())
+                                                        .text_size(px(8.))
+                                                        .text_color(palette.text)
+                                                        .child(format!("{}×", self.timeline_zoom)),
+                                                )
+                                                .child(
+                                                    Button::new("timeline-zoom-in")
+                                                        .h_full()
+                                                        .w(px(26.))
+                                                        .flex_shrink_0()
+                                                        .ghost()
+                                                        .rounded(px(0.))
+                                                        .label("+")
+                                                        .tooltip(self.localized(
+                                                            "放大时间轴",
+                                                            "Zoom timeline in",
+                                                        ))
+                                                        .disabled(self.timeline_zoom == 4)
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.adjust_timeline_zoom(true);
+                                                            cx.notify();
+                                                        })),
+                                                ),
+                                        )
+                                        .child(
+                                            Button::new("epoch-follow-live")
+                                                .h_full()
+                                                .flex_1()
+                                                .ghost()
+                                                .rounded(px(2.))
+                                                .border_1()
+                                                .border_color(if self.follow_live {
+                                                    palette.accent
+                                                } else {
+                                                    palette.border
+                                                })
+                                                .text_color(if self.follow_live {
+                                                    palette.accent
+                                                } else {
+                                                    palette.muted
+                                                })
+                                                .bg(if self.follow_live {
+                                                    palette.accent.opacity(0.08)
+                                                } else {
+                                                    palette.surface
+                                                })
+                                                .icon(IconName::Redo2)
+                                                .label(self.localized("跟随", "Follow"))
+                                                .disabled(self.live_run_id.is_none())
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.return_to_live(window, cx);
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                ),
+                        ),
+                ),
             )
     }
 
@@ -7318,15 +7124,15 @@ impl GnsscopeApp {
             .unwrap_or_else(|| "Idle".to_string());
 
         div()
-            .h(px(32.))
+            .h(px(metrics::STATUS_BAR_HEIGHT))
             .flex_shrink_0()
-            .bg(palette.background)
+            .bg(palette.sidebar)
             .border_t_1()
             .border_color(palette.border)
             .flex()
             .items_center()
             .text_size(px(9.))
-            .text_color(palette.muted)
+            .text_color(palette.faint)
             .child(
                 Button::new("toggle-runs-sidebar")
                     .ghost()
@@ -7404,14 +7210,13 @@ impl GnsscopeApp {
 
     fn plot_panel(
         &self,
-        header: (impl Into<SharedString>, impl Into<SharedString>),
+        title: impl Into<SharedString>,
         plot: impl IntoElement,
         palette: Palette,
         focus: PlotFocus,
         layout: PlotPanelLayout,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (title, subtitle) = header;
         let expanded = matches!(layout, PlotPanelLayout::Expanded);
         div()
             .min_h(if expanded { px(620.) } else { px(310.) })
@@ -7422,13 +7227,15 @@ impl GnsscopeApp {
             .bg(palette.surface)
             .border_1()
             .border_color(palette.border)
-            .p(px(12.))
+            .px(px(11.))
+            .pt(px(10.))
+            .pb(px(11.))
             .child(
                 div()
                     .flex()
-                    .items_start()
+                    .items_center()
                     .justify_between()
-                    .child(Self::section_title(title, subtitle, palette))
+                    .child(Self::section_title(title, palette))
                     .child(
                         div()
                             .flex()
@@ -7477,7 +7284,7 @@ impl GnsscopeApp {
             )
             .child(
                 div()
-                    .mt(px(8.))
+                    .mt(px(6.))
                     .flex_1()
                     .min_h(if expanded { px(554.) } else { px(264.) })
                     .child(plot),
@@ -9192,48 +8999,6 @@ fn altitude_plot(
     )
 }
 
-fn altitude_statistics(epochs: &[GuiPvtViewModel]) -> String {
-    let points = epochs
-        .iter()
-        .enumerate()
-        .filter(|(_, pvt)| pvt_position_is_displayable(pvt))
-        .map(|(index, pvt)| (index as f64, pvt.altitude_m))
-        .collect::<Vec<_>>();
-    let values = points.iter().map(|point| point.1).collect::<Vec<_>>();
-    if values.is_empty() {
-        return "等待有效高度".to_string();
-    }
-    let (mean, standard_deviation) = mean_and_population_sigma(&values);
-    let averaged = moving_average_points(&points, 10)
-        .into_iter()
-        .map(|point| point.1)
-        .collect::<Vec<_>>();
-    let averaged_sigma = (!averaged.is_empty()).then(|| mean_and_population_sigma(&averaged).1);
-    let minimum = values.iter().copied().fold(f64::INFINITY, f64::min);
-    let maximum = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    match averaged_sigma {
-        Some(averaged_sigma) => format!(
-            "均值 {:.1} m · 原始 σ {:.1} m · 10 点 σ {:.1} m · {:.1}–{:.1} m",
-            mean, standard_deviation, averaged_sigma, minimum, maximum
-        ),
-        None => format!(
-            "均值 {:.1} m · 原始 σ {:.1} m · {:.1}–{:.1} m",
-            mean, standard_deviation, minimum, maximum
-        ),
-    }
-}
-
-fn mean_and_population_sigma(values: &[f64]) -> (f64, f64) {
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let sigma = (values
-        .iter()
-        .map(|value| (value - mean).powi(2))
-        .sum::<f64>()
-        / values.len() as f64)
-        .sqrt();
-    (mean, sigma)
-}
-
 fn moving_average_points(points: &[(f64, f64)], depth: usize) -> Vec<(f64, f64)> {
     points
         .windows(depth)
@@ -9388,10 +9153,10 @@ mod sky_plot_tests {
 
 #[cfg(test)]
 mod position_quality_tests {
-    use super::{altitude_statistics, moving_average_points, pvt_position_is_displayable};
+    use super::{moving_average_points, pvt_position_is_displayable};
 
     #[test]
-    fn legacy_implausible_altitude_is_excluded_from_position_and_statistics() {
+    fn legacy_implausible_altitude_is_excluded_from_position_plots() {
         let mut valid = crate::sample_pvt_view_model();
         valid.altitude_m = 70.0;
         let mut implausible = valid.clone();
@@ -9402,10 +9167,6 @@ mod position_quality_tests {
         assert!(pvt_position_is_displayable(&valid));
         assert!(!pvt_position_is_displayable(&implausible));
         assert!(!pvt_position_is_displayable(&stratospheric));
-        assert_eq!(
-            altitude_statistics(&[valid, implausible]),
-            "均值 70.0 m · 原始 σ 0.0 m · 70.0–70.0 m"
-        );
     }
 
     #[test]

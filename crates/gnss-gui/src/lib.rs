@@ -11,6 +11,7 @@ pub mod screen;
 pub mod settings;
 pub mod state;
 pub mod view_model;
+mod visual_system;
 pub mod worker;
 
 pub use app::GnsscopeApp;
