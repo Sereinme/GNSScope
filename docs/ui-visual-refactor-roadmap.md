@@ -445,9 +445,20 @@ Reference guidance:
 Gate:
 
 - Empty draft, processing run, completed run, and selected historical run inhabit one
-  shell without legacy global page navigation.
+shell without legacy global page navigation.
 - Active and selected run identities remain independently visible.
 - Narrow layout preserves plots, active progress, and epoch access.
+
+Checkpoint (2026-09-05): the first structural slice adds `ui/shell.rs`, centralizing
+the existing compact/drawer/configuration thresholds and extracting the root,
+Runs/content, and workspace/side/timeline frames from `app.rs`. Application state,
+receiver work, persistence, and callbacks remain owned by `GnsscopeApp`. Tests cover
+the 1568, 1440, 1100, and 800 px policy cases; GUI, complete-workspace real-data,
+strict Clippy, Release build, and macOS packaging checks pass. The follow-up narrow
+slice defaults to the workbench below 900 px and uses the status-strip action to open
+Runs as a transient full-width replacement without changing the persisted desktop
+preference. The Phase 3 gate remains open for region-level extraction and unlocked
+packaged-app visual evidence.
 
 ### Phase 4 — Runs dock and New Analysis workflow
 

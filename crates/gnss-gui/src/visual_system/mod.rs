@@ -6,10 +6,16 @@
 //! adapter in this module.
 
 mod components;
+mod controls;
 mod primitives;
 mod semantic;
 
 pub(crate) use components::apply_component_theme;
+pub(crate) use controls::{
+    gnss_badge, gnss_divider, gnss_input, gnss_progress, gnss_scroll_area, gnss_search_input,
+    BadgeKind, ButtonKind, ControlSize, ControlState, GnssButton, GnssMenuItem, GnssRow,
+    GnssSwitch,
+};
 pub(crate) use primitives::{data_font_family, interface_font_family, metrics};
 pub(crate) use semantic::Palette;
 

@@ -1,5 +1,8 @@
+use crate::ui::shell::{shell_body, shell_root, workspace_shell, ShellLayout};
 use crate::visual_system::{
-    apply_component_theme, data_font_family, interface_font_family, metrics, Palette,
+    apply_component_theme, data_font_family, gnss_badge, gnss_divider, gnss_input, gnss_progress,
+    gnss_scroll_area, gnss_search_input, interface_font_family, metrics, BadgeKind, ButtonKind,
+    ControlSize, ControlState, GnssButton, GnssMenuItem, GnssRow, GnssSwitch, Palette,
 };
 use crate::{
     spawn_streaming_worker, ActiveWorker, GuiChannelStatus, GuiDiagnosticEvent,
@@ -17,10 +20,10 @@ use gpui::{
 use gpui_component::{
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState},
+    menu::PopupMenuItem,
     progress::Progress,
     scroll::ScrollableElement,
     slider::{Slider, SliderEvent, SliderState},
-    switch::Switch,
     ActiveTheme, Disableable, IconName, Theme, ThemeMode, TitleBar,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -371,11 +374,14 @@ impl HistoryFilter {
         }
     }
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::All => "全部",
-            Self::Completed => "已完成",
-            Self::NeedsAttention => "需处理",
+    fn label(self, language: InterfaceLanguage) -> &'static str {
+        match (self, language) {
+            (Self::All, InterfaceLanguage::SimplifiedChinese) => "全部",
+            (Self::Completed, InterfaceLanguage::SimplifiedChinese) => "已完成",
+            (Self::NeedsAttention, InterfaceLanguage::SimplifiedChinese) => "需处理",
+            (Self::All, InterfaceLanguage::English) => "All runs",
+            (Self::Completed, InterfaceLanguage::English) => "Completed",
+            (Self::NeedsAttention, InterfaceLanguage::English) => "Needs attention",
         }
     }
 }
@@ -436,6 +442,7 @@ pub struct GnsscopeApp {
     selected_epoch: Option<usize>,
     timeline: Entity<SliderState>,
     history_search: Entity<InputState>,
+    gallery_input: Entity<InputState>,
     setting_inputs: BTreeMap<&'static str, Entity<InputState>>,
     setting_parse_errors: BTreeMap<&'static str, &'static str>,
     history_filter: HistoryFilter,
@@ -455,6 +462,10 @@ pub struct GnsscopeApp {
     run_configuration_visible: bool,
     timeline_visible: bool,
     timeline_zoom: usize,
+    component_gallery: bool,
+    gallery_selected_tab: usize,
+    gallery_switch_checked: bool,
+    gallery_activation_count: usize,
     status_message: String,
 }
 
@@ -545,6 +556,12 @@ impl GnsscopeApp {
             }
         })
         .detach();
+        let gallery_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(match interface_language {
+                InterfaceLanguage::SimplifiedChinese => "输入状态示例",
+                InterfaceLanguage::English => "Input state example",
+            })
+        });
         let mut setting_inputs = BTreeMap::new();
         for &field in EDITABLE_SETTING_FIELDS {
             let input = cx.new(|cx| {
@@ -612,6 +629,7 @@ impl GnsscopeApp {
             selected_epoch,
             timeline,
             history_search,
+            gallery_input,
             setting_inputs,
             setting_parse_errors: BTreeMap::new(),
             history_filter: HistoryFilter::All,
@@ -659,6 +677,11 @@ impl GnsscopeApp {
             run_configuration_visible: true,
             timeline_visible,
             timeline_zoom: 1,
+            component_gallery: std::env::var("GNSSCOPE_COMPONENT_GALLERY")
+                .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true")),
+            gallery_selected_tab: 0,
+            gallery_switch_checked: true,
+            gallery_activation_count: 0,
             status_message: "请选择 IQ 文件开始解算".to_string(),
         };
         if let Some(settings) = app.selected_run().map(|run| run.settings.clone()) {
@@ -872,6 +895,37 @@ impl GnsscopeApp {
         }
     }
 
+    fn history_filter_menu_item(
+        app: Entity<Self>,
+        filter: HistoryFilter,
+        current: HistoryFilter,
+        language: InterfaceLanguage,
+    ) -> PopupMenuItem {
+        PopupMenuItem::new(filter.label(language))
+            .checked(filter == current)
+            .on_click(move |_, _, cx| {
+                app.update(cx, |this, cx| {
+                    this.history_filter = filter;
+                    cx.notify();
+                });
+            })
+    }
+
+    fn iq_format_menu_item(
+        app: Entity<Self>,
+        format: crate::GuiIqFormat,
+        current: crate::GuiIqFormat,
+    ) -> PopupMenuItem {
+        PopupMenuItem::new(format!("{format:?}"))
+            .checked(format == current)
+            .on_click(move |_, _, cx| {
+                app.update(cx, |this, cx| {
+                    this.settings.iq_format = format;
+                    cx.notify();
+                });
+            })
+    }
+
     fn set_timeline_visibility(&mut self, visible: bool) {
         self.timeline_visible = visible;
         if let Some(library) = &self.library {
@@ -1074,13 +1128,6 @@ impl GnsscopeApp {
         for (input, value) in updates {
             input.update(cx, |input, cx| input.set_value(value, window, cx));
         }
-    }
-
-    fn cycle_iq_format(&mut self) {
-        self.settings.iq_format = match self.settings.iq_format {
-            crate::GuiIqFormat::Int8Interleaved => crate::GuiIqFormat::Int16Interleaved,
-            crate::GuiIqFormat::Int16Interleaved => crate::GuiIqFormat::Int8Interleaved,
-        };
     }
 
     fn toggle_setting(&mut self, field: &'static str) {
@@ -1720,13 +1767,16 @@ impl GnsscopeApp {
                             .child(self.localized("正在处理", "Processing"))
                     }))
                     .children((self.page == AppPage::NewAnalysis).then(|| {
-                        Button::new("title-select-file")
-                            .ghost()
-                            .text_color(palette.text)
-                            .icon(IconName::FolderOpen)
-                            .label(self.localized("选择 IQ", "Choose IQ"))
-                            .tooltip(self.localized("选择 IQ 文件", "Select IQ file"))
-                            .on_click(cx.listener(|this, _, _, cx| this.select_file(cx)))
+                        GnssButton::new(
+                            "title-select-file",
+                            self.localized("选择 IQ", "Choose IQ"),
+                            palette,
+                        )
+                        .kind(ButtonKind::Ghost)
+                        .size(ControlSize::Compact)
+                        .icon(IconName::FolderOpen)
+                        .tooltip(self.localized("选择 IQ 文件", "Select IQ file"))
+                        .on_click(cx.listener(|this, _, _, cx| this.select_file(cx)))
                     }))
                     .child(
                         div()
@@ -1738,53 +1788,59 @@ impl GnsscopeApp {
                     .children(
                         (self.page == AppPage::Workspace && is_active && !self.follow_live).then(
                             || {
-                                Button::new("return-live")
-                                    .ghost()
-                                    .text_color(palette.accent)
-                                    .icon(IconName::Redo2)
-                                    .tooltip(
-                                        self.localized("返回最新 epoch", "Return to latest epoch"),
-                                    )
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                GnssButton::icon_only(
+                                    "return-live",
+                                    IconName::Redo2,
+                                    self.localized("返回最新 epoch", "Return to latest epoch"),
+                                    palette,
+                                )
+                                .size(ControlSize::Compact)
+                                .tooltip(self.localized("返回最新 epoch", "Return to latest epoch"))
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
                                         this.return_to_live(window, cx);
                                         cx.notify();
-                                    }))
+                                    },
+                                ))
                             },
                         ),
                     )
                     .children((self.page == AppPage::Workspace).then(|| {
-                        Button::new("settings")
-                            .ghost()
-                            .text_color(palette.text)
-                            .icon(IconName::Settings2)
-                            .tooltip(
-                                self.localized("接收机详细配置", "Receiver processing settings"),
-                            )
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                let side_drawer =
-                                    toggled_side_drawer(this.side_drawer, SideDrawer::Settings);
-                                if side_drawer == Some(SideDrawer::Settings) {
-                                    this.sync_setting_inputs(window, cx);
-                                }
-                                this.side_drawer = side_drawer;
-                                cx.notify();
-                            }))
+                        GnssButton::icon_only(
+                            "settings",
+                            IconName::Settings2,
+                            self.localized("接收机详细配置", "Receiver processing settings"),
+                            palette,
+                        )
+                        .size(ControlSize::Compact)
+                        .tooltip(self.localized("接收机详细配置", "Receiver processing settings"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let side_drawer =
+                                toggled_side_drawer(this.side_drawer, SideDrawer::Settings);
+                            if side_drawer == Some(SideDrawer::Settings) {
+                                this.sync_setting_inputs(window, cx);
+                            }
+                            this.side_drawer = side_drawer;
+                            cx.notify();
+                        }))
                     }))
                     .children((self.page == AppPage::NewAnalysis && !is_active).then(|| {
-                        Button::new("start-analysis")
-                            .primary()
-                            .bg(palette.accent)
-                            .text_color(palette.on_accent)
-                            .icon(IconName::SquareTerminal)
-                            .label(self.localized("开始处理", "Start processing"))
-                            .disabled(!self.can_enqueue())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.enqueue_selected_or_draft(cx);
-                                if this.active_run.is_some() {
-                                    this.page = AppPage::Workspace;
-                                }
-                                cx.notify();
-                            }))
+                        GnssButton::new(
+                            "start-analysis",
+                            self.localized("开始处理", "Start processing"),
+                            palette,
+                        )
+                        .kind(ButtonKind::Primary)
+                        .size(ControlSize::Compact)
+                        .icon(IconName::SquareTerminal)
+                        .disabled(!self.can_enqueue())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.enqueue_selected_or_draft(cx);
+                            if this.active_run.is_some() {
+                                this.page = AppPage::Workspace;
+                            }
+                            cx.notify();
+                        }))
                     }))
                     .children((self.page == AppPage::Workspace).then(|| {
                         if is_active {
@@ -1793,61 +1849,65 @@ impl GnsscopeApp {
                                 .items_center()
                                 .gap(px(4.))
                                 .child(
-                                    Button::new("enqueue")
-                                        .primary()
-                                        .bg(palette.accent)
-                                        .text_color(palette.on_accent)
-                                        .icon(IconName::Plus)
-                                        .tooltip(self.localized("加入等待队列", "Add to queue"))
-                                        .disabled(!self.can_enqueue())
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.enqueue_selected_or_draft(cx)
-                                        })),
+                                    GnssButton::icon_only(
+                                        "enqueue",
+                                        IconName::Plus,
+                                        self.localized("加入等待队列", "Add to queue"),
+                                        palette,
+                                    )
+                                    .kind(ButtonKind::Primary)
+                                    .size(ControlSize::Compact)
+                                    .disabled(!self.can_enqueue())
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| this.enqueue_selected_or_draft(cx),
+                                    )),
                                 )
                                 .child(
-                                    Button::new("cancel")
-                                        .danger()
-                                        .icon(IconName::CircleX)
-                                        .tooltip(
-                                            self.localized(
-                                                "取消当前解算",
-                                                "Cancel current solution",
-                                            ),
-                                        )
-                                        .on_click(
-                                            cx.listener(|this, _, _, _| this.cancel_active()),
-                                        ),
+                                    GnssButton::icon_only(
+                                        "cancel",
+                                        IconName::CircleX,
+                                        self.localized("取消当前解算", "Cancel current solution"),
+                                        palette,
+                                    )
+                                    .kind(ButtonKind::Destructive)
+                                    .size(ControlSize::Compact)
+                                    .tooltip(
+                                        self.localized("取消当前解算", "Cancel current solution"),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, _| this.cancel_active())),
                                 )
                                 .into_any_element()
                         } else if self.selected_run_id.is_some() {
-                            Button::new("run")
-                                .primary()
-                                .bg(palette.accent)
-                                .text_color(palette.on_accent)
-                                .icon(IconName::Replace)
-                                .tooltip(self.localized(
+                            GnssButton::icon_only(
+                                "run",
+                                IconName::Replace,
+                                self.localized(
                                     "按此配置重新解算",
                                     "Reprocess with this configuration",
-                                ))
-                                .disabled(!self.can_enqueue())
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.enqueue_selected_or_draft(cx)
-                                    }),
-                                )
-                                .into_any_element()
+                                ),
+                                palette,
+                            )
+                            .kind(ButtonKind::Primary)
+                            .size(ControlSize::Compact)
+                            .disabled(!self.can_enqueue())
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.enqueue_selected_or_draft(cx)),
+                            )
+                            .into_any_element()
                         } else {
-                            Button::new("workspace-new-analysis")
-                                .primary()
-                                .bg(palette.accent)
-                                .text_color(palette.on_accent)
-                                .icon(IconName::Plus)
-                                .label(self.localized("新建分析", "New analysis"))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.start_new_task(window, cx);
-                                    cx.notify();
-                                }))
-                                .into_any_element()
+                            GnssButton::new(
+                                "workspace-new-analysis",
+                                self.localized("新建分析", "New analysis"),
+                                palette,
+                            )
+                            .kind(ButtonKind::Primary)
+                            .size(ControlSize::Compact)
+                            .icon(IconName::Plus)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.start_new_task(window, cx);
+                                cx.notify();
+                            }))
+                            .into_any_element()
                         }
                     })),
             )
@@ -1932,37 +1992,30 @@ impl GnsscopeApp {
                     )
                     .child(div().flex_1())
                     .children((!compact).then(|| {
-                        div().w(px(360.)).h(px(28.)).flex_shrink_0().child(
-                            Input::new(&self.history_search)
-                                .prefix(IconName::Search)
-                                .bg(palette.surface_raised)
-                                .border_color(palette.border_strong),
-                        )
+                        div()
+                            .w(px(360.))
+                            .h(px(28.))
+                            .flex_shrink_0()
+                            .child(gnss_search_input(&self.history_search, palette))
                     }))
                     .child(div().flex_1())
                     .child(
-                        Button::new("global-interface-settings")
-                            .ghost()
-                            .rounded(px(3.))
-                            .text_color(if self.page == AppPage::InterfaceSettings {
-                                palette.accent
-                            } else {
-                                palette.muted
-                            })
-                            .bg(if self.page == AppPage::InterfaceSettings {
-                                palette.accent_wash
-                            } else {
-                                palette.sidebar
-                            })
-                            .icon(IconName::Settings2)
-                            .label(self.localized("设置", "Settings"))
-                            .tooltip(self.localized("打开界面设置", "Open interface settings"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.page = AppPage::InterfaceSettings;
-                                this.side_drawer = None;
-                                this.focused_plot = None;
-                                cx.notify();
-                            })),
+                        GnssButton::new(
+                            "global-interface-settings",
+                            self.localized("设置", "Settings"),
+                            palette,
+                        )
+                        .kind(ButtonKind::Ghost)
+                        .size(ControlSize::Compact)
+                        .selected(self.page == AppPage::InterfaceSettings)
+                        .icon(IconName::Settings2)
+                        .tooltip(self.localized("打开界面设置", "Open interface settings"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.page = AppPage::InterfaceSettings;
+                            this.side_drawer = None;
+                            this.focused_plot = None;
+                            cx.notify();
+                        })),
                     ),
             )
     }
@@ -2259,7 +2312,7 @@ impl GnsscopeApp {
                                     .icon(IconName::SortDescending)
                                     .label(match (self.interface_language, self.history_filter) {
                                         (InterfaceLanguage::SimplifiedChinese, filter) => {
-                                            filter.label()
+                                            filter.label(self.interface_language)
                                         }
                                         (InterfaceLanguage::English, HistoryFilter::All) => "All",
                                         (InterfaceLanguage::English, HistoryFilter::Completed) => {
@@ -2452,14 +2505,23 @@ impl GnsscopeApp {
             .into_any_element()
     }
 
-    fn render_runs_dock(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render_runs_dock(
+        &self,
+        palette: Palette,
+        full_width: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let history_query = self.history_search.read(cx).value().to_string();
+        let filter_menu_app = cx.entity();
+        let current_filter = self.history_filter;
+        let interface_language = self.interface_language;
         let active = self.active_run.as_ref().map(|run| {
             let id = run.id;
             let selected = self.selected_run_id == Some(id);
             let elapsed = format_timeline_time(processing_run_elapsed_ms(run));
             div()
                 .id(SharedString::from(format!("active-run-{id}")))
+                .tab_index(0)
                 .px(px(12.))
                 .py(px(10.))
                 .cursor_pointer()
@@ -2476,6 +2538,10 @@ impl GnsscopeApp {
                     palette.accent
                 } else {
                     palette.sidebar
+                })
+                .focus(|style| style.border_2().border_color(palette.focus_ring))
+                .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                    window.prevent_default();
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.page = AppPage::Workspace;
@@ -2534,14 +2600,11 @@ impl GnsscopeApp {
                                 .text_color(palette.healthy)
                                 .child(self.localized("处理中", "Running")),
                         )
-                        .child(
-                            div().flex_1().child(
-                                Progress::new()
-                                    .h(px(4.))
-                                    .bg(palette.accent)
-                                    .value((run.progress * 100.0) as f32),
-                            ),
-                        ),
+                        .child(div().flex_1().child(gnss_progress(
+                            (run.progress * 100.0) as f32,
+                            palette,
+                            false,
+                        ))),
                 )
                 .child(
                     div()
@@ -2559,8 +2622,11 @@ impl GnsscopeApp {
         });
 
         div()
-            .w(px(metrics::RUNS_DOCK_WIDTH))
-            .min_w(px(metrics::RUNS_DOCK_MIN_WIDTH))
+            .when(full_width, |this| this.w_full().min_w_0())
+            .when(!full_width, |this| {
+                this.w(px(metrics::RUNS_DOCK_WIDTH))
+                    .min_w(px(metrics::RUNS_DOCK_MIN_WIDTH))
+            })
             .h_full()
             .flex_shrink_0()
             .bg(palette.sidebar)
@@ -2586,28 +2652,48 @@ impl GnsscopeApp {
                             .child(self.localized("运行", "Runs")),
                     )
                     .child(
-                        Button::new("runs-new-analysis")
-                            .ghost()
-                            .rounded(px(metrics::CONTROL_RADIUS))
-                            .text_color(palette.muted)
-                            .icon(IconName::Plus)
-                            .tooltip(self.localized("新建分析 · ⌘N", "New analysis · Cmd+N"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.start_new_task(window, cx);
-                                cx.notify();
-                            })),
+                        GnssButton::icon_only(
+                            "runs-new-analysis",
+                            IconName::Plus,
+                            self.localized("新建分析 · ⌘N", "New analysis · Cmd+N"),
+                            palette,
+                        )
+                        .size(ControlSize::Compact)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.start_new_task(window, cx);
+                            cx.notify();
+                        })),
                     )
                     .child(
-                        Button::new("runs-filter-menu")
-                            .ghost()
-                            .rounded(px(metrics::CONTROL_RADIUS))
-                            .text_color(palette.muted)
-                            .icon(IconName::Ellipsis)
-                            .tooltip(self.localized("切换运行筛选", "Cycle run filter"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.history_filter = this.history_filter.next();
-                                cx.notify();
-                            })),
+                        GnssButton::icon_only(
+                            "runs-filter-menu",
+                            IconName::Ellipsis,
+                            self.localized("选择运行筛选", "Choose run filter"),
+                            palette,
+                        )
+                        .size(ControlSize::Compact)
+                        .selected(current_filter != HistoryFilter::All)
+                        .dropdown_menu(move |menu, _, _| {
+                            menu.min_w(px(172.))
+                                .item(Self::history_filter_menu_item(
+                                    filter_menu_app.clone(),
+                                    HistoryFilter::All,
+                                    current_filter,
+                                    interface_language,
+                                ))
+                                .item(Self::history_filter_menu_item(
+                                    filter_menu_app.clone(),
+                                    HistoryFilter::Completed,
+                                    current_filter,
+                                    interface_language,
+                                ))
+                                .item(Self::history_filter_menu_item(
+                                    filter_menu_app.clone(),
+                                    HistoryFilter::NeedsAttention,
+                                    current_filter,
+                                    interface_language,
+                                ))
+                        }),
                     ),
             )
             .child(
@@ -2618,12 +2704,7 @@ impl GnsscopeApp {
                     .py(px(7.))
                     .border_b_1()
                     .border_color(palette.border)
-                    .child(
-                        Input::new(&self.history_search)
-                            .prefix(IconName::Search)
-                            .bg(palette.surface_raised)
-                            .border_color(palette.border_strong),
-                    ),
+                    .child(gnss_search_input(&self.history_search, palette)),
             )
             .child(
                 div()
@@ -2693,34 +2774,46 @@ impl GnsscopeApp {
                                     .flex()
                                     .items_center()
                                     .child(
-                                        Button::new(SharedString::from(format!("dock-up-{id}")))
-                                            .ghost()
-                                            .icon(IconName::ChevronUp)
-                                            .tooltip(self.localized("上移", "Move up"))
-                                            .disabled(index == 0)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                        GnssButton::icon_only(
+                                            SharedString::from(format!("dock-up-{id}")),
+                                            IconName::ChevronUp,
+                                            self.localized("上移", "Move up"),
+                                            palette,
+                                        )
+                                        .size(ControlSize::Compact)
+                                        .disabled(index == 0)
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
                                                 this.move_queued(id, -1);
                                                 cx.notify();
-                                            })),
+                                            }),
+                                        ),
                                     )
                                     .child(
-                                        Button::new(SharedString::from(format!("dock-down-{id}")))
-                                            .ghost()
-                                            .icon(IconName::ChevronDown)
-                                            .tooltip(self.localized("下移", "Move down"))
-                                            .disabled(index + 1 == self.queue.len())
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                        GnssButton::icon_only(
+                                            SharedString::from(format!("dock-down-{id}")),
+                                            IconName::ChevronDown,
+                                            self.localized("下移", "Move down"),
+                                            palette,
+                                        )
+                                        .size(ControlSize::Compact)
+                                        .disabled(index + 1 == self.queue.len())
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
                                                 this.move_queued(id, 1);
                                                 cx.notify();
-                                            })),
+                                            }),
+                                        ),
                                     )
                                     .child(
-                                        Button::new(SharedString::from(format!(
-                                            "dock-cancel-{id}"
-                                        )))
-                                        .ghost()
-                                        .icon(IconName::CircleX)
-                                        .tooltip(self.localized("取消排队", "Remove from queue"))
+                                        GnssButton::icon_only(
+                                            SharedString::from(format!("dock-cancel-{id}")),
+                                            IconName::CircleX,
+                                            self.localized("取消排队", "Remove from queue"),
+                                            palette,
+                                        )
+                                        .kind(ButtonKind::Destructive)
+                                        .size(ControlSize::Compact)
                                         .on_click(
                                             cx.listener(move |this, _, _, cx| {
                                                 this.cancel_queued(id);
@@ -2769,6 +2862,7 @@ impl GnsscopeApp {
                                 let elapsed = format_timeline_time(processing_run_elapsed_ms(run));
                                 div()
                                     .id(SharedString::from(format!("dock-run-{id}")))
+                                    .tab_index(0)
                                     .min_h(px(64.))
                                     .px(px(12.))
                                     .py(px(7.))
@@ -2787,6 +2881,12 @@ impl GnsscopeApp {
                                         palette.accent
                                     } else {
                                         palette.border.opacity(0.55)
+                                    })
+                                    .focus(|style| {
+                                        style.border_2().border_color(palette.focus_ring)
+                                    })
+                                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+                                        window.prevent_default();
                                     })
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.page = AppPage::Workspace;
@@ -2840,14 +2940,14 @@ impl GnsscopeApp {
                                                     .text_color(status_color)
                                                     .child(status),
                                             )
-                                            .child(
-                                                div().flex_1().child(
-                                                    Progress::new()
-                                                        .h(px(3.))
-                                                        .bg(status_color)
-                                                        .value((run.progress * 100.0) as f32),
+                                            .child(div().flex_1().child(gnss_progress(
+                                                (run.progress * 100.0) as f32,
+                                                palette,
+                                                matches!(
+                                                    run.status,
+                                                    RunStatus::Cancelled | RunStatus::Interrupted
                                                 ),
-                                            )
+                                            )))
                                             .child(
                                                 div()
                                                     .w(px(30.))
@@ -2862,15 +2962,18 @@ impl GnsscopeApp {
                                                     .flex()
                                                     .items_center()
                                                     .child(
-                                                        Button::new(SharedString::from(format!(
-                                                            "dock-reveal-{id}"
-                                                        )))
-                                                        .ghost()
-                                                        .icon(IconName::FolderOpen)
-                                                        .tooltip(self.localized(
-                                                            "在文件管理器中定位",
-                                                            "Reveal source file",
-                                                        ))
+                                                        GnssButton::icon_only(
+                                                            SharedString::from(format!(
+                                                                "dock-reveal-{id}"
+                                                            )),
+                                                            IconName::FolderOpen,
+                                                            self.localized(
+                                                                "在文件管理器中定位",
+                                                                "Reveal source file",
+                                                            ),
+                                                            palette,
+                                                        )
+                                                        .size(ControlSize::Compact)
                                                         .on_click(cx.listener(
                                                             move |this, _, _, cx| {
                                                                 this.reveal_source_file(id);
@@ -2879,15 +2982,19 @@ impl GnsscopeApp {
                                                         )),
                                                     )
                                                     .child(
-                                                        Button::new(SharedString::from(format!(
-                                                            "dock-delete-{id}"
-                                                        )))
-                                                        .ghost()
-                                                        .icon(IconName::Delete)
-                                                        .tooltip(self.localized(
-                                                            "删除历史记录",
-                                                            "Delete history entry",
-                                                        ))
+                                                        GnssButton::icon_only(
+                                                            SharedString::from(format!(
+                                                                "dock-delete-{id}"
+                                                            )),
+                                                            IconName::Delete,
+                                                            self.localized(
+                                                                "删除历史记录",
+                                                                "Delete history entry",
+                                                            ),
+                                                            palette,
+                                                        )
+                                                        .kind(ButtonKind::Destructive)
+                                                        .size(ControlSize::Compact)
                                                         .on_click(cx.listener(
                                                             move |this, _, _, cx| {
                                                                 this.delete_historical_run(id);
@@ -3424,18 +3531,21 @@ impl GnsscopeApp {
                                                     })),
                                             )
                                             .child(
-                                                Button::new("new-analysis-choose-source")
-                                                    .mt(px(12.))
-                                                    .w_full()
-                                                    .ghost()
-                                                    .border_1()
-                                                    .border_color(palette.border)
-                                                    .icon(IconName::FolderOpen)
-                                                    .label(if source_ready {
+                                                GnssButton::new(
+                                                    "new-analysis-choose-source",
+                                                    if source_ready {
                                                         self.localized("更换文件", "Replace file")
                                                     } else {
-                                                        self.localized("选择 IQ 文件", "Choose IQ file")
-                                                    })
+                                                        self.localized(
+                                                            "选择 IQ 文件",
+                                                            "Choose IQ file",
+                                                        )
+                                                    },
+                                                    palette,
+                                                )
+                                                    .mt(px(12.))
+                                                    .w_full()
+                                                    .icon(IconName::FolderOpen)
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.select_file(cx)
                                                     })),
@@ -3514,10 +3624,13 @@ impl GnsscopeApp {
                                                 palette,
                                             ))
                                             .child(
-                                                Button::new("new-analysis-reset")
-                                                    .ghost()
+                                                GnssButton::new(
+                                                    "new-analysis-reset",
+                                                    self.localized("恢复默认", "Reset"),
+                                                    palette,
+                                                )
+                                                    .kind(ButtonKind::Ghost)
                                                     .icon(IconName::Undo2)
-                                                    .label(self.localized("恢复默认", "Reset"))
                                                     .on_click(cx.listener(
                                                         |this, _, window, cx| {
                                                             this.reset_receiver_settings(window, cx);
@@ -3560,23 +3673,17 @@ impl GnsscopeApp {
                                             .children(SettingsCategory::ALL.into_iter().map(
                                                 |candidate| {
                                                     let selected = category == candidate;
-                                                    Button::new(SharedString::from(format!(
-                                                        "new-analysis-category-{:?}",
-                                                        candidate
-                                                    )))
-                                                    .ghost()
+                                                    GnssButton::new(
+                                                        SharedString::from(format!(
+                                                            "new-analysis-category-{:?}",
+                                                            candidate
+                                                        )),
+                                                        candidate.label(self.interface_language),
+                                                        palette,
+                                                    )
+                                                    .kind(ButtonKind::Ghost)
                                                     .icon(candidate.icon())
-                                                    .label(candidate.label(self.interface_language))
-                                                    .text_color(if selected {
-                                                        palette.accent
-                                                    } else {
-                                                        palette.muted
-                                                    })
-                                                    .bg(if selected {
-                                                        palette.accent.opacity(0.10)
-                                                    } else {
-                                                        palette.surface
-                                                    })
+                                                    .selected(selected)
                                                     .on_click(cx.listener(
                                                         move |this, _, _, cx| {
                                                             this.settings_category = candidate;
@@ -3628,15 +3735,16 @@ impl GnsscopeApp {
                                                     }),
                                             )
                                             .child(
-                                                Button::new("new-analysis-start")
-                                                    .primary()
-                                                    .bg(palette.accent)
-                                                    .text_color(palette.on_accent)
-                                                    .icon(IconName::SquareTerminal)
-                                                    .label(self.localized(
+                                                GnssButton::new(
+                                                    "new-analysis-start",
+                                                    self.localized(
                                                         "开始处理",
                                                         "Start processing",
-                                                    ))
+                                                    ),
+                                                    palette,
+                                                )
+                                                    .kind(ButtonKind::Primary)
+                                                    .icon(IconName::SquareTerminal)
                                                     .disabled(!self.can_enqueue())
                                                     .on_click(cx.listener(|this, _, _, cx| {
                                                         this.enqueue_selected_or_draft(cx);
@@ -3660,6 +3768,9 @@ impl GnsscopeApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let history_query = self.history_search.read(cx).value().to_string();
+        let filter_menu_app = cx.entity();
+        let current_filter = self.history_filter;
+        let interface_language = self.interface_language;
         let visible_runs = self
             .history
             .iter()
@@ -3709,12 +3820,13 @@ impl GnsscopeApp {
                                     ),
                             )
                             .child(
-                                Button::new("library-new-analysis")
-                                    .primary()
-                                    .bg(palette.accent)
-                                    .text_color(palette.on_accent)
+                                GnssButton::new(
+                                    "library-new-analysis",
+                                    self.localized("新建分析", "New analysis"),
+                                    palette,
+                                )
+                                    .kind(ButtonKind::Primary)
                                     .icon(IconName::Plus)
-                                    .label(self.localized("新建分析", "New analysis"))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.start_new_task(window, cx);
                                         cx.notify();
@@ -3731,35 +3843,38 @@ impl GnsscopeApp {
                                 div()
                                     .h(px(36.))
                                     .flex_1()
-                                    .child(
-                                        Input::new(&self.history_search)
-                                            .prefix(IconName::Search)
-                                            .bg(palette.surface),
-                                    ),
+                                    .child(gnss_search_input(&self.history_search, palette)),
                             )
                             .child(
-                                Button::new("library-history-filter")
-                                    .ghost()
-                                    .border_1()
-                                    .border_color(palette.border)
+                                GnssButton::new(
+                                    "library-history-filter",
+                                    current_filter.label(interface_language),
+                                    palette,
+                                )
+                                    .kind(ButtonKind::Secondary)
                                     .icon(IconName::SortDescending)
-                                    .label(match (self.interface_language, self.history_filter) {
-                                        (InterfaceLanguage::SimplifiedChinese, filter) => {
-                                            filter.label()
-                                        }
-                                        (InterfaceLanguage::English, HistoryFilter::All) => "All",
-                                        (InterfaceLanguage::English, HistoryFilter::Completed) => {
-                                            "Completed"
-                                        }
-                                        (
-                                            InterfaceLanguage::English,
-                                            HistoryFilter::NeedsAttention,
-                                        ) => "Needs attention",
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.history_filter = this.history_filter.next();
-                                        cx.notify();
-                                    })),
+                                    .selected(current_filter != HistoryFilter::All)
+                                    .dropdown_menu(move |menu, _, _| {
+                                        menu.min_w(px(172.))
+                                            .item(Self::history_filter_menu_item(
+                                                filter_menu_app.clone(),
+                                                HistoryFilter::All,
+                                                current_filter,
+                                                interface_language,
+                                            ))
+                                            .item(Self::history_filter_menu_item(
+                                                filter_menu_app.clone(),
+                                                HistoryFilter::Completed,
+                                                current_filter,
+                                                interface_language,
+                                            ))
+                                            .item(Self::history_filter_menu_item(
+                                                filter_menu_app.clone(),
+                                                HistoryFilter::NeedsAttention,
+                                                current_filter,
+                                                interface_language,
+                                            ))
+                                    }),
                             ),
                     )
                     .children((!self.queue.is_empty()).then(|| {
@@ -3801,11 +3916,13 @@ impl GnsscopeApp {
                                             ),
                                     )
                                     .child(
-                                        Button::new(SharedString::from(format!(
-                                            "library-queue-up-{id}"
-                                        )))
-                                        .ghost()
-                                        .icon(IconName::ChevronUp)
+                                        GnssButton::icon_only(
+                                            SharedString::from(format!("library-queue-up-{id}")),
+                                            IconName::ChevronUp,
+                                            self.localized("上移", "Move up"),
+                                            palette,
+                                        )
+                                        .size(ControlSize::Compact)
                                         .disabled(index == 0)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.move_queued(id, -1);
@@ -3813,11 +3930,13 @@ impl GnsscopeApp {
                                         })),
                                     )
                                     .child(
-                                        Button::new(SharedString::from(format!(
-                                            "library-queue-down-{id}"
-                                        )))
-                                        .ghost()
-                                        .icon(IconName::ChevronDown)
+                                        GnssButton::icon_only(
+                                            SharedString::from(format!("library-queue-down-{id}")),
+                                            IconName::ChevronDown,
+                                            self.localized("下移", "Move down"),
+                                            palette,
+                                        )
+                                        .size(ControlSize::Compact)
                                         .disabled(index + 1 == self.queue.len())
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.move_queued(id, 1);
@@ -3825,11 +3944,16 @@ impl GnsscopeApp {
                                         })),
                                     )
                                     .child(
-                                        Button::new(SharedString::from(format!(
-                                            "library-queue-cancel-{id}"
-                                        )))
-                                        .ghost()
-                                        .icon(IconName::CircleX)
+                                        GnssButton::icon_only(
+                                            SharedString::from(format!(
+                                                "library-queue-cancel-{id}"
+                                            )),
+                                            IconName::CircleX,
+                                            self.localized("取消排队", "Remove from queue"),
+                                            palette,
+                                        )
+                                        .size(ControlSize::Compact)
+                                        .kind(ButtonKind::Destructive)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.cancel_queued(id);
                                             cx.notify();
@@ -3951,27 +4075,30 @@ impl GnsscopeApp {
                                     .child(format!("{:?}", run.status)),
                             )
                             .child(
-                                Button::new(SharedString::from(format!(
-                                    "library-reveal-run-{id}"
-                                )))
-                                .ghost()
-                                .icon(IconName::FolderOpen)
-                                .tooltip(self.localized(
-                                    "在文件管理器中定位",
-                                    "Reveal in file manager",
-                                ))
+                                GnssButton::icon_only(
+                                    SharedString::from(format!("library-reveal-run-{id}")),
+                                    IconName::FolderOpen,
+                                    self.localized(
+                                        "在文件管理器中定位",
+                                        "Reveal in file manager",
+                                    ),
+                                    palette,
+                                )
+                                .size(ControlSize::Compact)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.reveal_source_file(id);
                                     cx.notify();
                                 })),
                             )
                             .child(
-                                Button::new(SharedString::from(format!(
-                                    "library-delete-run-{id}"
-                                )))
-                                .ghost()
-                                .icon(IconName::Delete)
-                                .tooltip(self.localized("删除历史记录", "Delete history entry"))
+                                GnssButton::icon_only(
+                                    SharedString::from(format!("library-delete-run-{id}")),
+                                    IconName::Delete,
+                                    self.localized("删除历史记录", "Delete history entry"),
+                                    palette,
+                                )
+                                .size(ControlSize::Compact)
+                                .kind(ButtonKind::Destructive)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.delete_historical_run(id);
                                     cx.notify();
@@ -4004,6 +4131,565 @@ impl GnsscopeApp {
                     })),
             )
             .into_any_element()
+    }
+
+    fn render_component_gallery(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let language = self.interface_language;
+        let state_buttons = [
+            ("default", "默认", "Default", ControlState::Default),
+            ("hover", "悬停", "Hover", ControlState::Hovered),
+            ("pressed", "按下", "Pressed", ControlState::Pressed),
+            ("focus", "焦点", "Focus", ControlState::Focused),
+            ("selected", "选中", "Selected", ControlState::Selected),
+            ("disabled", "禁用", "Disabled", ControlState::Disabled),
+            ("busy", "忙碌", "Busy", ControlState::Busy),
+            ("error", "错误", "Error", ControlState::Error),
+        ]
+        .into_iter()
+        .map(|(id, chinese, english, state)| {
+            let button = GnssButton::new(
+                SharedString::from(format!("gallery-state-{id}")),
+                match language {
+                    InterfaceLanguage::SimplifiedChinese => chinese,
+                    InterfaceLanguage::English => english,
+                },
+                palette,
+            )
+            .kind(ButtonKind::Primary)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.gallery_activation_count += 1;
+                cx.notify();
+            }));
+            match state {
+                ControlState::Disabled => button.disabled(true),
+                ControlState::Busy => button.busy(true),
+                ControlState::Selected => button.selected(true),
+                _ => button.state(state),
+            }
+        });
+
+        let variant_buttons = [
+            ("primary", "主要", "Primary", ButtonKind::Primary),
+            ("secondary", "次要", "Secondary", ButtonKind::Secondary),
+            ("ghost", "安静", "Ghost", ButtonKind::Ghost),
+            ("danger", "破坏性", "Destructive", ButtonKind::Destructive),
+        ]
+        .into_iter()
+        .map(|(id, chinese, english, kind)| {
+            GnssButton::new(
+                SharedString::from(format!("gallery-kind-{id}")),
+                match language {
+                    InterfaceLanguage::SimplifiedChinese => chinese,
+                    InterfaceLanguage::English => english,
+                },
+                palette,
+            )
+            .kind(kind)
+            .icon(if kind == ButtonKind::Destructive {
+                IconName::Delete
+            } else {
+                IconName::SquareTerminal
+            })
+            .tooltip(self.localized(
+                "组件状态画廊操作，可使用 Enter 或 Space 激活",
+                "Component gallery action; activate with Enter or Space",
+            ))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.gallery_activation_count += 1;
+                cx.notify();
+            }))
+        });
+
+        let tabs = [
+            (0, "总览", "Overview"),
+            (1, "通道", "Channels"),
+            (2, "定位", "Position"),
+        ]
+        .into_iter()
+        .map(|(index, chinese, english)| {
+            GnssButton::new(
+                SharedString::from(format!("gallery-tab-{index}")),
+                match language {
+                    InterfaceLanguage::SimplifiedChinese => chinese,
+                    InterfaceLanguage::English => english,
+                },
+                palette,
+            )
+            .kind(ButtonKind::Ghost)
+            .size(ControlSize::Compact)
+            .state(if self.gallery_selected_tab == index {
+                ControlState::Selected
+            } else {
+                ControlState::Default
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.gallery_selected_tab = index;
+                this.gallery_activation_count += 1;
+                cx.notify();
+            }))
+        });
+
+        let button_content = div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .children(state_buttons),
+            )
+            .child(gnss_divider(palette))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.0))
+                    .children(variant_buttons)
+                    .child(
+                        GnssButton::icon_only(
+                            "gallery-icon-button",
+                            IconName::Settings2,
+                            self.localized("打开设置", "Open settings"),
+                            palette,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.gallery_activation_count += 1;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .into_any_element();
+
+        let navigation_content = div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .p(px(3.0))
+                    .rounded(px(metrics::CONTROL_RADIUS))
+                    .bg(palette.surface_alt)
+                    .children(tabs),
+            )
+            .child(
+                GnssRow::new(
+                    "gallery-active-run",
+                    self.localized("当前处理运行", "Active processing run"),
+                    self.localized(
+                        "进度 63% · 可继续浏览历史",
+                        "63% · history remains browsable",
+                    ),
+                    palette,
+                )
+                .badge(self.localized("处理中", "Active"), BadgeKind::Accent)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gallery_activation_count += 1;
+                    cx.notify();
+                })),
+            )
+            .child(
+                GnssRow::new(
+                    "gallery-selected-run",
+                    self.localized("选中的历史运行", "Selected historical run"),
+                    self.localized(
+                        "只读快照 · 不影响当前处理",
+                        "Read-only snapshot · active run unchanged",
+                    ),
+                    palette,
+                )
+                .state(ControlState::Selected)
+                .badge(self.localized("已选择", "Selected"), BadgeKind::Healthy)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gallery_activation_count += 1;
+                    cx.notify();
+                })),
+            )
+            .child(
+                GnssRow::new(
+                    "gallery-keyboard-row",
+                    self.localized("键盘高亮行", "Keyboard-highlighted row"),
+                    self.localized(
+                        "Tab 到达，Enter/Space 激活",
+                        "Reach with Tab, activate with Enter/Space",
+                    ),
+                    palette,
+                )
+                .state(ControlState::Focused)
+                .badge(self.localized("焦点", "Focus"), BadgeKind::Warning)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gallery_activation_count += 1;
+                    cx.notify();
+                })),
+            )
+            .child(
+                GnssRow::new(
+                    "gallery-selected-epoch",
+                    self.localized("选中历元 00:02:18.400", "Selected epoch 00:02:18.400"),
+                    self.localized(
+                        "共享游标锁定该历元；实时处理继续推进",
+                        "Shared cursor is pinned; live processing continues",
+                    ),
+                    palette,
+                )
+                .state(ControlState::Selected)
+                .badge(self.localized("历元", "Epoch"), BadgeKind::Accent)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gallery_activation_count += 1;
+                    cx.notify();
+                })),
+            )
+            .child(
+                GnssRow::new(
+                    "gallery-pinned-prn",
+                    self.localized("PRN 22", "PRN 22"),
+                    self.localized(
+                        "固定到通道检查器，不等同于行选择",
+                        "Pinned to inspector; independent from row selection",
+                    ),
+                    palette,
+                )
+                .badge(self.localized("已固定", "Pinned"), BadgeKind::Warning)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gallery_activation_count += 1;
+                    cx.notify();
+                })),
+            )
+            .into_any_element();
+
+        let menu_items = div()
+            .p(px(5.0))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                GnssMenuItem::new(
+                    "gallery-menu-selected",
+                    self.localized("显示全部运行", "Show all runs"),
+                    palette,
+                )
+                .icon(IconName::LayoutDashboard)
+                .checked(true)
+                .state(ControlState::Selected)
+                .shortcut("⌘1")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gallery_activation_count += 1;
+                    cx.notify();
+                })),
+            )
+            .child(
+                GnssMenuItem::new(
+                    "gallery-menu-attention",
+                    self.localized("仅需关注", "Needs attention"),
+                    palette,
+                )
+                .icon(IconName::TriangleAlert)
+                .shortcut("⌘2")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gallery_activation_count += 1;
+                    cx.notify();
+                })),
+            )
+            .child(
+                GnssMenuItem::new(
+                    "gallery-menu-disabled",
+                    self.localized("导出当前解", "Export current solution"),
+                    palette,
+                )
+                .icon(IconName::File)
+                .state(ControlState::Disabled),
+            )
+            .child(gnss_divider(palette))
+            .child(
+                GnssMenuItem::new(
+                    "gallery-menu-delete",
+                    self.localized("删除历史记录…", "Delete history entry…"),
+                    palette,
+                )
+                .icon(IconName::Delete)
+                .destructive(true)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gallery_activation_count += 1;
+                    cx.notify();
+                })),
+            )
+            .child(
+                GnssMenuItem::new(
+                    "gallery-menu-extra-1",
+                    self.localized("定位到源文件", "Reveal source file"),
+                    palette,
+                )
+                .icon(IconName::FolderOpen)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gallery_activation_count += 1;
+                    cx.notify();
+                })),
+            )
+            .child(
+                GnssMenuItem::new(
+                    "gallery-menu-extra-2",
+                    self.localized("复制运行标识", "Copy run identifier"),
+                    palette,
+                )
+                .icon(IconName::Copy)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.gallery_activation_count += 1;
+                    cx.notify();
+                })),
+            );
+
+        let menu_content = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .child(gnss_scroll_area(
+                "gallery-menu-scroll",
+                150.0,
+                menu_items,
+                palette,
+            ))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(palette.muted)
+                    .child(self.localized(
+                        "滚动条沿用 gpui-component 行为，并由组件主题令牌着色。",
+                        "Scrollbar behavior stays delegated and is colored by component tokens.",
+                    )),
+            )
+            .into_any_element();
+
+        let form_content = div()
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .child(gnss_input(
+                &self.gallery_input,
+                palette,
+                ControlState::Default,
+            ))
+            .child(
+                div()
+                    .child(gnss_input(
+                        &self.gallery_input,
+                        palette,
+                        ControlState::Error,
+                    ))
+                    .child(
+                        div()
+                            .mt(px(4.0))
+                            .text_size(px(10.0))
+                            .text_color(palette.danger)
+                            .child(self.localized(
+                                "错误状态同时使用边框、文本与语义色",
+                                "Error state combines border, text, and semantic color",
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(16.0))
+                    .child(
+                        GnssSwitch::new(
+                            "gallery-switch",
+                            self.localized("实时跟随", "Live follow"),
+                            self.gallery_switch_checked,
+                            palette,
+                        )
+                        .on_toggle(cx.listener(|this, checked, _, cx| {
+                            this.gallery_switch_checked = *checked;
+                            this.gallery_activation_count += 1;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        GnssSwitch::new(
+                            "gallery-switch-disabled",
+                            self.localized("禁用开关", "Disabled switch"),
+                            false,
+                            palette,
+                        )
+                        .state(ControlState::Disabled),
+                    ),
+            )
+            .child(gnss_progress(63.0, palette, false))
+            .child(gnss_progress(42.0, palette, true))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(6.0))
+                    .child(gnss_badge(
+                        self.localized("已锁定", "Locked"),
+                        BadgeKind::Healthy,
+                        palette,
+                    ))
+                    .child(gnss_badge(
+                        self.localized("重捕获", "Reacquiring"),
+                        BadgeKind::Warning,
+                        palette,
+                    ))
+                    .child(gnss_badge(
+                        self.localized("不可用", "Unavailable"),
+                        BadgeKind::Neutral,
+                        palette,
+                    ))
+                    .child(gnss_badge(
+                        self.localized("失败", "Failed"),
+                        BadgeKind::Danger,
+                        palette,
+                    )),
+            )
+            .into_any_element();
+
+        div()
+            .size_full()
+            .bg(palette.background)
+            .text_color(palette.text)
+            .font_family(interface_font_family())
+            .flex()
+            .flex_col()
+            .child(self.render_title_bar(palette, false, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(1120.0))
+                            .mx_auto()
+                            .px(px(28.0))
+                            .py(px(24.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_end()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .child(
+                                                div()
+                                                    .text_size(px(20.0))
+                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .child(self.localized(
+                                                        "Phase 2 · 组件状态画廊",
+                                                        "Phase 2 · Component state gallery",
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .mt(px(5.0))
+                                                    .text_size(px(11.0))
+                                                    .text_color(palette.muted)
+                                                    .child(self.localized(
+                                                        "Tab 导航；Enter/Space 与鼠标激活遵循同一回调。",
+                                                        "Tab navigates; Enter/Space and mouse share one activation path.",
+                                                    )),
+                                            ),
+                                    )
+                                    .child(gnss_badge(
+                                        format!(
+                                            "{} {}",
+                                            self.localized("激活", "Activations"),
+                                            self.gallery_activation_count
+                                        ),
+                                        BadgeKind::Accent,
+                                        palette,
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(20.0))
+                                    .grid()
+                                    .grid_cols(2)
+                                    .gap(px(14.0))
+                                    .child(self.render_gallery_card(
+                                        self.localized("按钮与状态", "Buttons and states"),
+                                        self.localized(
+                                            "八种优先级状态、四种语义变体和具名图标按钮。",
+                                            "Eight priority states, four semantic variants, and a named icon button.",
+                                        ),
+                                        button_content,
+                                        palette,
+                                    ))
+                                    .child(self.render_gallery_card(
+                                        self.localized("标签、运行行与菜单行", "Tabs, run rows, and menu rows"),
+                                        self.localized(
+                                            "当前运行、选中运行与键盘高亮保持不同视觉身份。",
+                                            "Active, selected, and keyboard-highlighted rows remain distinct.",
+                                        ),
+                                        navigation_content,
+                                        palette,
+                                    ))
+                                    .child(self.render_gallery_card(
+                                        self.localized("输入、开关与进度", "Inputs, switches, and progress"),
+                                        self.localized(
+                                            "行为复杂的文本编辑继续复用 gpui-component，外层由 GNSScope 定义。",
+                                            "Behavior-heavy text editing stays delegated; GNSScope owns its frame.",
+                                        ),
+                                        form_content,
+                                        palette,
+                                    ))
+                                    .child(self.render_gallery_card(
+                                        self.localized("菜单与滚动", "Menus and scrolling"),
+                                        self.localized(
+                                            "选中、禁用、破坏性菜单项和令牌化滚动条。",
+                                            "Selected, disabled, destructive menu items and a tokenized scrollbar.",
+                                        ),
+                                        menu_content,
+                                        palette,
+                                    )),
+                            ),
+                    ),
+            )
+            .child(self.render_status_bar(
+                palette,
+                self.runs_sidebar_visible,
+                false,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn render_gallery_card(
+        &self,
+        title: &'static str,
+        description: &'static str,
+        content: AnyElement,
+        palette: Palette,
+    ) -> impl IntoElement {
+        div()
+            .min_h(px(230.0))
+            .p(px(16.0))
+            .rounded(px(6.0))
+            .bg(palette.surface)
+            .border_1()
+            .border_color(palette.border)
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .mt(px(4.0))
+                    .mb(px(14.0))
+                    .text_size(px(10.0))
+                    .text_color(palette.muted)
+                    .child(description),
+            )
+            .child(content)
     }
 
     fn render_interface_setting_section(
@@ -4074,28 +4760,20 @@ impl GnsscopeApp {
                 .into_iter()
                 .map(|(preference, icon, chinese, english)| {
                     let active = self.theme_preference == preference;
-                    let button = Button::new(SharedString::from(format!(
-                        "interface-theme-{}",
-                        preference.value()
-                    )))
+                    GnssButton::new(
+                        SharedString::from(format!("interface-theme-{}", preference.value())),
+                        match language {
+                            InterfaceLanguage::SimplifiedChinese => chinese,
+                            InterfaceLanguage::English => english,
+                        },
+                        palette,
+                    )
                     .icon(icon)
-                    .label(match language {
-                        InterfaceLanguage::SimplifiedChinese => chinese,
-                        InterfaceLanguage::English => english,
-                    })
+                    .selected(active)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.set_theme_preference(preference, window, cx);
                         cx.notify();
-                    }));
-                    if active {
-                        button.primary()
-                    } else {
-                        button
-                            .ghost()
-                            .text_color(palette.text)
-                            .border_1()
-                            .border_color(palette.border)
-                    }
+                    }))
                 }),
             )
             .into_any_element();
@@ -4112,25 +4790,17 @@ impl GnsscopeApp {
                 .into_iter()
                 .map(|(option, label)| {
                     let active = language == option;
-                    let button = Button::new(SharedString::from(format!(
-                        "interface-language-{}",
-                        option.value()
-                    )))
+                    GnssButton::new(
+                        SharedString::from(format!("interface-language-{}", option.value())),
+                        label,
+                        palette,
+                    )
                     .icon(IconName::Globe)
-                    .label(label)
+                    .selected(active)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.set_interface_language(option, window, cx);
                         cx.notify();
-                    }));
-                    if active {
-                        button.primary()
-                    } else {
-                        button
-                            .ghost()
-                            .text_color(palette.text)
-                            .border_1()
-                            .border_color(palette.border)
-                    }
+                    }))
                 }),
             )
             .into_any_element();
@@ -4154,22 +4824,16 @@ impl GnsscopeApp {
                     )),
             )
             .child(
-                Button::new("interface-timeline-visible")
-                    .icon(if self.timeline_visible {
-                        IconName::Eye
-                    } else {
-                        IconName::EyeOff
-                    })
-                    .label(if self.timeline_visible {
-                        self.localized("显示", "Visible")
-                    } else {
-                        self.localized("隐藏", "Hidden")
-                    })
-                    .primary()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_timeline_visibility(!this.timeline_visible);
-                        cx.notify();
-                    })),
+                GnssSwitch::new(
+                    "interface-timeline-visible",
+                    self.localized("显示时间轴", "Show timeline"),
+                    self.timeline_visible,
+                    palette,
+                )
+                .on_toggle(cx.listener(|this, checked, _, cx| {
+                    this.set_timeline_visibility(*checked);
+                    cx.notify();
+                })),
             )
             .into_any_element();
 
@@ -4213,10 +4877,12 @@ impl GnsscopeApp {
                                     ),
                             )
                             .child(
-                                Button::new("close-interface-settings")
-                                    .ghost()
-                                    .icon(IconName::ArrowLeft)
-                                    .tooltip(self.localized("返回工作台", "Back to workspace"))
+                                GnssButton::icon_only(
+                                    "close-interface-settings",
+                                    IconName::ArrowLeft,
+                                    self.localized("返回工作台", "Back to workspace"),
+                                    palette,
+                                )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.page = AppPage::Workspace;
                                         cx.notify();
@@ -4298,12 +4964,15 @@ impl GnsscopeApp {
                     .child(label)
                     .child(unit),
             )
-            .child(
-                div()
-                    .mt(px(4.))
-                    .h(px(34.))
-                    .child(Input::new(input).bg(palette.background)),
-            )
+            .child(div().mt(px(4.)).h(px(34.)).child(gnss_input(
+                input,
+                palette,
+                if issue.is_some() {
+                    ControlState::Error
+                } else {
+                    ControlState::Default
+                },
+            )))
             .children(issue.map(|message| {
                 div()
                     .mt(px(3.))
@@ -4391,26 +5060,30 @@ impl GnsscopeApp {
                             .items_center()
                             .gap(px(2.))
                             .child(
-                                Button::new("reset-receiver-settings")
-                                    .ghost()
-                                    .icon(IconName::Undo2)
-                                    .tooltip(self.localized(
+                                GnssButton::icon_only(
+                                    "reset-receiver-settings",
+                                    IconName::Undo2,
+                                    self.localized(
                                         "恢复接收机默认参数，但保留当前 IQ 文件",
                                         "Restore receiver defaults while keeping the current IQ file",
-                                    ))
+                                    ),
+                                    palette,
+                                )
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.reset_receiver_settings(window, cx);
                                         cx.notify();
                                     })),
                             )
                             .child(
-                                Button::new("close-settings-drawer")
-                                    .ghost()
-                                    .icon(IconName::CircleX)
-                                    .tooltip(self.localized(
+                                GnssButton::icon_only(
+                                    "close-settings-drawer",
+                                    IconName::CircleX,
+                                    self.localized(
                                         "关闭接收机配置检查器",
                                         "Close receiver inspector",
-                                    ))
+                                    ),
+                                    palette,
+                                )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.side_drawer = None;
                                         cx.notify();
@@ -4469,33 +5142,39 @@ impl GnsscopeApp {
                             .gap(px(2.))
                             .children(SettingsCategory::ALL.into_iter().map(|candidate| {
                                 let selected = category == candidate;
-                                let button = Button::new(SharedString::from(format!(
-                                    "settings-category-{:?}",
-                                    candidate
-                                )))
-                                .w_full()
-                                .ghost()
-                                .justify_start()
-                                .icon(candidate.icon())
-                                .text_color(if selected {
-                                    palette.accent
-                                } else {
-                                    palette.muted
-                                })
-                                .bg(if selected {
-                                    palette.accent.opacity(0.10)
-                                } else {
-                                    palette.sidebar
-                                })
-                                .tooltip(candidate.description(self.interface_language))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.settings_category = candidate;
-                                    cx.notify();
-                                }));
+                                let id = SharedString::from(format!(
+                                    "settings-category-{:?}", candidate
+                                ));
                                 if icon_only_categories {
-                                    button
+                                    GnssButton::icon_only(
+                                        id,
+                                        candidate.icon(),
+                                        candidate.description(self.interface_language),
+                                        palette,
+                                    )
+                                    .w_full()
+                                    .selected(selected)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.settings_category = candidate;
+                                        cx.notify();
+                                    }))
+                                    .into_any_element()
                                 } else {
-                                    button.label(candidate.label(self.interface_language))
+                                    GnssButton::new(
+                                        id,
+                                        candidate.label(self.interface_language),
+                                        palette,
+                                    )
+                                    .w_full()
+                                    .kind(ButtonKind::Ghost)
+                                    .icon(candidate.icon())
+                                    .tooltip(candidate.description(self.interface_language))
+                                    .selected(selected)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.settings_category = candidate;
+                                        cx.notify();
+                                    }))
+                                    .into_any_element()
                                 }
                             })),
                     )
@@ -4589,6 +5268,8 @@ impl GnsscopeApp {
     }
 
     fn render_input_settings(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let iq_format_app = cx.entity();
+        let current_iq_format = self.settings.iq_format;
         div()
             .child(Self::config_group_title(
                 self.localized("采样", "Sampling"),
@@ -4625,14 +5306,26 @@ impl GnsscopeApp {
                             .child(self.localized("IQ 格式", "IQ format")),
                     )
                     .child(
-                        Button::new("drawer-iq-format")
-                            .ghost()
-                            .icon(IconName::Replace)
-                            .label(format!("{:?}", self.settings.iq_format))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.cycle_iq_format();
-                                cx.notify();
-                            })),
+                        GnssButton::new(
+                            "drawer-iq-format",
+                            format!("{:?}", self.settings.iq_format),
+                            palette,
+                        )
+                        .kind(ButtonKind::Secondary)
+                        .icon(IconName::Replace)
+                        .dropdown_menu(move |menu, _, _| {
+                            menu.min_w(px(172.))
+                                .item(Self::iq_format_menu_item(
+                                    iq_format_app.clone(),
+                                    crate::GuiIqFormat::Int8Interleaved,
+                                    current_iq_format,
+                                ))
+                                .item(Self::iq_format_menu_item(
+                                    iq_format_app.clone(),
+                                    crate::GuiIqFormat::Int16Interleaved,
+                                    current_iq_format,
+                                ))
+                        }),
                     ),
             )
             .child(Self::config_group_title(
@@ -4944,17 +5637,20 @@ impl GnsscopeApp {
                     .child(label),
             )
             .child(
-                Switch::new(SharedString::from(format!("{field}-toggle")))
-                    .checked(enabled)
-                    .tooltip(if enabled {
+                GnssSwitch::new(
+                    SharedString::from(format!("{field}-toggle")),
+                    if enabled {
                         self.localized("已开启", "Enabled")
                     } else {
                         self.localized("已关闭", "Disabled")
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_setting(field);
-                        cx.notify();
-                    })),
+                    },
+                    enabled,
+                    palette,
+                )
+                .on_toggle(cx.listener(move |this, _, _, cx| {
+                    this.toggle_setting(field);
+                    cx.notify();
+                })),
             )
     }
 
@@ -5119,91 +5815,104 @@ impl GnsscopeApp {
                             ),
                     )
                     .children((self.active_run.is_some() && !self.follow_live).then(|| {
-                        Button::new("workspace-return-live")
-                            .ghost()
-                            .rounded(px(3.))
-                            .text_color(palette.accent)
-                            .icon(IconName::Redo2)
-                            .label(self.localized("返回实时", "Return live"))
-                            .tooltip(self.localized(
-                                "切回正在处理的运行和最新 epoch",
-                                "Return to the active run and newest epoch",
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.return_to_live(window, cx);
-                                cx.notify();
-                            }))
+                        GnssButton::new(
+                            "workspace-return-live",
+                            self.localized("返回实时", "Return live"),
+                            palette,
+                        )
+                        .kind(ButtonKind::Ghost)
+                        .icon(IconName::Redo2)
+                        .tooltip(self.localized(
+                            "切回正在处理的运行和最新 epoch",
+                            "Return to the active run and newest epoch",
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.return_to_live(window, cx);
+                            cx.notify();
+                        }))
                     }))
-                    .child(
-                        Button::new("workspace-event-log")
-                            .ghost()
-                            .rounded(px(metrics::CONTROL_RADIUS))
-                            .border_1()
-                            .border_color(palette.border_strong)
-                            .text_color(palette.muted)
-                            .icon(IconName::Inbox)
-                            .when(!compact, |this| {
-                                this.label(self.localized("事件日志", "Event log"))
-                            })
-                            .tooltip(self.localized("事件日志", "Event log"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.workspace_view = WorkspaceView::Navigation;
-                                this.focused_plot = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("workspace-run-configuration")
-                            .ghost()
-                            .rounded(px(metrics::CONTROL_RADIUS))
-                            .border_1()
-                            .border_color(if self.run_configuration_visible {
-                                palette.accent
-                            } else {
-                                palette.border_strong
-                            })
-                            .text_color(if self.run_configuration_visible {
-                                palette.accent
-                            } else {
-                                palette.muted
-                            })
-                            .icon(IconName::Settings2)
-                            .when(!compact, |this| {
-                                this.label(self.localized("运行配置", "Run configuration"))
-                            })
-                            .tooltip(self.localized("运行配置", "Run configuration"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.run_configuration_visible = !this.run_configuration_visible;
-                                cx.notify();
-                            })),
-                    )
+                    .child(if compact {
+                        GnssButton::icon_only(
+                            "workspace-event-log",
+                            IconName::Inbox,
+                            self.localized("事件日志", "Event log"),
+                            palette,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace_view = WorkspaceView::Navigation;
+                            this.focused_plot = None;
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                    } else {
+                        GnssButton::new(
+                            "workspace-event-log",
+                            self.localized("事件日志", "Event log"),
+                            palette,
+                        )
+                        .icon(IconName::Inbox)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace_view = WorkspaceView::Navigation;
+                            this.focused_plot = None;
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                    })
+                    .child(if compact {
+                        GnssButton::icon_only(
+                            "workspace-run-configuration",
+                            IconName::Settings2,
+                            self.localized("运行配置", "Run configuration"),
+                            palette,
+                        )
+                        .selected(self.run_configuration_visible)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.run_configuration_visible = !this.run_configuration_visible;
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                    } else {
+                        GnssButton::new(
+                            "workspace-run-configuration",
+                            self.localized("运行配置", "Run configuration"),
+                            palette,
+                        )
+                        .icon(IconName::Settings2)
+                        .selected(self.run_configuration_visible)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.run_configuration_visible = !this.run_configuration_visible;
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                    })
                     .children(selected_is_active.then(|| {
-                        Button::new("workspace-cancel-active")
-                            .ghost()
-                            .rounded(px(3.))
-                            .text_color(palette.danger)
-                            .icon(IconName::CircleX)
-                            .tooltip(self.localized("取消当前处理", "Cancel active run"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.cancel_active();
-                                cx.notify();
-                            }))
+                        GnssButton::icon_only(
+                            "workspace-cancel-active",
+                            IconName::CircleX,
+                            self.localized("取消当前处理", "Cancel active run"),
+                            palette,
+                        )
+                        .kind(ButtonKind::Destructive)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cancel_active();
+                            cx.notify();
+                        }))
                     }))
                     .children((selected_run.is_some() && !selected_is_active).then(|| {
-                        Button::new("workspace-reprocess")
-                            .ghost()
-                            .rounded(px(3.))
-                            .text_color(palette.muted)
-                            .icon(IconName::Replace)
-                            .tooltip(self.localized(
+                        GnssButton::icon_only(
+                            "workspace-reprocess",
+                            IconName::Replace,
+                            self.localized(
                                 "使用此运行的配置重新处理",
                                 "Reprocess with this run configuration",
-                            ))
-                            .disabled(!self.can_enqueue())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.enqueue_selected_or_draft(cx);
-                                cx.notify();
-                            }))
+                            ),
+                            palette,
+                        )
+                        .disabled(!self.can_enqueue())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.enqueue_selected_or_draft(cx);
+                            cx.notify();
+                        }))
                     })),
             )
             .child(
@@ -5215,33 +5924,27 @@ impl GnsscopeApp {
                     .gap(px(1.))
                     .children(WorkspaceView::ALL.into_iter().map(|view| {
                         let selected = self.workspace_view == view;
-                        Button::new(SharedString::from(format!("workbench-view-{}", view.id())))
-                            .h_full()
-                            .ghost()
-                            .rounded(px(0.))
-                            .label(view.label(self.interface_language))
-                            .text_color(if selected {
-                                palette.text
-                            } else {
-                                palette.muted
-                            })
-                            .bg(if selected {
-                                palette.active
-                            } else {
-                                palette.surface
-                            })
-                            .border_b_2()
-                            .border_color(if selected {
-                                palette.accent
-                            } else {
-                                palette.surface
-                            })
-                            .tooltip(view.description(self.interface_language))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.workspace_view = view;
-                                this.focused_plot = None;
-                                cx.notify();
-                            }))
+                        GnssButton::new(
+                            SharedString::from(format!("workbench-view-{}", view.id())),
+                            view.label(self.interface_language),
+                            palette,
+                        )
+                        .h_full()
+                        .kind(ButtonKind::Ghost)
+                        .rounded(px(0.))
+                        .selected(selected)
+                        .border_b_2()
+                        .border_color(if selected {
+                            palette.accent
+                        } else {
+                            palette.surface
+                        })
+                        .tooltip(view.description(self.interface_language))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.workspace_view = view;
+                            this.focused_plot = None;
+                            cx.notify();
+                        }))
                     })),
             )
     }
@@ -5301,24 +6004,25 @@ impl GnsscopeApp {
                             .flex()
                             .gap(px(8.))
                             .child(
-                                Button::new("empty-new-analysis")
-                                    .primary()
-                                    .bg(palette.accent)
-                                    .text_color(palette.on_accent)
+                                GnssButton::new(
+                                    "empty-new-analysis",
+                                    self.localized("新建分析", "New analysis"),
+                                    palette,
+                                )
+                                    .kind(ButtonKind::Primary)
                                     .icon(IconName::Plus)
-                                    .label(self.localized("新建分析", "New analysis"))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.start_new_task(window, cx);
                                         cx.notify();
                                     })),
                             )
                             .child(
-                                Button::new("empty-open-library")
-                                    .ghost()
-                                    .border_1()
-                                    .border_color(palette.border)
+                                GnssButton::new(
+                                    "empty-open-library",
+                                    self.localized("打开运行库", "Open run library"),
+                                    palette,
+                                )
                                     .icon(IconName::ChartPie)
-                                    .label(self.localized("打开运行库", "Open run library"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.page = AppPage::RunLibrary;
                                         cx.notify();
@@ -5419,19 +6123,21 @@ impl GnsscopeApp {
                         palette,
                     ))
                     .child(
-                        Button::new("candidate-comparison")
-                            .ghost()
-                            .icon(IconName::ChartPie)
-                            .tooltip(self.localized(
+                        GnssButton::icon_only(
+                            "candidate-comparison",
+                            IconName::ChartPie,
+                            self.localized(
                                 "打开 Raw、Smoothed 与 Kalman 候选解的详细比较",
                                 "Compare Raw, Smoothed, and Kalman candidates",
-                            ))
-                            .disabled(pvt.is_none())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.workspace_view = WorkspaceView::Candidates;
-                                this.side_drawer = None;
-                                cx.notify();
-                            })),
+                            ),
+                            palette,
+                        )
+                        .disabled(pvt.is_none())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.workspace_view = WorkspaceView::Candidates;
+                            this.side_drawer = None;
+                            cx.notify();
+                        })),
                     ),
             )
             .child(
@@ -5643,15 +6349,16 @@ impl GnsscopeApp {
                             ),
                     )
                     .child(
-                        Button::new("close-run-configuration")
-                            .ghost()
-                            .rounded(px(2.))
-                            .icon(IconName::PanelRightClose)
-                            .tooltip(self.localized("折叠运行配置", "Collapse run configuration"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.run_configuration_visible = false;
-                                cx.notify();
-                            })),
+                        GnssButton::icon_only(
+                            "close-run-configuration",
+                            IconName::PanelRightClose,
+                            self.localized("折叠运行配置", "Collapse run configuration"),
+                            palette,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.run_configuration_visible = false;
+                            cx.notify();
+                        })),
                     ),
             )
             .child(
@@ -6518,14 +7225,16 @@ impl GnsscopeApp {
                             ),
                     )
                     .child(
-                        Button::new("close-candidate-comparison")
-                            .ghost()
-                            .icon(IconName::CircleX)
-                            .tooltip("关闭候选解比较")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_drawer = None;
-                                cx.notify();
-                            })),
+                        GnssButton::icon_only(
+                            "close-candidate-comparison",
+                            IconName::CircleX,
+                            self.localized("关闭候选解比较", "Close candidate comparison"),
+                            palette,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.side_drawer = None;
+                            cx.notify();
+                        })),
                     ),
             )
             .child(
@@ -6933,69 +7642,78 @@ impl GnsscopeApp {
                                         .items_center()
                                         .justify_between()
                                         .child(
-                                            Button::new("epoch-first")
-                                                .ghost()
-                                                .rounded(px(2.))
-                                                .icon(IconName::ArrowLeft)
-                                                .tooltip(self.localized(
+                                            GnssButton::icon_only(
+                                                "epoch-first",
+                                                IconName::ArrowLeft,
+                                                self.localized(
                                                     "跳到第一个 epoch",
                                                     "Jump to first epoch",
-                                                ))
-                                                .disabled(epoch_count == 0)
-                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                ),
+                                                palette,
+                                            )
+                                            .size(ControlSize::Compact)
+                                            .disabled(epoch_count == 0)
+                                            .on_click(
+                                                cx.listener(|this, _, window, cx| {
                                                     this.jump_selected_epoch(0, window, cx);
                                                     cx.notify();
-                                                })),
+                                                }),
+                                            ),
                                         )
                                         .child(
-                                            Button::new("epoch-previous")
-                                                .ghost()
-                                                .rounded(px(2.))
-                                                .icon(IconName::ChevronLeft)
-                                                .tooltip(
-                                                    self.localized(
-                                                        "上一个 epoch",
-                                                        "Previous epoch",
-                                                    ),
-                                                )
-                                                .disabled(epoch_count == 0)
-                                                .on_click(cx.listener(|this, _, window, cx| {
+                                            GnssButton::icon_only(
+                                                "epoch-previous",
+                                                IconName::ChevronLeft,
+                                                self.localized("上一个 epoch", "Previous epoch"),
+                                                palette,
+                                            )
+                                            .size(ControlSize::Compact)
+                                            .disabled(epoch_count == 0)
+                                            .on_click(
+                                                cx.listener(|this, _, window, cx| {
                                                     this.step_selected_epoch(-1, window, cx);
                                                     cx.notify();
-                                                })),
+                                                }),
+                                            ),
                                         )
                                         .child(
-                                            Button::new("epoch-next")
-                                                .ghost()
-                                                .rounded(px(2.))
-                                                .icon(IconName::ChevronRight)
-                                                .tooltip(
-                                                    self.localized("下一个 epoch", "Next epoch"),
-                                                )
-                                                .disabled(epoch_count == 0)
-                                                .on_click(cx.listener(|this, _, window, cx| {
+                                            GnssButton::icon_only(
+                                                "epoch-next",
+                                                IconName::ChevronRight,
+                                                self.localized("下一个 epoch", "Next epoch"),
+                                                palette,
+                                            )
+                                            .size(ControlSize::Compact)
+                                            .disabled(epoch_count == 0)
+                                            .on_click(
+                                                cx.listener(|this, _, window, cx| {
                                                     this.step_selected_epoch(1, window, cx);
                                                     cx.notify();
-                                                })),
+                                                }),
+                                            ),
                                         )
                                         .child(
-                                            Button::new("epoch-last")
-                                                .ghost()
-                                                .rounded(px(2.))
-                                                .icon(IconName::ArrowRight)
-                                                .tooltip(self.localized(
+                                            GnssButton::icon_only(
+                                                "epoch-last",
+                                                IconName::ArrowRight,
+                                                self.localized(
                                                     "跳到最后一个 epoch",
                                                     "Jump to last epoch",
-                                                ))
-                                                .disabled(epoch_count == 0)
-                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                ),
+                                                palette,
+                                            )
+                                            .size(ControlSize::Compact)
+                                            .disabled(epoch_count == 0)
+                                            .on_click(
+                                                cx.listener(|this, _, window, cx| {
                                                     let last = this
                                                         .display_epochs()
                                                         .len()
                                                         .saturating_sub(1);
                                                     this.jump_selected_epoch(last, window, cx);
                                                     cx.notify();
-                                                })),
+                                                }),
+                                            ),
                                         ),
                                 )
                                 .child(div().h(px(1.)).w_full().bg(palette.border))
@@ -7015,22 +7733,26 @@ impl GnsscopeApp {
                                                 .border_1()
                                                 .border_color(palette.border)
                                                 .child(
-                                                    Button::new("timeline-zoom-out")
-                                                        .h_full()
-                                                        .w(px(26.))
-                                                        .flex_shrink_0()
-                                                        .ghost()
-                                                        .rounded(px(0.))
-                                                        .label("−")
-                                                        .tooltip(self.localized(
-                                                            "缩小时间轴",
-                                                            "Zoom timeline out",
-                                                        ))
-                                                        .disabled(self.timeline_zoom == 1)
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.adjust_timeline_zoom(false);
-                                                            cx.notify();
-                                                        })),
+                                                    GnssButton::new(
+                                                        "timeline-zoom-out",
+                                                        "−",
+                                                        palette,
+                                                    )
+                                                    .h_full()
+                                                    .w(px(26.))
+                                                    .flex_shrink_0()
+                                                    .kind(ButtonKind::Ghost)
+                                                    .size(ControlSize::Compact)
+                                                    .rounded(px(0.))
+                                                    .tooltip(self.localized(
+                                                        "缩小时间轴",
+                                                        "Zoom timeline out",
+                                                    ))
+                                                    .disabled(self.timeline_zoom == 1)
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.adjust_timeline_zoom(false);
+                                                        cx.notify();
+                                                    })),
                                                 )
                                                 .child(
                                                     div()
@@ -7042,53 +7764,47 @@ impl GnsscopeApp {
                                                         .child(format!("{}×", self.timeline_zoom)),
                                                 )
                                                 .child(
-                                                    Button::new("timeline-zoom-in")
-                                                        .h_full()
-                                                        .w(px(26.))
-                                                        .flex_shrink_0()
-                                                        .ghost()
-                                                        .rounded(px(0.))
-                                                        .label("+")
-                                                        .tooltip(self.localized(
-                                                            "放大时间轴",
-                                                            "Zoom timeline in",
-                                                        ))
-                                                        .disabled(self.timeline_zoom == 4)
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            this.adjust_timeline_zoom(true);
-                                                            cx.notify();
-                                                        })),
+                                                    GnssButton::new(
+                                                        "timeline-zoom-in",
+                                                        "+",
+                                                        palette,
+                                                    )
+                                                    .h_full()
+                                                    .w(px(26.))
+                                                    .flex_shrink_0()
+                                                    .kind(ButtonKind::Ghost)
+                                                    .size(ControlSize::Compact)
+                                                    .rounded(px(0.))
+                                                    .tooltip(self.localized(
+                                                        "放大时间轴",
+                                                        "Zoom timeline in",
+                                                    ))
+                                                    .disabled(self.timeline_zoom == 4)
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.adjust_timeline_zoom(true);
+                                                        cx.notify();
+                                                    })),
                                                 ),
                                         )
                                         .child(
-                                            Button::new("epoch-follow-live")
-                                                .h_full()
-                                                .flex_1()
-                                                .ghost()
-                                                .rounded(px(2.))
-                                                .border_1()
-                                                .border_color(if self.follow_live {
-                                                    palette.accent
-                                                } else {
-                                                    palette.border
-                                                })
-                                                .text_color(if self.follow_live {
-                                                    palette.accent
-                                                } else {
-                                                    palette.muted
-                                                })
-                                                .bg(if self.follow_live {
-                                                    palette.accent.opacity(0.08)
-                                                } else {
-                                                    palette.surface
-                                                })
-                                                .icon(IconName::Redo2)
-                                                .label(self.localized("跟随", "Follow"))
-                                                .disabled(self.live_run_id.is_none())
-                                                .on_click(cx.listener(|this, _, window, cx| {
+                                            GnssButton::new(
+                                                "epoch-follow-live",
+                                                self.localized("跟随", "Follow"),
+                                                palette,
+                                            )
+                                            .h_full()
+                                            .flex_1()
+                                            .kind(ButtonKind::Ghost)
+                                            .size(ControlSize::Compact)
+                                            .selected(self.follow_live)
+                                            .icon(IconName::Redo2)
+                                            .disabled(self.live_run_id.is_none())
+                                            .on_click(
+                                                cx.listener(|this, _, window, cx| {
                                                     this.return_to_live(window, cx);
                                                     cx.notify();
-                                                })),
+                                                }),
+                                            ),
                                         ),
                                 ),
                         ),
@@ -7096,7 +7812,13 @@ impl GnsscopeApp {
             )
     }
 
-    fn render_status_bar(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_status_bar(
+        &self,
+        palette: Palette,
+        runs_dock_open: bool,
+        runs_dock_replaces_content: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let active = self.active_run.as_ref();
         let tracking_count = self
             .channels
@@ -7134,24 +7856,30 @@ impl GnsscopeApp {
             .text_size(px(9.))
             .text_color(palette.faint)
             .child(
-                Button::new("toggle-runs-sidebar")
-                    .ghost()
-                    .rounded(px(0.))
-                    .text_color(palette.muted)
-                    .icon(if self.runs_sidebar_visible {
+                GnssButton::icon_only(
+                    "toggle-runs-sidebar",
+                    if runs_dock_open {
                         IconName::PanelLeftClose
                     } else {
                         IconName::PanelLeftOpen
-                    })
-                    .tooltip(if self.runs_sidebar_visible {
+                    },
+                    if runs_dock_open {
                         self.localized("折叠运行栏 · ⌘B", "Collapse Runs dock · Cmd+B")
                     } else {
                         self.localized("展开运行栏 · ⌘B", "Expand Runs dock · Cmd+B")
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    },
+                    palette,
+                )
+                .size(ControlSize::Compact)
+                .rounded(px(0.))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if runs_dock_replaces_content {
+                        this.compact_library_expanded = !this.compact_library_expanded;
+                    } else {
                         this.set_runs_sidebar_visibility(!this.runs_sidebar_visible);
-                        cx.notify();
-                    })),
+                    }
+                    cx.notify();
+                })),
             )
             .child(status_bar_item(
                 self.localized("活动运行", "Active run"),
@@ -7256,21 +7984,21 @@ impl GnsscopeApp {
                                     .child("ENU")
                             }))
                             .child(
-                                Button::new(SharedString::from(format!(
-                                    "plot-focus-{}",
-                                    focus.id()
-                                )))
-                                .ghost()
-                                .icon(if expanded {
-                                    IconName::Minimize
-                                } else {
-                                    IconName::Maximize
-                                })
-                                .tooltip(if expanded {
-                                    "退出聚焦"
-                                } else {
-                                    "聚焦图表"
-                                })
+                                GnssButton::icon_only(
+                                    SharedString::from(format!("plot-focus-{}", focus.id())),
+                                    if expanded {
+                                        IconName::Minimize
+                                    } else {
+                                        IconName::Maximize
+                                    },
+                                    if expanded {
+                                        self.localized("退出聚焦", "Exit focus")
+                                    } else {
+                                        self.localized("聚焦图表", "Focus plot")
+                                    },
+                                    palette,
+                                )
+                                .size(ControlSize::Compact)
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
                                         this.workspace_view = WorkspaceView::for_plot(focus);
@@ -7305,118 +8033,96 @@ impl Render for GnsscopeApp {
         let palette = self.palette();
         let viewport_width = f32::from(window.viewport_size().width);
         let viewport_height = f32::from(window.viewport_size().height);
-        let compact = viewport_width < 1_180.0;
-        let compact_drawer = viewport_width < 900.0;
-        let show_workspace = !compact_drawer || self.side_drawer.is_none();
-        let show_run_configuration = self.run_configuration_visible
-            && viewport_width >= 1_320.0
-            && self.side_drawer.is_none()
-            && self.page == AppPage::Workspace;
+        if self.component_gallery {
+            return self.render_component_gallery(palette, cx);
+        }
+        let shell_layout = ShellLayout::resolve(
+            viewport_width,
+            self.side_drawer.is_some(),
+            self.run_configuration_visible,
+            self.page == AppPage::Workspace,
+            self.runs_sidebar_visible,
+            self.compact_library_expanded,
+        );
+        let compact = shell_layout.compact;
         let workspace_empty = self.selected_run_id.is_none()
             && self.active_run.is_none()
             && self.display_epochs().is_empty();
-        div()
-            .size_full()
-            .bg(palette.background)
-            .text_color(palette.text)
-            .font_family(interface_font_family())
-            .flex()
-            .flex_col()
-            .child(self.render_title_bar(palette, compact, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .children(
-                        self.runs_sidebar_visible
-                            .then(|| self.render_runs_dock(palette, cx)),
-                    )
-                    .child(match self.page {
-                        AppPage::NewAnalysis => self
-                            .render_new_analysis(palette, compact, cx)
-                            .into_any_element(),
-                        AppPage::RunLibrary => self
-                            .render_run_library(palette, compact, cx)
-                            .into_any_element(),
-                        AppPage::InterfaceSettings => self
-                            .render_interface_settings(palette, cx)
-                            .into_any_element(),
-                        AppPage::Workspace => {
+        let page_content = match self.page {
+            AppPage::NewAnalysis => self
+                .render_new_analysis(palette, compact, cx)
+                .into_any_element(),
+            AppPage::RunLibrary => self
+                .render_run_library(palette, compact, cx)
+                .into_any_element(),
+            AppPage::InterfaceSettings => self
+                .render_interface_settings(palette, cx)
+                .into_any_element(),
+            AppPage::Workspace => {
+                let workspace =
+                    shell_layout.show_workspace.then(|| {
+                        if workspace_empty {
+                            self.render_workspace_empty(palette, cx)
+                        } else {
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .min_h_0()
+                                .h_full()
                                 .flex()
                                 .flex_col()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .min_h_0()
-                                        .flex()
-                                        .children(show_workspace.then(|| {
-                                            if workspace_empty {
-                                                self.render_workspace_empty(palette, cx)
-                                            } else {
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .min_h_0()
-                                                    .h_full()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .child(self.render_workspace_tabs(
-                                                        palette, compact, cx,
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .min_h_0()
-                                                            .overflow_y_scrollbar()
-                                                            .child(self.render_overview(
-                                                                palette,
-                                                                compact,
-                                                                viewport_height,
-                                                                cx,
-                                                            )),
-                                                    )
-                                                    .into_any_element()
-                                            }
-                                        }))
-                                        .children(match self.side_drawer {
-                                            Some(SideDrawer::Settings) => Some(
-                                                self.render_config_drawer(
-                                                    palette,
-                                                    compact,
-                                                    compact_drawer,
-                                                    cx,
-                                                )
-                                                .into_any_element(),
-                                            ),
-                                            Some(SideDrawer::CandidateComparison) => Some(
-                                                self.render_candidate_drawer(
-                                                    palette,
-                                                    compact,
-                                                    compact_drawer,
-                                                    cx,
-                                                )
-                                                .into_any_element(),
-                                            ),
-                                            None => show_run_configuration.then(|| {
-                                                self.render_run_configuration_rail(palette, cx)
-                                            }),
-                                        }),
-                                )
-                                .children(
-                                    (self.timeline_visible && !workspace_empty)
-                                        .then(|| self.render_timeline_bar(palette, cx)),
-                                )
+                                .child(self.render_workspace_tabs(palette, compact, cx))
+                                .child(div().flex_1().min_h_0().overflow_y_scrollbar().child(
+                                    self.render_overview(palette, compact, viewport_height, cx),
+                                ))
                                 .into_any_element()
                         }
-                    }),
+                    });
+                let side_region = match self.side_drawer {
+                    Some(SideDrawer::Settings) => Some(
+                        self.render_config_drawer(
+                            palette,
+                            compact,
+                            shell_layout.drawer_replaces_workspace,
+                            cx,
+                        )
+                        .into_any_element(),
+                    ),
+                    Some(SideDrawer::CandidateComparison) => Some(
+                        self.render_candidate_drawer(
+                            palette,
+                            compact,
+                            shell_layout.drawer_replaces_workspace,
+                            cx,
+                        )
+                        .into_any_element(),
+                    ),
+                    None => shell_layout
+                        .show_run_configuration
+                        .then(|| self.render_run_configuration_rail(palette, cx)),
+                };
+                let timeline = (self.timeline_visible && !workspace_empty)
+                    .then(|| self.render_timeline_bar(palette, cx).into_any_element());
+                workspace_shell(workspace, side_region, timeline)
+            }
+        };
+        let runs_dock = shell_layout
+            .show_runs_dock
+            .then(|| self.render_runs_dock(palette, shell_layout.runs_dock_replaces_content, cx));
+        let body = shell_body(runs_dock, shell_layout.show_content.then_some(page_content));
+        shell_root(
+            palette,
+            self.render_title_bar(palette, compact, cx)
+                .into_any_element(),
+            body,
+            self.render_status_bar(
+                palette,
+                shell_layout.show_runs_dock,
+                shell_layout.runs_dock_replaces_content,
+                cx,
             )
-            .child(self.render_status_bar(palette, cx))
+            .into_any_element(),
+        )
     }
 }
 

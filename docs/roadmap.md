@@ -119,6 +119,31 @@ purple element was a screen-control overlay rather than an application theme lea
 Evidence is recorded in `.scratch/ui-visual-refactor/phase1-evidence.md`. Phase 1 is
 complete and Phase 2 component-state work is next.
 
+**Phase 2 checkpoint (2026-09-04):** GNSScope-owned compact wrappers now cover the
+active button, switch, row, menu, input, progress, badge, divider, scroll, and tooltip
+surfaces while retaining narrowly wrapped `gpui-component` behavior. Runs and Run
+Library filters plus IQ-format selection use explicit checked popup menus rather than
+cycling state. The packaged macOS Release application was inspected for anchored menu
+placement, selected states, icon-only tooltip behavior, arrow/Return selection, and
+Escape cancellation; light/dark deterministic component galleries and production
+workspace captures remain available under `artifacts/ui-visual-refactor-phase2/`.
+GUI tests report 71 passed and 2 ignored real-data regressions, with formatting,
+strict workspace Clippy, Release build, and macOS packaging passing. Phase 2 is ready
+for human review. Exhaustive every-control Tab traversal and Windows/Linux visual
+evidence remain explicit boundaries; dormant legacy render functions are reserved for
+the later parity cleanup rather than mixed into the accepted active-path migration.
+
+**Phase 3 checkpoint (2026-09-05):** the first structural slice introduces a
+presentation-only `ui/shell.rs` boundary for responsive policy and the root,
+Runs/content, and workspace/side/timeline frames. `GnsscopeApp` still owns every
+receiver, run, queue, persistence, and action callback. Policy tests cover the 1568,
+1440, 1100, and 800 px targets; GUI and complete-workspace tests, strict Clippy,
+Release build, and macOS packaging pass. The gate remains open for region-level
+extraction and fresh visual evidence because the macOS host was locked during this
+slice's packaged-app inspection. The narrow policy is implemented: below 900 px the
+workbench remains visible by default and the status-strip control opens Runs as a
+temporary full-width replacement without overwriting the desktop dock preference.
+
 #### 1.1 Freeze the behavior contract before replacing the UI
 
 - Inventory every current workflow and encode it in a preservation matrix before
