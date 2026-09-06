@@ -103,7 +103,28 @@ when another run is active, it enters the queue instead.
 - Hovered or pinned PRN identity links plots, channel rows, and the inspector.
 - Empty pages explain what belongs there and provide one clear next action.
 
-## Verification Matrix
+## Implemented shell boundary (Phase 3)
+
+`ui/shell.rs` owns responsive presentation policy and root composition. The region
+renderers are `title_bar`, `runs_dock`, `run_rows`, `run_configuration`, `epoch_dock`,
+`status_strip`, and `plot_frame`. They consume display values, render slots, and
+app-owned callbacks; they do not open the run library or own receiver/worker state.
+`app.rs` retains selected-versus-active run resolution, filtering, commands,
+epoch selection, zoom, live-follow, and persistence. Domain plots and dormant legacy
+render paths are intentionally outside this extraction.
+
+The configuration rail collapses below 1320 px, compact controls apply below 1180 px,
+and Runs becomes a temporary full-width replacement below 900 px. Selecting a run,
+creating a draft, or opening Global Settings closes that temporary surface. Desktop
+Runs and configuration preferences survive presentation changes; completed run
+snapshots are never rewritten. The epoch dock spans below the workspace and rail.
+
+The macOS preview launcher accepts explicit window size, theme, and language
+environment overrides. `GNSSCOPE_PREVIEW=1` uses deterministic display fixtures and
+does not open the user's run database. Preview historical rows have no persisted
+epoch payload; they are not evidence of historical replay correctness.
+
+## Verification Matrix (acceptance)
 
 Required visual checks cover 1440x900, 1100x800, and 800x720 in light and dark themes,
 with both Chinese and English navigation. State coverage includes empty draft, valid

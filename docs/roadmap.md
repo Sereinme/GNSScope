@@ -133,6 +133,68 @@ for human review. Exhaustive every-control Tab traversal and Windows/Linux visua
 evidence remain explicit boundaries; dormant legacy render functions are reserved for
 the later parity cleanup rather than mixed into the accepted active-path migration.
 
+**Phase 4 narrow/Finder follow-up:** the isolated 800x720 light/English instance now
+passes 80/103 cap text, oldest-record search (1/1), keyboard selection/workbench return,
+persisted epoch reload and English empty results. Finder explicitly selects the
+generated fixture-000.dat, closing the earlier reveal blocker. Five fresh captures
+are indexed in `docs/ui-phase4-validation.md`. Native concurrent queue/cancel and
+deletion interaction remain open; this is not full Phase 4 completion.
+
+**Phase 4 draft-start follow-up (2026-09-06):** native file selection produced a valid
+draft; Start processing switched to a new workbench and completed the zero-IQ input.
+SQL confirms a new ID, all 1,000,000 samples processed, zero PVT epochs as expected,
+and 103 total test records. Desktop history-row focus comparison shows stable positions.
+Four captures are indexed in `docs/ui-phase4-validation.md`. Concurrent queue/cancel,
+deletion interaction, Finder success, and the refreshed theme/narrow checks remain open.
+
+**Phase 4 persisted-fixture checkpoint (2026-09-06):** a marked, explicit-path test
+library and non-overwriting fixture generator now isolate workflow verification from
+the ordinary database. Native inspection verifies 80/101 history and real zero-IQ
+reprocessing to a new completed run; read-only SQL confirms the original epoch and
+configuration remain intact. Focus border geometry is now reserved rather than added
+on focus. GUI tests: 78 passed/2 ignored; strict Clippy, Release app/examples build,
+packaging/signature and syntax checks pass. Native queue/cancel/delete, successful
+Finder reveal and the refreshed layout/focus matrix remain open; Phase 4 is not complete.
+Reproduction and evidence: `docs/ui-phase4-validation.md`.
+
+**Phase 4 visual follow-up (2026-09-06):** after unlock, the packaged 1440x900 preview
+passed no-match/one-match search, keyboard Completed filtering (5/5), queue down/up
+reordering, Tab focus, Return history selection, Space active selection, and keyboard
+missing-source feedback. Active progress remains independent. Seven captures and
+remaining persisted-workflow, narrow/theme, and focus-geometry gates are recorded in
+`docs/ui-phase4-validation.md`. Phase 4 remains in progress; the next slice should
+provide an isolated persisted workflow fixture rather than use the user's run library.
+
+**Phase 4 checkpoint (2026-09-06):** Runs history now shares a bounded selection
+helper for displayed rows and matching counts, excluding Active and Queue. It renders
+at most 80 rows, reports shown/matching totals, explains truncation, and supplies an
+explicit no-match state. Search can reach records beyond the initial cap. Two tests
+cover count/filter/order/cap behavior. macOS source-file reveal now uses `/usr/bin/open
+-R` rather than Linux `xdg-open`. GUI tests: 76 passed, 2 ignored; strict workspace
+Clippy, Release build, packaging and signature verification pass. Native inspection is
+blocked by a locked Mac; neither new visual acceptance nor actual Finder reveal is
+claimed. Phase 4 remains open for workflow and keyboard validation.
+
+**Phase 3 latest (2026-09-05):** implementation and macOS shell acceptance are complete,
+ready for human review. The four-size matrix (1568x1003, 1440x900, 1100x800, 800x720)
+was inspected in dark Chinese and light English navigation after manual unlock.
+Runs replacement/return, independent active/selected identity, epoch controls,
+configuration close/restore, Settings return, and cancelled-file-picker draft paths
+passed. See `docs/ui-phase3-validation.md` for build identity, 15 captures, scaling
+notes, and explicit later plot-localization/numeric-readability follow-ups.
+
+**Phase 3 implementation checkpoint (2026-09-05, before unlock):** structural implementation is complete: shell,
+title bar, Runs frame/rows, configuration rail, epoch drawing/buttons, status strip,
+and plot frame now have presentation-only modules. Run/worker/persistence state stays
+in the application. Configuration visibility is an interface preference; narrow
+Runs closes when selecting a run, creating a draft, or opening Global Settings.
+Preview is isolated from the user's database. GUI tests report 74 passed/2 ignored;
+complete workspace tests, strict Clippy, formatting, Release build, macOS packaging,
+strict signature verification, shell syntax and diff checks pass. The final
+four-size light/dark interaction matrix is **not accepted**: native inspection found
+the Mac locked and unable to auto-unlock. Manual unlock is required to close Phase 3.
+See `.scratch/ui-visual-refactor/phase3-evidence.md` for the exact outstanding checks.
+
 **Phase 3 checkpoint (2026-09-05):** the first structural slice introduces a
 presentation-only `ui/shell.rs` boundary for responsive policy and the root,
 Runs/content, and workspace/side/timeline frames. `GnsscopeApp` still owns every
@@ -143,6 +205,44 @@ extraction and fresh visual evidence because the macOS host was locked during th
 slice's packaged-app inspection. The narrow policy is implemented: below 900 px the
 workbench remains visible by default and the status-strip control opens Runs as a
 temporary full-width replacement without overwriting the desktop dock preference.
+
+**Phase 3 follow-up (2026-09-05):** the global status strip now renders from
+`ui/status_strip.rs`, consuming display values and an app-owned toggle control.
+Selecting a run or creating a draft closes the transient narrow Runs view so the
+destination becomes visible immediately. The unsupported Cmd+B tooltip was removed.
+GUI tests (73 passed, 2 ignored), strict Clippy, Release build, packaging, and signature
+verification pass. Fresh narrow-window visual acceptance remains pending: automation
+attached to a duplicate ordinary window instead of the requested preview instance.
+
+**Run Configuration extraction (2026-09-05):** `ui/run_configuration.rs` now renders
+the read-only configuration rail from display entries and an app-owned close action.
+Source selection and formatting still resolve from the selected run in `app.rs`.
+The existing six sections and 24 values retain their order; rail widths now use
+shared geometry tokens. GUI tests (73 passed, 2 ignored), strict Clippy, Release
+build, packaging, and signature verification pass. A fresh narrow Release preview
+confirms the default workbench, C/N0 plot, epoch dock, and active status remain visible
+with Runs/configuration collapsed. The screenshot is
+`artifacts/ui-visual-refactor-phase3/narrow-workbench.png`. Automated clicks report
+`noWindowsAvailable`, so narrow Runs open/return interaction and the remaining
+size/theme matrix are still pending; Phase 3 is not yet complete.
+
+**Epoch drawing extraction (2026-09-05):** `ui/epoch_dock.rs` now draws the epoch
+dock frame, time labels, event markers, and cursor from display-only `EpochView` data.
+The app supplies the slider and action controls and retains epoch/zoom/live-follow
+state. GUI tests (73 passed, 2 ignored), strict Clippy, Release build, packaging,
+signature, formatting, and diff checks pass. The latest Release Overview was visually
+inspected with the timeline still spanning below the workbench and configuration
+rail; evidence is `artifacts/ui-visual-refactor-phase3/overview-epoch-extraction.png`.
+Runs rendering and the full size/theme/interaction matrix remain open.
+
+**Runs frame extraction (2026-09-05):** `ui/runs_dock.rs` now composes the header,
+search slot, Active/Queue/History sections, shared scroll area, and footer from
+app-supplied rows and controls. Filtering, the 80-row history cap, row actions, and
+queue ordering remain in the app. The obsolete duplicate section-header helper was
+removed. GUI tests (73 passed, 2 ignored), strict Clippy, Release build, packaging,
+and signature verification pass. Latest Release visual evidence:
+`artifacts/ui-visual-refactor-phase3/overview-runs-extraction.png`. Row-level
+composition, plot frames, and the full responsive/interaction matrix remain open.
 
 #### 1.1 Freeze the behavior contract before replacing the UI
 

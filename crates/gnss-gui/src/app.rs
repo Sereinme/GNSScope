@@ -1,3 +1,6 @@
+use crate::ui::run_configuration::{
+    inspector_row, inspector_section, ConfigurationEntry, ConfigurationView,
+};
 use crate::ui::shell::{shell_body, shell_root, workspace_shell, ShellLayout};
 use crate::visual_system::{
     apply_component_theme, data_font_family, gnss_badge, gnss_divider, gnss_input, gnss_progress,
@@ -471,7 +474,19 @@ pub struct GnsscopeApp {
 
 impl GnsscopeApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let library = RunLibrary::open_default().ok();
+        // Visual fixtures must never recover or mutate the user's real run library.
+        let is_preview = std::env::var("GNSSCOPE_PREVIEW")
+            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let library =
+            if is_preview {
+                None
+            } else if let Some(path) = std::env::var_os("GNSSCOPE_TEST_LIBRARY") {
+                Some(RunLibrary::open_validation(PathBuf::from(path)).expect(
+                    "GNSSCOPE_TEST_LIBRARY must name an absolute, marked validation database",
+                ))
+            } else {
+                RunLibrary::open_default().ok()
+            };
         let history = library
             .as_ref()
             .and_then(|library| library.list_runs().ok())
@@ -519,6 +534,15 @@ impl GnsscopeApp {
         let runs_sidebar_visible = library
             .as_ref()
             .and_then(|library| library.preference("runs_sidebar_visible").ok().flatten())
+            .is_none_or(|value| value != "false");
+        let run_configuration_visible = library
+            .as_ref()
+            .and_then(|library| {
+                library
+                    .preference("run_configuration_visible")
+                    .ok()
+                    .flatten()
+            })
             .is_none_or(|value| value != "false");
         let iq_path = std::env::var_os("GNSSCOPE_IQ_PATH").map(PathBuf::from);
         let settings = match (iq_path, std::env::var("GNSSCOPE_PRESET").ok().as_deref()) {
@@ -674,7 +698,7 @@ impl GnsscopeApp {
             ),
             compact_library_expanded: false,
             runs_sidebar_visible,
-            run_configuration_visible: true,
+            run_configuration_visible,
             timeline_visible,
             timeline_zoom: 1,
             component_gallery: std::env::var("GNSSCOPE_COMPONENT_GALLERY")
@@ -688,9 +712,7 @@ impl GnsscopeApp {
             app.settings = settings;
             app.sync_setting_inputs(window, cx);
         }
-        if std::env::var("GNSSCOPE_PREVIEW")
-            .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        {
+        if is_preview {
             let (preview_epochs, preview_channels) = preview_epoch_history();
             let preview_id = Uuid::from_u128(0x2025_0521_1432_0700_0000_0000_0000_0001);
             let preview_source = PathBuf::from("2025-05-21_14-32-07_Run01.iqrun");
@@ -823,6 +845,7 @@ impl GnsscopeApp {
             app.historical_diagnostic_events.clear();
             app.selected_epoch = app.epochs.len().checked_sub(1);
             app.runs_sidebar_visible = true;
+            app.run_configuration_visible = true;
             app.timeline_visible = true;
             app.status_message = "确定性活动运行界面预览".to_string();
         }
@@ -944,6 +967,16 @@ impl GnsscopeApp {
         }
     }
 
+    fn set_run_configuration_visibility(&mut self, visible: bool) {
+        self.run_configuration_visible = visible;
+        if let Some(library) = &self.library {
+            let _ = library.set_preference(
+                "run_configuration_visible",
+                if visible { "true" } else { "false" },
+            );
+        }
+    }
+
     fn schedule_poll(&mut self, cx: &mut Context<Self>) {
         if self.poll_scheduled || self.worker_receiver.is_none() {
             return;
@@ -1006,6 +1039,7 @@ impl GnsscopeApp {
     }
 
     fn start_new_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.compact_library_expanded = false;
         self.settings = GuiProcessingSettings::default();
         self.selected_run_id = None;
         self.historical_epochs.clear();
@@ -1294,7 +1328,12 @@ impl GnsscopeApp {
         let result = std::process::Command::new("explorer.exe")
             .arg(format!("/select,{}", path.display()))
             .spawn();
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        let result = std::process::Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(&path)
+            .spawn();
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let result = std::process::Command::new("xdg-open")
             .arg(path.parent().unwrap_or(std::path::Path::new(".")))
             .spawn();
@@ -1536,6 +1575,7 @@ impl GnsscopeApp {
     }
 
     fn select_run(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        self.compact_library_expanded = false;
         if let Some(settings) = self
             .active_run
             .as_ref()
@@ -1927,97 +1967,31 @@ impl GnsscopeApp {
             AppPage::Workspace => self.localized("选中的运行", "Selected run"),
         };
 
-        TitleBar::new()
-            .h(px(metrics::TITLE_BAR_HEIGHT))
-            .bg(palette.sidebar)
-            .border_color(palette.border)
-            .text_color(palette.text)
-            .child(
-                div()
-                    .h_full()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .px(px(4.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .flex_shrink_0()
-                            .child(
-                                div()
-                                    .size(px(24.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(palette.accent)
-                                    .child(IconName::Map),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(15.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(palette.text)
-                                    .child("GNSScope"),
-                            ),
-                    )
-                    .child(div().h(px(18.)).w(px(1.)).bg(palette.border))
-                    .child(
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap(px(7.))
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(9.))
-                                    .text_color(palette.muted)
-                                    .child(page_context),
-                            )
-                            .child(
-                                div()
-                                    .max_w(px(420.))
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .text_size(px(11.))
-                                    .font_family(data_font_family())
-                                    .text_color(palette.text)
-                                    .child(selected_name),
-                            ),
-                    )
-                    .child(div().flex_1())
-                    .children((!compact).then(|| {
-                        div()
-                            .w(px(360.))
-                            .h(px(28.))
-                            .flex_shrink_0()
-                            .child(gnss_search_input(&self.history_search, palette))
-                    }))
-                    .child(div().flex_1())
-                    .child(
-                        GnssButton::new(
-                            "global-interface-settings",
-                            self.localized("设置", "Settings"),
-                            palette,
-                        )
-                        .kind(ButtonKind::Ghost)
-                        .size(ControlSize::Compact)
-                        .selected(self.page == AppPage::InterfaceSettings)
-                        .icon(IconName::Settings2)
-                        .tooltip(self.localized("打开界面设置", "Open interface settings"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.page = AppPage::InterfaceSettings;
-                            this.side_drawer = None;
-                            this.focused_plot = None;
-                            cx.notify();
-                        })),
-                    ),
-            )
+        let settings_control = GnssButton::new(
+            "global-interface-settings",
+            self.localized("设置", "Settings"),
+            palette,
+        )
+        .kind(ButtonKind::Ghost)
+        .size(ControlSize::Compact)
+        .selected(self.page == AppPage::InterfaceSettings)
+        .icon(IconName::Settings2)
+        .tooltip(self.localized("打开界面设置", "Open interface settings"))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.page = AppPage::InterfaceSettings;
+            this.compact_library_expanded = false;
+            this.side_drawer = None;
+            this.focused_plot = None;
+            cx.notify();
+        }));
+        crate::ui::title_bar::render(
+            selected_name,
+            page_context,
+            compact,
+            gnss_search_input(&self.history_search, palette).into_any_element(),
+            settings_control.into_any_element(),
+            palette,
+        )
     }
 
     #[allow(dead_code)]
@@ -2505,6 +2479,37 @@ impl GnsscopeApp {
             .into_any_element()
     }
 
+    fn runs_row_view(
+        &self,
+        run: &ProcessingRun,
+        palette: Palette,
+    ) -> crate::ui::run_rows::RunRowView {
+        let (status, status_color) = match run.status {
+            RunStatus::Completed => (self.localized("完成", "Completed"), palette.healthy),
+            RunStatus::Failed => (self.localized("失败", "Failed"), palette.danger),
+            RunStatus::Cancelled => (self.localized("已取消", "Cancelled"), palette.warning),
+            RunStatus::Interrupted => (self.localized("已中断", "Interrupted"), palette.warning),
+            _ => (self.localized("处理中", "Processing"), palette.accent),
+        };
+        crate::ui::run_rows::RunRowView {
+            id: run.id,
+            selected: self.selected_run_id == Some(run.id),
+            filename: run
+                .source_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            created_short: run.created_at.format("%H:%M:%S").to_string(),
+            created_long: run.created_at.format("%Y-%m-%d  %H:%M:%S").to_string(),
+            elapsed: format_timeline_time(processing_run_elapsed_ms(run)),
+            progress: run.progress,
+            pvt_epoch_count: run.pvt_epoch_count,
+            status,
+            status_color,
+            attention: matches!(run.status, RunStatus::Cancelled | RunStatus::Interrupted),
+        }
+    }
     fn render_runs_dock(
         &self,
         palette: Palette,
@@ -2515,543 +2520,175 @@ impl GnsscopeApp {
         let filter_menu_app = cx.entity();
         let current_filter = self.history_filter;
         let interface_language = self.interface_language;
-        let active = self.active_run.as_ref().map(|run| {
-            let id = run.id;
-            let selected = self.selected_run_id == Some(id);
-            let elapsed = format_timeline_time(processing_run_elapsed_ms(run));
-            div()
-                .id(SharedString::from(format!("active-run-{id}")))
-                .tab_index(0)
-                .px(px(12.))
-                .py(px(10.))
-                .cursor_pointer()
-                .bg(if selected {
-                    palette.accent_wash
-                } else {
-                    palette.sidebar
-                })
-                .when(!selected, |this| {
-                    this.hover(|style| style.bg(palette.hover))
-                })
-                .border_l_2()
-                .border_color(if selected {
-                    palette.accent
-                } else {
-                    palette.sidebar
-                })
-                .focus(|style| style.border_2().border_color(palette.focus_ring))
-                .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                    window.prevent_default();
-                })
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.page = AppPage::Workspace;
-                    this.select_run(id, window, cx);
+        let localize: crate::ui::Localize = match self.interface_language {
+            InterfaceLanguage::SimplifiedChinese => |zh, _| zh,
+            InterfaceLanguage::English => |_, en| en,
+        };
+        let app = cx.entity();
+        let actions: crate::ui::run_rows::RunHandler =
+            std::rc::Rc::new(move |action, window, cx| {
+                app.update(cx, |this, cx| {
+                    use crate::ui::run_rows::RunAction;
+                    match action {
+                        RunAction::Select(id) => {
+                            this.page = AppPage::Workspace;
+                            this.select_run(id, window, cx);
+                        }
+                        RunAction::MoveUp(id) => this.move_queued(id, -1),
+                        RunAction::MoveDown(id) => this.move_queued(id, 1),
+                        RunAction::Cancel(id) => this.cancel_queued(id),
+                        RunAction::Reveal(id) => this.reveal_source_file(id),
+                        RunAction::Delete(id) => this.delete_historical_run(id),
+                    }
                     cx.notify();
-                }))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.))
-                        .child(
-                            div()
-                                .w(px(8.))
-                                .flex_shrink_0()
-                                .text_size(px(9.))
-                                .text_color(palette.healthy)
-                                .child("▶"),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .text_size(px(11.))
-                                .font_family(data_font_family())
-                                .text_color(palette.text)
-                                .child(
-                                    run.source_path
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .into_owned(),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.5))
-                                .font_family(data_font_family())
-                                .text_color(palette.healthy)
-                                .child(format!("{:.0}%", run.progress * 100.0)),
-                        ),
-                )
-                .child(
-                    div()
-                        .mt(px(6.))
-                        .flex()
-                        .items_center()
-                        .gap(px(7.))
-                        .child(
-                            div()
-                                .w(px(48.))
-                                .flex_shrink_0()
-                                .text_size(px(9.))
-                                .text_color(palette.healthy)
-                                .child(self.localized("处理中", "Running")),
-                        )
-                        .child(div().flex_1().child(gnss_progress(
-                            (run.progress * 100.0) as f32,
-                            palette,
-                            false,
-                        ))),
-                )
-                .child(
-                    div()
-                        .mt(px(5.))
-                        .ml(px(13.))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .font_family(data_font_family())
-                        .text_size(px(8.5))
-                        .text_color(palette.muted)
-                        .child(run.created_at.format("%H:%M:%S").to_string())
-                        .child(format!("{elapsed} elapsed")),
-                )
+                });
+            });
+        let active = self.active_run.as_ref().map(|run| {
+            crate::ui::run_rows::active_row(
+                self.runs_row_view(run, palette),
+                actions.clone(),
+                localize,
+                palette,
+            )
         });
-
-        div()
-            .when(full_width, |this| this.w_full().min_w_0())
-            .when(!full_width, |this| {
-                this.w(px(metrics::RUNS_DOCK_WIDTH))
-                    .min_w(px(metrics::RUNS_DOCK_MIN_WIDTH))
-            })
-            .h_full()
-            .flex_shrink_0()
-            .bg(palette.sidebar)
-            .border_r_1()
-            .border_color(palette.border)
+        let active_rows = active
+            .map(|row| row.into_any_element())
+            .into_iter()
+            .collect();
+        let queue_rows = (self.queue.iter().enumerate().map(|(index, run)| {
+            crate::ui::run_rows::queue_row(
+                self.runs_row_view(run, palette),
+                index,
+                self.queue.len(),
+                actions.clone(),
+                localize,
+                palette,
+            )
+        }))
+        .map(|row| row.into_any_element())
+        .collect();
+        let history_window = dock_history_window(
+            &self.history,
+            self.active_run.as_ref().map(|run| run.id),
+            &history_query,
+            self.history_filter,
+        );
+        let shown_history = history_window.rows.len();
+        let matching_history = history_window.matching;
+        let history_rows = (history_window.rows.into_iter().map(|run| {
+            crate::ui::run_rows::history_row(
+                self.runs_row_view(run, palette),
+                actions.clone(),
+                localize,
+                palette,
+            )
+        }))
+        .map(|row| row.into_any_element())
+        .collect();
+        let header_actions = div()
             .flex()
-            .flex_col()
+            .items_center()
             .child(
-                div()
-                    .h(px(metrics::RUNS_HEADER_HEIGHT))
-                    .flex_shrink_0()
-                    .px(px(12.))
-                    .flex()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(palette.border)
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(12.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(palette.text)
-                            .child(self.localized("运行", "Runs")),
-                    )
-                    .child(
-                        GnssButton::icon_only(
-                            "runs-new-analysis",
-                            IconName::Plus,
-                            self.localized("新建分析 · ⌘N", "New analysis · Cmd+N"),
-                            palette,
-                        )
-                        .size(ControlSize::Compact)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.start_new_task(window, cx);
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        GnssButton::icon_only(
-                            "runs-filter-menu",
-                            IconName::Ellipsis,
-                            self.localized("选择运行筛选", "Choose run filter"),
-                            palette,
-                        )
-                        .size(ControlSize::Compact)
-                        .selected(current_filter != HistoryFilter::All)
-                        .dropdown_menu(move |menu, _, _| {
-                            menu.min_w(px(172.))
-                                .item(Self::history_filter_menu_item(
-                                    filter_menu_app.clone(),
-                                    HistoryFilter::All,
-                                    current_filter,
-                                    interface_language,
-                                ))
-                                .item(Self::history_filter_menu_item(
-                                    filter_menu_app.clone(),
-                                    HistoryFilter::Completed,
-                                    current_filter,
-                                    interface_language,
-                                ))
-                                .item(Self::history_filter_menu_item(
-                                    filter_menu_app.clone(),
-                                    HistoryFilter::NeedsAttention,
-                                    current_filter,
-                                    interface_language,
-                                ))
-                        }),
-                    ),
+                GnssButton::icon_only(
+                    "runs-new-analysis",
+                    IconName::Plus,
+                    self.localized("新建分析 · ⌘N", "New analysis · Cmd+N"),
+                    palette,
+                )
+                .size(ControlSize::Compact)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.start_new_task(window, cx);
+                    cx.notify();
+                })),
             )
             .child(
-                div()
-                    .h(px(metrics::RUNS_SEARCH_HEIGHT))
-                    .flex_shrink_0()
-                    .px(px(9.))
-                    .py(px(7.))
-                    .border_b_1()
-                    .border_color(palette.border)
-                    .child(gnss_search_input(&self.history_search, palette)),
+                GnssButton::icon_only(
+                    "runs-filter-menu",
+                    IconName::Ellipsis,
+                    self.localized("选择运行筛选", "Choose run filter"),
+                    palette,
+                )
+                .size(ControlSize::Compact)
+                .selected(current_filter != HistoryFilter::All)
+                .dropdown_menu(move |menu, _, _| {
+                    menu.min_w(px(172.))
+                        .item(Self::history_filter_menu_item(
+                            filter_menu_app.clone(),
+                            HistoryFilter::All,
+                            current_filter,
+                            interface_language,
+                        ))
+                        .item(Self::history_filter_menu_item(
+                            filter_menu_app.clone(),
+                            HistoryFilter::Completed,
+                            current_filter,
+                            interface_language,
+                        ))
+                        .item(Self::history_filter_menu_item(
+                            filter_menu_app.clone(),
+                            HistoryFilter::NeedsAttention,
+                            current_filter,
+                            interface_language,
+                        ))
+                }),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .child(run_section_header(
-                        self.localized("当前运行", "Active"),
-                        usize::from(self.active_run.is_some()),
-                        palette,
-                    ))
-                    .children(active)
-                    .children(self.active_run.is_none().then(|| {
-                        div()
-                            .px(px(12.))
-                            .py(px(10.))
-                            .text_size(px(9.))
-                            .text_color(palette.muted)
-                            .child(self.localized("没有正在处理的运行", "No active run"))
-                    }))
-                    .child(run_section_header(
-                        self.localized("等待队列", "Queue"),
-                        self.queue.len(),
-                        palette,
-                    ))
-                    .children(self.queue.iter().enumerate().map(|(index, run)| {
-                        let id = run.id;
-                        div()
-                            .min_h(px(42.))
-                            .px(px(12.))
-                            .py(px(7.))
-                            .border_b_1()
-                            .border_color(palette.border.opacity(0.55))
-                            .flex()
-                            .items_center()
-                            .gap(px(7.))
-                            .child(div().size(px(6.)).rounded_full().bg(palette.warning))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(
-                                        div()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .text_size(px(9.))
-                                            .font_family(data_font_family())
-                                            .text_color(palette.text)
-                                            .child(
-                                                run.source_path
-                                                    .file_name()
-                                                    .unwrap_or_default()
-                                                    .to_string_lossy()
-                                                    .into_owned(),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .mt(px(2.))
-                                            .text_size(px(8.))
-                                            .text_color(palette.warning)
-                                            .child(self.localized("已排队", "Queued")),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .child(
-                                        GnssButton::icon_only(
-                                            SharedString::from(format!("dock-up-{id}")),
-                                            IconName::ChevronUp,
-                                            self.localized("上移", "Move up"),
-                                            palette,
-                                        )
-                                        .size(ControlSize::Compact)
-                                        .disabled(index == 0)
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.move_queued(id, -1);
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        GnssButton::icon_only(
-                                            SharedString::from(format!("dock-down-{id}")),
-                                            IconName::ChevronDown,
-                                            self.localized("下移", "Move down"),
-                                            palette,
-                                        )
-                                        .size(ControlSize::Compact)
-                                        .disabled(index + 1 == self.queue.len())
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.move_queued(id, 1);
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        GnssButton::icon_only(
-                                            SharedString::from(format!("dock-cancel-{id}")),
-                                            IconName::CircleX,
-                                            self.localized("取消排队", "Remove from queue"),
-                                            palette,
-                                        )
-                                        .kind(ButtonKind::Destructive)
-                                        .size(ControlSize::Compact)
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.cancel_queued(id);
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    ),
-                            )
-                    }))
-                    .child(run_section_header(
-                        self.localized("历史记录", "History"),
-                        self.history
-                            .iter()
-                            .filter(|run| run.status != RunStatus::Queued)
-                            .count(),
-                        palette,
-                    ))
-                    .children(
-                        self.history
-                            .iter()
-                            .filter(|run| {
-                                run.status != RunStatus::Queued
-                                    && Some(run.id)
-                                        != self.active_run.as_ref().map(|active| active.id)
-                                    && history_run_matches(run, &history_query, self.history_filter)
-                            })
-                            .take(80)
-                            .map(|run| {
-                                let id = run.id;
-                                let selected = self.selected_run_id == Some(id);
-                                let (status, status_color) = match run.status {
-                                    RunStatus::Completed => {
-                                        (self.localized("完成", "Completed"), palette.healthy)
-                                    }
-                                    RunStatus::Failed => {
-                                        (self.localized("失败", "Failed"), palette.danger)
-                                    }
-                                    RunStatus::Cancelled => {
-                                        (self.localized("已取消", "Cancelled"), palette.warning)
-                                    }
-                                    RunStatus::Interrupted => {
-                                        (self.localized("已中断", "Interrupted"), palette.warning)
-                                    }
-                                    _ => (self.localized("处理中", "Processing"), palette.accent),
-                                };
-                                let elapsed = format_timeline_time(processing_run_elapsed_ms(run));
-                                div()
-                                    .id(SharedString::from(format!("dock-run-{id}")))
-                                    .tab_index(0)
-                                    .min_h(px(64.))
-                                    .px(px(12.))
-                                    .py(px(7.))
-                                    .cursor_pointer()
-                                    .bg(if selected {
-                                        palette.accent_wash
-                                    } else {
-                                        palette.sidebar
-                                    })
-                                    .when(!selected, |this| {
-                                        this.hover(|style| style.bg(palette.hover))
-                                    })
-                                    .border_l_2()
-                                    .border_b_1()
-                                    .border_color(if selected {
-                                        palette.accent
-                                    } else {
-                                        palette.border.opacity(0.55)
-                                    })
-                                    .focus(|style| {
-                                        style.border_2().border_color(palette.focus_ring)
-                                    })
-                                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
-                                        window.prevent_default();
-                                    })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.page = AppPage::Workspace;
-                                        this.select_run(id, window, cx);
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(7.))
-                                            .child(
-                                                div().size(px(6.)).rounded_full().bg(status_color),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .overflow_hidden()
-                                                    .text_ellipsis()
-                                                    .text_size(px(10.))
-                                                    .font_family(data_font_family())
-                                                    .text_color(palette.text)
-                                                    .child(
-                                                        run.source_path
-                                                            .file_name()
-                                                            .unwrap_or_default()
-                                                            .to_string_lossy()
-                                                            .into_owned(),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(9.))
-                                                    .text_color(status_color)
-                                                    .child(status),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .mt(px(5.))
-                                            .ml(px(13.))
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(7.))
-                                            .child(
-                                                div()
-                                                    .w(px(50.))
-                                                    .flex_shrink_0()
-                                                    .text_size(px(8.))
-                                                    .text_color(status_color)
-                                                    .child(status),
-                                            )
-                                            .child(div().flex_1().child(gnss_progress(
-                                                (run.progress * 100.0) as f32,
-                                                palette,
-                                                matches!(
-                                                    run.status,
-                                                    RunStatus::Cancelled | RunStatus::Interrupted
-                                                ),
-                                            )))
-                                            .child(
-                                                div()
-                                                    .w(px(30.))
-                                                    .text_right()
-                                                    .font_family(data_font_family())
-                                                    .text_size(px(8.))
-                                                    .text_color(status_color)
-                                                    .child(format!("{:.0}%", run.progress * 100.0)),
-                                            )
-                                            .children(selected.then(|| {
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .child(
-                                                        GnssButton::icon_only(
-                                                            SharedString::from(format!(
-                                                                "dock-reveal-{id}"
-                                                            )),
-                                                            IconName::FolderOpen,
-                                                            self.localized(
-                                                                "在文件管理器中定位",
-                                                                "Reveal source file",
-                                                            ),
-                                                            palette,
-                                                        )
-                                                        .size(ControlSize::Compact)
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                this.reveal_source_file(id);
-                                                                cx.notify();
-                                                            },
-                                                        )),
-                                                    )
-                                                    .child(
-                                                        GnssButton::icon_only(
-                                                            SharedString::from(format!(
-                                                                "dock-delete-{id}"
-                                                            )),
-                                                            IconName::Delete,
-                                                            self.localized(
-                                                                "删除历史记录",
-                                                                "Delete history entry",
-                                                            ),
-                                                            palette,
-                                                        )
-                                                        .kind(ButtonKind::Destructive)
-                                                        .size(ControlSize::Compact)
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                this.delete_historical_run(id);
-                                                                cx.notify();
-                                                            },
-                                                        )),
-                                                    )
-                                            })),
-                                    )
-                                    .child(
-                                        div()
-                                            .mt(px(4.))
-                                            .ml(px(13.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .font_family(data_font_family())
-                                            .text_size(px(8.))
-                                            .text_color(palette.muted)
-                                            .child(
-                                                run.created_at
-                                                    .format("%Y-%m-%d  %H:%M:%S")
-                                                    .to_string(),
-                                            )
-                                            .child(format!(
-                                                "{elapsed} · {} epochs",
-                                                run.pvt_epoch_count
-                                            )),
-                                    )
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .h(px(28.))
-                    .flex_shrink_0()
-                    .px(px(12.))
-                    .border_t_1()
-                    .border_color(palette.border)
-                    .flex()
-                    .items_center()
-                    .text_size(px(9.))
-                    .text_color(palette.faint)
-                    .child(match self.interface_language {
-                        InterfaceLanguage::SimplifiedChinese => {
-                            format!(
-                                "{} 条记录 · {} 项排队",
-                                self.history.len(),
-                                self.queue.len()
-                            )
-                        }
-                        InterfaceLanguage::English => {
-                            format!("{} runs · {} queued", self.history.len(), self.queue.len())
-                        }
-                    }),
-            )
-            .into_any_element()
+            .into_any_element();
+        let footer = match self.interface_language {
+            InterfaceLanguage::SimplifiedChinese => format!(
+                "显示 {shown_history}/{matching_history} 条历史{}",
+                if matching_history > shown_history {
+                    " · 请细化搜索"
+                } else {
+                    ""
+                }
+            ),
+            InterfaceLanguage::English => {
+                format!(
+                    "History {shown_history}/{matching_history}{}",
+                    if matching_history > shown_history {
+                        " · Refine search"
+                    } else {
+                        ""
+                    }
+                )
+            }
+        };
+        crate::ui::runs_dock::render(
+            crate::ui::runs_dock::RunsView {
+                title: self.localized("运行", "Runs"),
+                full_width,
+                sections: [
+                    crate::ui::runs_dock::RunSection {
+                        title: self.localized("当前运行", "Active"),
+                        count: usize::from(self.active_run.is_some()),
+                        rows: active_rows,
+                        empty: self
+                            .active_run
+                            .is_none()
+                            .then_some(self.localized("没有正在处理的运行", "No active run")),
+                    },
+                    crate::ui::runs_dock::RunSection {
+                        title: self.localized("等待队列", "Queue"),
+                        count: self.queue.len(),
+                        rows: queue_rows,
+                        empty: None,
+                    },
+                    crate::ui::runs_dock::RunSection {
+                        title: self.localized("历史记录", "History"),
+                        count: matching_history,
+                        rows: history_rows,
+                        empty: (matching_history == 0).then_some(self.localized(
+                            "没有匹配的历史运行；请调整搜索或筛选条件。",
+                            "No matching history. Adjust search or filters.",
+                        )),
+                    },
+                ],
+                footer,
+            },
+            header_actions,
+            gnss_search_input(&self.history_search, palette).into_any_element(),
+            palette,
+        )
     }
 
     #[allow(dead_code)]
@@ -5867,7 +5504,7 @@ impl GnsscopeApp {
                         )
                         .selected(self.run_configuration_visible)
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.run_configuration_visible = !this.run_configuration_visible;
+                            this.set_run_configuration_visibility(!this.run_configuration_visible);
                             cx.notify();
                         }))
                         .into_any_element()
@@ -5880,7 +5517,7 @@ impl GnsscopeApp {
                         .icon(IconName::Settings2)
                         .selected(self.run_configuration_visible)
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.run_configuration_visible = !this.run_configuration_visible;
+                            this.set_run_configuration_visibility(!this.run_configuration_visible);
                             cx.notify();
                         }))
                         .into_any_element()
@@ -6312,224 +5949,112 @@ impl GnsscopeApp {
             })
             .unwrap_or_else(|| self.localized("自动", "Automatic").to_string());
 
-        div()
-            .w(px(276.))
-            .min_w(px(258.))
-            .h_full()
-            .flex_shrink_0()
-            .overflow_y_scrollbar()
-            .bg(palette.surface)
-            .border_l_1()
-            .border_color(palette.border)
-            .child(
-                div()
-                    .h(px(54.))
-                    .px(px(14.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(palette.border)
-                    .child(
-                        div()
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(palette.text)
-                                    .child(self.localized("运行配置", "Run Configuration")),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(3.))
-                                    .font_family(data_font_family())
-                                    .text_size(px(9.))
-                                    .text_color(palette.muted)
-                                    .child(format!("SNAPSHOT · {run_id}")),
-                            ),
-                    )
-                    .child(
-                        GnssButton::icon_only(
-                            "close-run-configuration",
-                            IconName::PanelRightClose,
-                            self.localized("折叠运行配置", "Collapse run configuration"),
-                            palette,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.run_configuration_visible = false;
-                            cx.notify();
-                        })),
-                    ),
-            )
-            .child(
-                div()
-                    .px(px(14.))
-                    .pb(px(16.))
-                    .child(
-                        div()
-                            .mt(px(10.))
-                            .px(px(8.))
-                            .py(px(6.))
-                            .bg(palette.healthy.opacity(0.07))
-                            .border_1()
-                            .border_color(palette.healthy.opacity(0.28))
-                            .text_size(px(9.))
-                            .text_color(palette.healthy)
-                            .child(if run.is_some() {
-                                self.localized(
-                                    "只读 · 完成运行的配置不可变",
-                                    "READ ONLY · Immutable run snapshot",
-                                )
-                            } else {
-                                self.localized(
-                                    "草稿 · 在 New Analysis 中编辑",
-                                    "DRAFT · Edit from New Analysis",
-                                )
-                            }),
-                    )
-                    .child(inspector_section(
-                        self.localized("数据源", "Source"),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("IQ 文件", "IQ file"),
-                        source,
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("格式", "Format"),
-                        format!("{:?}", settings.iq_format),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("信号", "Signal"),
-                        "GPS · L1 C/A".to_string(),
-                        palette,
-                    ))
-                    .child(inspector_section(self.localized("射频", "RF"), palette))
-                    .child(inspector_row(
-                        self.localized("采样率", "Sample rate"),
-                        format!("{:.3} MHz", settings.sample_rate_hz / 1e6),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("中频", "IF"),
-                        format!("{:.3} MHz", settings.intermediate_frequency_hz / 1e6),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("分块", "Chunk"),
-                        format!("{} ms", settings.chunk_ms),
-                        palette,
-                    ))
-                    .child(inspector_section(
-                        self.localized("捕获", "Acquisition"),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("搜索窗", "Window"),
-                        format!("{} ms", settings.acquisition_window_ms),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("非相干积分", "Noncoherent"),
-                        settings.acquisition_noncoherent_integrations.to_string(),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("门限", "Threshold"),
-                        format!("{:.2}", settings.acquisition_threshold),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("多普勒范围", "Doppler span"),
-                        format!("±{:.0} Hz", settings.acquisition_doppler_max_hz),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("多普勒步长", "Doppler step"),
-                        format!("{:.0} Hz", settings.acquisition_doppler_step_hz),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("PRN", "PRNs"),
-                        fixed_prns,
-                        palette,
-                    ))
-                    .child(inspector_section(
-                        self.localized("跟踪", "Tracking"),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        "DLL BW",
-                        format!("{:.2} Hz", settings.dll_bandwidth_hz),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        "PLL BW",
-                        format!("{:.2} Hz", settings.pll_bandwidth_hz),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("早迟间隔", "Early/late"),
-                        format!("{:.2} chips", settings.early_late_spacing_chips),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("载波辅助", "Carrier aiding"),
-                        enabled(settings.carrier_aiding).to_string(),
-                        palette,
-                    ))
-                    .child(inspector_section(
-                        self.localized("导航与 PVT", "Navigation & PVT"),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("导航源", "NAV source"),
-                        nav_source,
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        "Hatch",
-                        enabled(settings.enable_carrier_smoothing).to_string(),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        "Kalman",
-                        enabled(settings.enable_kalman).to_string(),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        "RAIM",
-                        enabled(settings.enable_raim).to_string(),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("整毫秒模糊度", "Integer-ms ambiguity"),
-                        enabled(settings.enable_integer_ms_ambiguity_resolution).to_string(),
-                        palette,
-                    ))
-                    .child(inspector_section(
-                        self.localized("执行", "Execution"),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("PVT 周期", "PVT cadence"),
-                        format!("{} ms", settings.pvt_output_rate_ms),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("并行捕获", "Parallel acquisition"),
-                        enabled(settings.parallel_acquisition).to_string(),
-                        palette,
-                    ))
-                    .child(inspector_row(
-                        self.localized("并行跟踪", "Parallel tracking"),
-                        enabled(settings.parallel_tracking).to_string(),
-                        palette,
-                    )),
-            )
-            .into_any_element()
+        let view = ConfigurationView {
+            title: self.localized("运行配置", "Run Configuration"),
+            snapshot: format!("SNAPSHOT · {run_id}"),
+            notice: if run.is_some() {
+                self.localized("只读 · 运行配置快照", "READ ONLY · Immutable run snapshot")
+            } else {
+                self.localized(
+                    "草稿 · 在 New Analysis 中编辑",
+                    "DRAFT · Edit from New Analysis",
+                )
+            },
+            entries: vec![
+                ConfigurationEntry::Section(self.localized("数据源", "Source")),
+                ConfigurationEntry::Row(self.localized("IQ 文件", "IQ file"), source),
+                ConfigurationEntry::Row(
+                    self.localized("格式", "Format"),
+                    format!("{:?}", settings.iq_format),
+                ),
+                ConfigurationEntry::Row(
+                    self.localized("信号", "Signal"),
+                    "GPS · L1 C/A".to_string(),
+                ),
+                ConfigurationEntry::Section(self.localized("射频", "RF")),
+                ConfigurationEntry::Row(
+                    self.localized("采样率", "Sample rate"),
+                    format!("{:.3} MHz", settings.sample_rate_hz / 1e6),
+                ),
+                ConfigurationEntry::Row(
+                    self.localized("中频", "IF"),
+                    format!("{:.3} MHz", settings.intermediate_frequency_hz / 1e6),
+                ),
+                ConfigurationEntry::Row(
+                    self.localized("分块", "Chunk"),
+                    format!("{} ms", settings.chunk_ms),
+                ),
+                ConfigurationEntry::Section(self.localized("捕获", "Acquisition")),
+                ConfigurationEntry::Row(
+                    self.localized("搜索窗", "Window"),
+                    format!("{} ms", settings.acquisition_window_ms),
+                ),
+                ConfigurationEntry::Row(
+                    self.localized("非相干积分", "Noncoherent"),
+                    settings.acquisition_noncoherent_integrations.to_string(),
+                ),
+                ConfigurationEntry::Row(
+                    self.localized("门限", "Threshold"),
+                    format!("{:.2}", settings.acquisition_threshold),
+                ),
+                ConfigurationEntry::Row(
+                    self.localized("多普勒范围", "Doppler span"),
+                    format!("±{:.0} Hz", settings.acquisition_doppler_max_hz),
+                ),
+                ConfigurationEntry::Row(
+                    self.localized("多普勒步长", "Doppler step"),
+                    format!("{:.0} Hz", settings.acquisition_doppler_step_hz),
+                ),
+                ConfigurationEntry::Row(self.localized("PRN", "PRNs"), fixed_prns),
+                ConfigurationEntry::Section(self.localized("跟踪", "Tracking")),
+                ConfigurationEntry::Row("DLL BW", format!("{:.2} Hz", settings.dll_bandwidth_hz)),
+                ConfigurationEntry::Row("PLL BW", format!("{:.2} Hz", settings.pll_bandwidth_hz)),
+                ConfigurationEntry::Row(
+                    self.localized("早迟间隔", "Early/late"),
+                    format!("{:.2} chips", settings.early_late_spacing_chips),
+                ),
+                ConfigurationEntry::Row(
+                    self.localized("载波辅助", "Carrier aiding"),
+                    enabled(settings.carrier_aiding).to_string(),
+                ),
+                ConfigurationEntry::Section(self.localized("导航与 PVT", "Navigation & PVT")),
+                ConfigurationEntry::Row(self.localized("导航源", "NAV source"), nav_source),
+                ConfigurationEntry::Row(
+                    "Hatch",
+                    enabled(settings.enable_carrier_smoothing).to_string(),
+                ),
+                ConfigurationEntry::Row("Kalman", enabled(settings.enable_kalman).to_string()),
+                ConfigurationEntry::Row("RAIM", enabled(settings.enable_raim).to_string()),
+                ConfigurationEntry::Row(
+                    self.localized("整毫秒模糊度", "Integer-ms ambiguity"),
+                    enabled(settings.enable_integer_ms_ambiguity_resolution).to_string(),
+                ),
+                ConfigurationEntry::Section(self.localized("执行", "Execution")),
+                ConfigurationEntry::Row(
+                    self.localized("PVT 周期", "PVT cadence"),
+                    format!("{} ms", settings.pvt_output_rate_ms),
+                ),
+                ConfigurationEntry::Row(
+                    self.localized("并行捕获", "Parallel acquisition"),
+                    enabled(settings.parallel_acquisition).to_string(),
+                ),
+                ConfigurationEntry::Row(
+                    self.localized("并行跟踪", "Parallel tracking"),
+                    enabled(settings.parallel_tracking).to_string(),
+                ),
+            ],
+        };
+        let close_action = GnssButton::icon_only(
+            "close-run-configuration",
+            IconName::PanelRightClose,
+            self.localized("折叠运行配置", "Collapse run configuration"),
+            palette,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.set_run_configuration_visibility(false);
+            cx.notify();
+        }));
+        crate::ui::run_configuration::render(view, close_action.into_any_element(), palette)
     }
 
     fn render_navigation_signal_panel(&self, palette: Palette) -> AnyElement {
@@ -7454,362 +6979,61 @@ impl GnsscopeApp {
             .collect::<Vec<_>>();
         let visible_start_ms = (timeline_duration_ms as f32 * visible_start) as u64;
         let visible_duration_ms = (timeline_duration_ms as f32 * visible_span) as u64;
-        div()
-            .flex_shrink_0()
-            .h(px(154.))
-            .bg(palette.surface)
-            .border_t_1()
-            .border_color(palette.border)
-            .child(
-                div()
-                    .h(px(34.))
-                    .px(px(14.))
-                    .flex()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(palette.border)
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(12.5))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(palette.text)
-                            .child(self.localized("选中运行时间线", "Selected run timeline")),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .font_family(data_font_family())
-                            .text_color(palette.accent)
-                            .child(format!("{epoch_number} / {epoch_count}")),
-                    ),
-            )
-            .child(
-                div().h(px(120.)).px(px(12.)).pt(px(7.)).pb(px(9.)).child(
-                    div()
-                        .h_full()
-                        .flex()
-                        .border_1()
-                        .border_color(palette.border)
-                        .bg(palette.background.opacity(0.16))
-                        .child(
-                            div().flex_1().min_w_0().px(px(12.)).py(px(8.)).child(
-                                div()
-                                    .relative()
-                                    .h_full()
-                                    .bg(palette.surface_alt.opacity(0.18))
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .left_0()
-                                            .right_0()
-                                            .top(px(42.))
-                                            .h(px(1.))
-                                            .bg(palette.muted.opacity(0.82)),
-                                    )
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .left_0()
-                                            .right_0()
-                                            .top(px(48.))
-                                            .h(px(1.))
-                                            .bg(palette.muted.opacity(0.42)),
-                                    )
-                                    .children((0..=50).map(|tick| {
-                                        let major = tick % 10 == 0;
-                                        div()
-                                            .absolute()
-                                            .left(gpui::relative(tick as f32 / 50.0))
-                                            .top(if major { px(40.) } else { px(45.) })
-                                            .w(px(1.))
-                                            .h(if major { px(11.) } else { px(4.) })
-                                            .bg(if major {
-                                                palette.text.opacity(0.58)
-                                            } else {
-                                                palette.muted.opacity(0.42)
-                                            })
-                                    }))
-                                    .children(markers.into_iter().map(
-                                        |(index, percent, label, color)| {
-                                            div()
-                                                .id(SharedString::from(format!(
-                                                    "timeline-marker-{index}"
-                                                )))
-                                                .absolute()
-                                                .left(gpui::relative(percent))
-                                                .top(px(4.))
-                                                .ml(px(-16.))
-                                                .w(px(32.))
-                                                .h(px(34.))
-                                                .flex()
-                                                .flex_col()
-                                                .items_center()
-                                                .justify_start()
-                                                .text_size(px(8.5))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .font_family(data_font_family())
-                                                .text_color(color)
-                                                .child(label)
-                                                .child(
-                                                    div()
-                                                        .mt(px(2.))
-                                                        .size(px(6.))
-                                                        .rounded_full()
-                                                        .bg(color),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .w(px(1.))
-                                                        .h(px(11.))
-                                                        .bg(color.opacity(0.88)),
-                                                )
-                                        },
-                                    ))
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .left_0()
-                                            .right_0()
-                                            .top(px(58.))
-                                            .h(px(15.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .font_family(data_font_family())
-                                            .text_size(px(9.))
-                                            .text_color(palette.muted)
-                                            .children((0..=5).map(|tick| {
-                                                let time_ms = visible_start_ms
-                                                    + visible_duration_ms * tick / 5;
-                                                div().child(format_timeline_time(time_ms))
-                                            })),
-                                    )
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .left(gpui::relative(cursor_percent))
-                                            .top(px(8.))
-                                            .bottom_0()
-                                            .ml(px(-1.))
-                                            .w(px(2.))
-                                            .bg(palette.accent)
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .top(px(-10.))
-                                                    .left(px(-5.))
-                                                    .text_size(px(11.))
-                                                    .text_color(palette.accent)
-                                                    .child("▼"),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .left_0()
-                                            .right_0()
-                                            .top_0()
-                                            .h(px(24.))
-                                            .flex()
-                                            .items_center()
-                                            .cursor_ew_resize()
-                                            .child(
-                                                Slider::new(&self.timeline)
-                                                    .bg(gpui::transparent_black())
-                                                    .text_color(gpui::transparent_black())
-                                                    .disabled(epoch_count < 2),
-                                            ),
-                                    ),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .w(px(204.))
-                                .h_full()
-                                .flex_shrink_0()
-                                .border_l_1()
-                                .border_color(palette.border)
-                                .px(px(10.))
-                                .py(px(8.))
-                                .flex()
-                                .flex_col()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .h(px(32.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(
-                                            GnssButton::icon_only(
-                                                "epoch-first",
-                                                IconName::ArrowLeft,
-                                                self.localized(
-                                                    "跳到第一个 epoch",
-                                                    "Jump to first epoch",
-                                                ),
-                                                palette,
-                                            )
-                                            .size(ControlSize::Compact)
-                                            .disabled(epoch_count == 0)
-                                            .on_click(
-                                                cx.listener(|this, _, window, cx| {
-                                                    this.jump_selected_epoch(0, window, cx);
-                                                    cx.notify();
-                                                }),
-                                            ),
-                                        )
-                                        .child(
-                                            GnssButton::icon_only(
-                                                "epoch-previous",
-                                                IconName::ChevronLeft,
-                                                self.localized("上一个 epoch", "Previous epoch"),
-                                                palette,
-                                            )
-                                            .size(ControlSize::Compact)
-                                            .disabled(epoch_count == 0)
-                                            .on_click(
-                                                cx.listener(|this, _, window, cx| {
-                                                    this.step_selected_epoch(-1, window, cx);
-                                                    cx.notify();
-                                                }),
-                                            ),
-                                        )
-                                        .child(
-                                            GnssButton::icon_only(
-                                                "epoch-next",
-                                                IconName::ChevronRight,
-                                                self.localized("下一个 epoch", "Next epoch"),
-                                                palette,
-                                            )
-                                            .size(ControlSize::Compact)
-                                            .disabled(epoch_count == 0)
-                                            .on_click(
-                                                cx.listener(|this, _, window, cx| {
-                                                    this.step_selected_epoch(1, window, cx);
-                                                    cx.notify();
-                                                }),
-                                            ),
-                                        )
-                                        .child(
-                                            GnssButton::icon_only(
-                                                "epoch-last",
-                                                IconName::ArrowRight,
-                                                self.localized(
-                                                    "跳到最后一个 epoch",
-                                                    "Jump to last epoch",
-                                                ),
-                                                palette,
-                                            )
-                                            .size(ControlSize::Compact)
-                                            .disabled(epoch_count == 0)
-                                            .on_click(
-                                                cx.listener(|this, _, window, cx| {
-                                                    let last = this
-                                                        .display_epochs()
-                                                        .len()
-                                                        .saturating_sub(1);
-                                                    this.jump_selected_epoch(last, window, cx);
-                                                    cx.notify();
-                                                }),
-                                            ),
-                                        ),
-                                )
-                                .child(div().h(px(1.)).w_full().bg(palette.border))
-                                .child(
-                                    div()
-                                        .h(px(31.))
-                                        .flex()
-                                        .gap(px(5.))
-                                        .child(
-                                            div()
-                                                .w(px(82.))
-                                                .h_full()
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .rounded(px(2.))
-                                                .border_1()
-                                                .border_color(palette.border)
-                                                .child(
-                                                    GnssButton::new(
-                                                        "timeline-zoom-out",
-                                                        "−",
-                                                        palette,
-                                                    )
-                                                    .h_full()
-                                                    .w(px(26.))
-                                                    .flex_shrink_0()
-                                                    .kind(ButtonKind::Ghost)
-                                                    .size(ControlSize::Compact)
-                                                    .rounded(px(0.))
-                                                    .tooltip(self.localized(
-                                                        "缩小时间轴",
-                                                        "Zoom timeline out",
-                                                    ))
-                                                    .disabled(self.timeline_zoom == 1)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.adjust_timeline_zoom(false);
-                                                        cx.notify();
-                                                    })),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .w(px(28.))
-                                                        .text_center()
-                                                        .font_family(data_font_family())
-                                                        .text_size(px(8.))
-                                                        .text_color(palette.text)
-                                                        .child(format!("{}×", self.timeline_zoom)),
-                                                )
-                                                .child(
-                                                    GnssButton::new(
-                                                        "timeline-zoom-in",
-                                                        "+",
-                                                        palette,
-                                                    )
-                                                    .h_full()
-                                                    .w(px(26.))
-                                                    .flex_shrink_0()
-                                                    .kind(ButtonKind::Ghost)
-                                                    .size(ControlSize::Compact)
-                                                    .rounded(px(0.))
-                                                    .tooltip(self.localized(
-                                                        "放大时间轴",
-                                                        "Zoom timeline in",
-                                                    ))
-                                                    .disabled(self.timeline_zoom == 4)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.adjust_timeline_zoom(true);
-                                                        cx.notify();
-                                                    })),
-                                                ),
-                                        )
-                                        .child(
-                                            GnssButton::new(
-                                                "epoch-follow-live",
-                                                self.localized("跟随", "Follow"),
-                                                palette,
-                                            )
-                                            .h_full()
-                                            .flex_1()
-                                            .kind(ButtonKind::Ghost)
-                                            .size(ControlSize::Compact)
-                                            .selected(self.follow_live)
-                                            .icon(IconName::Redo2)
-                                            .disabled(self.live_run_id.is_none())
-                                            .on_click(
-                                                cx.listener(|this, _, window, cx| {
-                                                    this.return_to_live(window, cx);
-                                                    cx.notify();
-                                                }),
-                                            ),
-                                        ),
-                                ),
-                        ),
-                ),
-            )
+        let labels = std::array::from_fn(|tick| {
+            format_timeline_time(visible_start_ms + visible_duration_ms * tick as u64 / 5)
+        });
+        let slider = Slider::new(&self.timeline)
+            .bg(gpui::transparent_black())
+            .text_color(gpui::transparent_black())
+            .disabled(epoch_count < 2);
+        let localize: crate::ui::Localize = match self.interface_language {
+            InterfaceLanguage::SimplifiedChinese => |zh, _| zh,
+            InterfaceLanguage::English => |_, en| en,
+        };
+        let app = cx.entity();
+        let actions: crate::ui::epoch_dock::EpochHandler =
+            std::rc::Rc::new(move |action, window, cx| {
+                app.update(cx, |this, cx| {
+                    use crate::ui::epoch_dock::EpochAction;
+                    match action {
+                        EpochAction::First => this.jump_selected_epoch(0, window, cx),
+                        EpochAction::Previous => this.step_selected_epoch(-1, window, cx),
+                        EpochAction::Next => this.step_selected_epoch(1, window, cx),
+                        EpochAction::Last => {
+                            let last = this.display_epochs().len().saturating_sub(1);
+                            this.jump_selected_epoch(last, window, cx);
+                        }
+                        EpochAction::ZoomOut => this.adjust_timeline_zoom(false),
+                        EpochAction::ZoomIn => this.adjust_timeline_zoom(true),
+                        EpochAction::Follow => this.return_to_live(window, cx),
+                    }
+                    cx.notify();
+                });
+            });
+        let controls = crate::ui::epoch_dock::controls(
+            crate::ui::epoch_dock::EpochControls {
+                epoch_count,
+                zoom: self.timeline_zoom,
+                follow_live: self.follow_live,
+                can_follow: self.live_run_id.is_some(),
+            },
+            actions,
+            localize,
+            palette,
+        );
+        crate::ui::epoch_dock::render(
+            crate::ui::epoch_dock::EpochView {
+                title: self.localized("选中运行时间线", "Selected run timeline"),
+                epoch_number,
+                epoch_count,
+                cursor_percent,
+                markers,
+                labels,
+            },
+            slider.into_any_element(),
+            controls.into_any_element(),
+            palette,
+        )
     }
 
     fn render_status_bar(
@@ -7844,96 +7068,63 @@ impl GnsscopeApp {
                 )
             })
             .unwrap_or_else(|| "Idle".to_string());
-
-        div()
-            .h(px(metrics::STATUS_BAR_HEIGHT))
-            .flex_shrink_0()
-            .bg(palette.sidebar)
-            .border_t_1()
-            .border_color(palette.border)
-            .flex()
-            .items_center()
-            .text_size(px(9.))
-            .text_color(palette.faint)
-            .child(
-                GnssButton::icon_only(
-                    "toggle-runs-sidebar",
-                    if runs_dock_open {
-                        IconName::PanelLeftClose
+        let toggle = GnssButton::icon_only(
+            "toggle-runs-sidebar",
+            if runs_dock_open {
+                IconName::PanelLeftClose
+            } else {
+                IconName::PanelLeftOpen
+            },
+            if runs_dock_open {
+                self.localized("折叠运行栏", "Collapse Runs dock")
+            } else {
+                self.localized("展开运行栏", "Expand Runs dock")
+            },
+            palette,
+        )
+        .size(ControlSize::Compact)
+        .rounded(px(0.))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if runs_dock_replaces_content {
+                this.compact_library_expanded = !this.compact_library_expanded;
+            } else {
+                this.set_runs_sidebar_visibility(!this.runs_sidebar_visible);
+            }
+            cx.notify();
+        }));
+        crate::ui::status_strip::render(
+            palette,
+            toggle.into_any_element(),
+            [
+                (
+                    self.localized("活动运行", "Active run"),
+                    active_label,
+                    if active.is_some() {
+                        palette.healthy
                     } else {
-                        IconName::PanelLeftOpen
+                        palette.muted
                     },
-                    if runs_dock_open {
-                        self.localized("折叠运行栏 · ⌘B", "Collapse Runs dock · Cmd+B")
+                ),
+                ("SIGNAL", "GPS L1 C/A".to_string(), palette.text),
+                (
+                    "RATE",
+                    format!("{:.3} MHz", self.settings.sample_rate_hz / 1e6),
+                    palette.text,
+                ),
+                ("TRACK", tracking_count.to_string(), palette.text),
+                ("NAV", nav_count.to_string(), palette.text),
+                (
+                    "FIX",
+                    fix_label,
+                    if self.epochs.is_empty() {
+                        palette.muted
                     } else {
-                        self.localized("展开运行栏 · ⌘B", "Expand Runs dock · Cmd+B")
+                        palette.healthy
                     },
-                    palette,
-                )
-                .size(ControlSize::Compact)
-                .rounded(px(0.))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if runs_dock_replaces_content {
-                        this.compact_library_expanded = !this.compact_library_expanded;
-                    } else {
-                        this.set_runs_sidebar_visibility(!this.runs_sidebar_visible);
-                    }
-                    cx.notify();
-                })),
-            )
-            .child(status_bar_item(
-                self.localized("活动运行", "Active run"),
-                active_label,
-                if active.is_some() {
-                    palette.healthy
-                } else {
-                    palette.muted
-                },
-                palette,
-            ))
-            .child(status_bar_item(
-                "SIGNAL",
-                "GPS L1 C/A".to_string(),
-                palette.text,
-                palette,
-            ))
-            .child(status_bar_item(
-                "RATE",
-                format!("{:.3} MHz", self.settings.sample_rate_hz / 1e6),
-                palette.text,
-                palette,
-            ))
-            .child(status_bar_item(
-                "TRACK",
-                tracking_count.to_string(),
-                palette.text,
-                palette,
-            ))
-            .child(status_bar_item(
-                "NAV",
-                nav_count.to_string(),
-                palette.text,
-                palette,
-            ))
-            .child(status_bar_item(
-                "FIX",
-                fix_label,
-                if self.epochs.is_empty() {
-                    palette.muted
-                } else {
-                    palette.healthy
-                },
-                palette,
-            ))
-            .child(div().flex_1())
-            .child(
-                div()
-                    .px(px(10.))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .font_family(data_font_family())
-                    .child(self.status_message.clone()),
-            )
+                ),
+            ],
+            self.status_message.clone(),
+        )
     }
 
     fn plot_panel(
@@ -7946,77 +7137,34 @@ impl GnsscopeApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let expanded = matches!(layout, PlotPanelLayout::Expanded);
-        div()
-            .min_h(if expanded { px(620.) } else { px(310.) })
-            .h_full()
-            .flex()
-            .flex_col()
-            .rounded(px(0.))
-            .bg(palette.surface)
-            .border_1()
-            .border_color(palette.border)
-            .px(px(11.))
-            .pt(px(10.))
-            .pb(px(11.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(Self::section_title(title, palette))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .children((focus == PlotFocus::Position).then(|| {
-                                div()
-                                    .h(px(24.))
-                                    .px(px(7.))
-                                    .flex()
-                                    .items_center()
-                                    .rounded(px(2.))
-                                    .border_1()
-                                    .border_color(palette.border)
-                                    .font_family(data_font_family())
-                                    .text_size(px(9.))
-                                    .text_color(palette.muted)
-                                    .child("ENU")
-                            }))
-                            .child(
-                                GnssButton::icon_only(
-                                    SharedString::from(format!("plot-focus-{}", focus.id())),
-                                    if expanded {
-                                        IconName::Minimize
-                                    } else {
-                                        IconName::Maximize
-                                    },
-                                    if expanded {
-                                        self.localized("退出聚焦", "Exit focus")
-                                    } else {
-                                        self.localized("聚焦图表", "Focus plot")
-                                    },
-                                    palette,
-                                )
-                                .size(ControlSize::Compact)
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.workspace_view = WorkspaceView::for_plot(focus);
-                                        this.focused_plot =
-                                            if expanded { None } else { Some(focus) };
-                                        cx.notify();
-                                    },
-                                )),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .mt(px(6.))
-                    .flex_1()
-                    .min_h(if expanded { px(554.) } else { px(264.) })
-                    .child(plot),
-            )
+        let focus_control = GnssButton::icon_only(
+            SharedString::from(format!("plot-focus-{}", focus.id())),
+            if expanded {
+                IconName::Minimize
+            } else {
+                IconName::Maximize
+            },
+            if expanded {
+                self.localized("退出聚焦", "Exit focus")
+            } else {
+                self.localized("聚焦图表", "Focus plot")
+            },
+            palette,
+        )
+        .size(ControlSize::Compact)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.workspace_view = WorkspaceView::for_plot(focus);
+            this.focused_plot = if expanded { None } else { Some(focus) };
+            cx.notify();
+        }));
+        crate::ui::plot_frame::render(
+            Self::section_title(title, palette).into_any_element(),
+            plot.into_any_element(),
+            focus_control.into_any_element(),
+            expanded,
+            focus == PlotFocus::Position,
+            palette,
+        )
     }
 }
 
@@ -8126,32 +7274,6 @@ impl Render for GnsscopeApp {
     }
 }
 
-fn run_section_header(label: &'static str, count: usize, palette: Palette) -> impl IntoElement {
-    div()
-        .h(px(30.))
-        .px(px(12.))
-        .flex()
-        .items_center()
-        .justify_between()
-        .bg(palette.surface)
-        .border_b_1()
-        .border_color(palette.border)
-        .child(
-            div()
-                .text_size(px(9.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(palette.muted)
-                .child(label),
-        )
-        .child(
-            div()
-                .text_size(px(8.))
-                .font_family(data_font_family())
-                .text_color(palette.muted)
-                .child(count.to_string()),
-        )
-}
-
 fn format_timeline_time(milliseconds: u64) -> String {
     let seconds = milliseconds / 1_000;
     let hours = seconds / 3_600;
@@ -8177,79 +7299,6 @@ fn format_timeline_offset(milliseconds: u64) -> String {
     } else {
         format!("{minutes:02}:{seconds:02}")
     }
-}
-
-fn inspector_section(label: &'static str, palette: Palette) -> impl IntoElement {
-    div()
-        .mt(px(12.))
-        .pt(px(8.))
-        .border_t_1()
-        .border_color(palette.border)
-        .text_size(px(10.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(palette.healthy)
-        .child(label)
-}
-
-fn inspector_row(
-    label: &'static str,
-    value: impl Into<SharedString>,
-    palette: Palette,
-) -> impl IntoElement {
-    div()
-        .min_h(px(26.))
-        .flex()
-        .items_center()
-        .child(
-            div()
-                .w(px(118.))
-                .flex_shrink_0()
-                .text_size(px(10.))
-                .text_color(palette.muted)
-                .child(label),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .text_right()
-                .text_size(px(10.))
-                .font_family(data_font_family())
-                .text_color(palette.text)
-                .child(value.into()),
-        )
-}
-
-fn status_bar_item(
-    label: &'static str,
-    value: String,
-    value_color: Hsla,
-    palette: Palette,
-) -> impl IntoElement {
-    div()
-        .h_full()
-        .px(px(10.))
-        .border_l_1()
-        .border_color(palette.border)
-        .flex()
-        .items_center()
-        .gap(px(5.))
-        .child(
-            div()
-                .text_size(px(8.))
-                .text_color(palette.muted)
-                .child(label),
-        )
-        .child(
-            div()
-                .text_size(px(9.))
-                .font_family(data_font_family())
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(value_color)
-                .child(value),
-        )
 }
 
 fn pvt_table_row(
@@ -10046,6 +9095,38 @@ fn finalize_persistence(
     }
 }
 
+const DOCK_HISTORY_LIMIT: usize = 80;
+
+struct DockHistoryWindow<'a> {
+    rows: Vec<&'a ProcessingRun>,
+    matching: usize,
+}
+
+fn dock_history_window<'a>(
+    history: &'a [ProcessingRun],
+    active_id: Option<Uuid>,
+    query: &str,
+    filter: HistoryFilter,
+) -> DockHistoryWindow<'a> {
+    let mut window = DockHistoryWindow {
+        rows: Vec::with_capacity(history.len().min(DOCK_HISTORY_LIMIT)),
+        matching: 0,
+    };
+    for run in history {
+        if run.status == RunStatus::Queued
+            || Some(run.id) == active_id
+            || !history_run_matches(run, query, filter)
+        {
+            continue;
+        }
+        window.matching += 1;
+        if window.rows.len() < DOCK_HISTORY_LIMIT {
+            window.rows.push(run);
+        }
+    }
+    window
+}
+
 fn history_run_matches(run: &ProcessingRun, query: &str, filter: HistoryFilter) -> bool {
     let status_matches = match filter {
         HistoryFilter::All => true,
@@ -10086,6 +9167,41 @@ mod history_queue_tests {
             message: String::new(),
             settings: GuiProcessingSettings::default(),
         }
+    }
+
+    #[test]
+    fn dock_history_counts_matches_without_rendering_unbounded_rows() {
+        let history = (0..101)
+            .map(|index| run(&format!("capture-{index:03}.dat"), RunStatus::Completed))
+            .collect::<Vec<_>>();
+        let window = dock_history_window(&history, None, "", HistoryFilter::All);
+        assert_eq!(window.matching, 101);
+        assert_eq!(window.rows.len(), DOCK_HISTORY_LIMIT);
+        assert_eq!(window.rows[0].id, history[0].id);
+        assert_eq!(window.rows[79].id, history[79].id);
+        // Searching can reach a record beyond the initial rendering limit.
+        let older = dock_history_window(&history, None, "100", HistoryFilter::Completed);
+        assert_eq!(older.matching, 1);
+        assert_eq!(older.rows[0].id, history[100].id);
+    }
+
+    #[test]
+    fn dock_history_excludes_active_queue_and_nonmatching_statuses() {
+        let history = vec![
+            run("active.dat", RunStatus::Processing),
+            run("queued.dat", RunStatus::Queued),
+            run("failed.dat", RunStatus::Failed),
+            run("done.dat", RunStatus::Completed),
+        ];
+        let active_id = Some(history[0].id);
+        let all = dock_history_window(&history, active_id, "", HistoryFilter::All);
+        assert_eq!(all.matching, 2);
+        let attention = dock_history_window(&history, active_id, "", HistoryFilter::NeedsAttention);
+        assert_eq!(attention.matching, 1);
+        assert_eq!(attention.rows[0].id, history[2].id);
+        let empty = dock_history_window(&history, active_id, "missing", HistoryFilter::All);
+        assert_eq!(empty.matching, 0);
+        assert!(empty.rows.is_empty());
     }
 
     #[test]

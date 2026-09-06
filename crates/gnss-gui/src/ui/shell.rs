@@ -139,6 +139,43 @@ mod tests {
     }
 
     #[test]
+    fn exact_thresholds_preserve_desktop_preferences() {
+        for (width, configuration, compact, replaces) in [
+            (899.0, false, true, true),
+            (900.0, false, true, false),
+            (1179.0, false, true, false),
+            (1180.0, false, false, false),
+            (1319.0, false, false, false),
+            (1320.0, true, false, false),
+        ] {
+            for desktop_requested in [false, true] {
+                for narrow_open in [false, true] {
+                    let layout = ShellLayout::resolve(
+                        width,
+                        false,
+                        true,
+                        true,
+                        desktop_requested,
+                        narrow_open,
+                    );
+                    assert_eq!(layout.show_run_configuration, configuration);
+                    assert_eq!(layout.compact, compact);
+                    assert_eq!(layout.runs_dock_replaces_content, replaces);
+                    assert_eq!(
+                        layout.show_runs_dock,
+                        if replaces {
+                            narrow_open
+                        } else {
+                            desktop_requested
+                        }
+                    );
+                    assert_eq!(layout.show_content, !replaces || !narrow_open);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn run_configuration_is_workspace_only_and_yields_to_drawers() {
         assert!(
             !ShellLayout::resolve(1_568.0, false, true, false, true, false).show_run_configuration

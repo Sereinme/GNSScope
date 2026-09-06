@@ -41,6 +41,8 @@ pub(crate) mod metrics {
     pub(crate) const TITLE_BAR_HEIGHT: f32 = 40.0;
     pub(crate) const RUNS_DOCK_WIDTH: f32 = 316.0;
     pub(crate) const RUNS_DOCK_MIN_WIDTH: f32 = 286.0;
+    pub(crate) const CONFIGURATION_RAIL_WIDTH: f32 = 276.0;
+    pub(crate) const CONFIGURATION_RAIL_MIN_WIDTH: f32 = 258.0;
     pub(crate) const RUNS_HEADER_HEIGHT: f32 = 38.0;
     pub(crate) const RUNS_SEARCH_HEIGHT: f32 = 42.0;
     pub(crate) const WORKSPACE_HEADER_HEIGHT: f32 = 96.0;

@@ -737,6 +737,25 @@ impl RunLibrary {
         Self::open_with_recovery(path.as_ref().to_path_buf(), true)
     }
 
+    /// Opt-in workflow validation. Never create a database or fall back to the default.
+    pub fn open_validation(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        let path = path.as_ref();
+        if !path.is_absolute() || !path.is_file() {
+            return Err(rusqlite::Error::InvalidPath(path.to_path_buf()));
+        }
+        let check = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let marker: String = check.query_row(
+            "SELECT value FROM preferences WHERE key = 'validation_fixture'",
+            [],
+            |row| row.get(0),
+        )?;
+        if marker != "gnsscope-ui-workflow-v1" {
+            return Err(rusqlite::Error::InvalidPath(path.to_path_buf()));
+        }
+        drop(check);
+        Self::open(path)
+    }
+
     fn open_with_recovery(database_path: PathBuf, recover_runs: bool) -> rusqlite::Result<Self> {
         let connection = Connection::open(&database_path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
@@ -1087,6 +1106,85 @@ fn apply_persistence_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validation_library_requires_marker_before_recovery() {
+        let path =
+            std::env::temp_dir().join(format!("gnsscope-validation-{}.sqlite3", Uuid::new_v4()));
+        assert!(RunLibrary::open_validation(&path).is_err());
+        assert!(!path.exists());
+        assert!(RunLibrary::open_validation("relative.sqlite3").is_err());
+        let library = RunLibrary::open(&path).unwrap();
+        let run = library
+            .create_run(&GuiProcessingSettings::default())
+            .unwrap();
+        library
+            .update_progress(run.id, RunStatus::Processing, 1, 10, 0, "test")
+            .unwrap();
+        assert!(RunLibrary::open_validation(&path).is_err());
+        // Rejecting an unmarked library must not recover or mutate processing state.
+        assert_eq!(
+            library.list_runs().unwrap()[0].status,
+            RunStatus::Processing
+        );
+        library
+            .set_preference("validation_fixture", "wrong")
+            .unwrap();
+        assert!(RunLibrary::open_validation(&path).is_err());
+        library
+            .set_preference("validation_fixture", "gnsscope-ui-workflow-v1")
+            .unwrap();
+        drop(library);
+        let reopened = RunLibrary::open_validation(&path).unwrap();
+        assert_eq!(
+            reopened.list_runs().unwrap()[0].status,
+            RunStatus::Interrupted
+        );
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn persisted_reprocess_cancel_delete_preserves_completed_source() {
+        let path =
+            std::env::temp_dir().join(format!("gnsscope-workflow-{}.sqlite3", Uuid::new_v4()));
+        let library = RunLibrary::open(&path).unwrap();
+        let settings = GuiProcessingSettings {
+            iq_file_path: Some(PathBuf::from("synthetic-test.dat")),
+            sample_rate_hz: 4_000_000.0,
+            ..Default::default()
+        };
+        let original = library.create_run(&settings).unwrap();
+        library
+            .append_epoch(original.id, 0, &crate::sample_pvt_view_model(), &[])
+            .unwrap();
+        library
+            .update_progress(original.id, RunStatus::Completed, 100, 100, 1, "complete")
+            .unwrap();
+        let mut draft = original.settings.clone();
+        draft.sample_rate_hz = 5_000_000.0;
+        let retry = library.create_run(&draft).unwrap();
+        assert_ne!(original.id, retry.id);
+        library
+            .update_progress(retry.id, RunStatus::Cancelled, 0, 0, 0, "cancel queued")
+            .unwrap();
+        drop(library);
+        let reopened = RunLibrary::open(&path).unwrap();
+        let runs = reopened.list_runs().unwrap();
+        let completed = runs.iter().find(|run| run.id == original.id).unwrap();
+        assert_eq!(completed.status, RunStatus::Completed);
+        assert_eq!(completed.settings.sample_rate_hz, 4_000_000.0);
+        assert_eq!(reopened.epochs(original.id).unwrap().len(), 1);
+        assert_eq!(
+            runs.iter().find(|run| run.id == retry.id).unwrap().status,
+            RunStatus::Cancelled
+        );
+        reopened.delete_run(retry.id).unwrap();
+        assert_eq!(reopened.list_runs().unwrap().len(), 1);
+        assert_eq!(reopened.epochs(original.id).unwrap().len(), 1);
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn run_library_persists_immutable_configuration_snapshot() {

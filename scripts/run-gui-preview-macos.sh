@@ -66,6 +66,10 @@ case "$layout" in
         ;;
 esac
 
+# Explicit overrides make the Phase 3 size/theme/language matrix reproducible.
+width="${GNSSCOPE_WINDOW_WIDTH:-$width}"
+height="${GNSSCOPE_WINDOW_HEIGHT:-$height}"
+
 if [[ "${GNSSCOPE_SKIP_BUILD:-0}" == "1" ]]; then
     "$script_dir/package-macos.sh" --skip-build >/dev/null
 else
@@ -75,6 +79,8 @@ fi
 # LaunchServices registration is required when this script runs under GUI automation parents.
 exec /usr/bin/open -W -n \
     --env "GNSSCOPE_PREVIEW=1" \
+    --env "GNSSCOPE_THEME=${GNSSCOPE_THEME:-system}" \
+    --env "GNSSCOPE_LANGUAGE=${GNSSCOPE_LANGUAGE:-zh-CN}" \
     --env "GNSSCOPE_WINDOW_WIDTH=$width" \
     --env "GNSSCOPE_WINDOW_HEIGHT=$height" \
     --env "GNSSCOPE_WORKSPACE_VIEW=$workspace_view" \
