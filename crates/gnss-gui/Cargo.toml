@@ -24,3 +24,5 @@ uuid = { version = "1", features = ["serde", "v4"] }
 # gpui-pre 0.3.8 no longer exposes the old `runtime_shaders` feature; shader
 # handling is covered by gpui-kit itself.
 gpui-kit = { version = "0.7.1", features = ["test-support"] }
+# Save headless pixel-capture evidence; pinned to the same minor as gpui's tree.
+image = "0.25"

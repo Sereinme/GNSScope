@@ -151,9 +151,13 @@ joins `licenses/`. Gates: GUI suite 83 passed/2 ignored, complete workspace test
 formatting, strict Clippy, Release build, and both ignored real-data regressions
 (CTTC complete-capture persistence and LabSat full-constellation PVT, 466 s) pass.
 A packaged-equivalent Release launch smoke runs stably and opens the SQLite run
-library, but the agent environment lacks Screen Recording permission, so native
-visual acceptance of the button-border treatment, the removed `theme.list` color,
-and context-menu surfaces remains open for human review.
+library. Headless pixel capture (`examples/visual_capture.rs`, off-screen
+`VisualTestAppContext`, deterministic preview fixtures) then provided the visual
+evidence the blocked native screen capture could not: both themes render the
+populated workbench with correct button borders (`border_1` + `border_color`
+replacement), readable Runs row backgrounds, and matching theme geometry;
+captures are indexed in `docs/ui-phase4-validation.md`. Native right-click
+menu/confirmation interaction remains grouped with the Phase 4 mouse gates.
 
 **Phase 4 deletion safety correction:** history reveal/delete actions now live in
 right-click menus, not selected-row inline controls. Delete requests a native

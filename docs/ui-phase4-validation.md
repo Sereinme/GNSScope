@@ -29,11 +29,25 @@ Verification evidence:
   library, and terminates cleanly on SIGTERM without writing to the existing
   database.
 
-Boundary: agent-environment screen capture produced fully black frames (missing
-Screen Recording permission), so native visual acceptance is still open for three
-migration-sensitive surfaces: button borders (now `border_1` + `border_color`
-instead of the removed custom-variant border builder), the removed `theme.list`
-row color (library default now applies), and right-click menu rendering.
+Headless visual acceptance (2026-10-09): `examples/visual_capture.rs` renders the
+production `GnsscopeApp` with the deterministic preview fixtures
+(`GNSSCOPE_PREVIEW=1`) in an off-screen `VisualTestAppContext` window (real Metal
+rendering, texture-read capture; no screen-recording permission involved) and
+stores `artifacts/gpui-kit-migration/workbench-{dark,light}.png` at 1440x900
+logical (2x device). Assertions pass: mean luminance 28.2 (dark) versus 242.0
+(light), distinct color counts ~4.8k, and non-uniform frames. Programmatic
+review of both captures confirms the populated workbench: title-bar search, Runs
+dock with 当前运行/等待队列/历史记录 rows in every run state, sky plot with PRN
+labels, ENU trajectory, PVT table, C/N0 panel, configuration snapshot rail,
+timeline with NAV/REACQ state segments, and status strip; button controls render
+with ~1 logical px borders in both a neutral and a teal-accent weight (the
+`border_1` + `border_color` replacement for the removed custom-variant border
+builder), Runs rows keep readable uniform backgrounds with an elevated active
+row, and the two themes share geometry (region-variance correlation 0.989).
+
+Boundary: native interaction acceptance remains open for the right-click
+context-menu surface (delivery of a real right-click and the confirmation
+dialog), which stays grouped with the existing Phase 4 native mouse gates.
 
 ## Workbench-wide visual hierarchy pass
 
