@@ -5,7 +5,8 @@ use crate::ui::shell::{shell_body, shell_root, workspace_shell, ShellLayout};
 use crate::visual_system::{
     apply_component_theme, data_font_family, gnss_badge, gnss_divider, gnss_input, gnss_progress,
     gnss_scroll_area, gnss_search_input, interface_font_family, metrics, BadgeKind, ButtonKind,
-    ControlSize, ControlState, GnssButton, GnssMenuItem, GnssRow, GnssSwitch, Palette,
+    ContextMenuExt, ControlSize, ControlState, GnssButton, GnssMenuItem, GnssRow, GnssSwitch,
+    Palette,
 };
 use crate::{
     spawn_streaming_worker, ActiveWorker, GuiChannelStatus, GuiDiagnosticEvent,
@@ -14,20 +15,20 @@ use crate::{
     WorkerEvent, WORKER_EVENT_CAPACITY,
 };
 use gnss_core::pvt::{PvtCandidateDisposition, PvtEpochSolutionKind};
-use gpui::prelude::*;
-use gpui::{
-    bounds, canvas, div, point, px, quad, size, AnyElement, Bounds, Context, Entity, Hsla,
-    InteractiveElement, IntoElement, ParentElement, PathBuilder, PathPromptOptions, Render,
-    SharedString, Styled, Timer, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState},
-    menu::PopupMenuItem,
+    menu::{PopupMenu, PopupMenuItem},
     progress::Progress,
     scroll::ScrollableElement,
     slider::{Slider, SliderEvent, SliderState},
     ActiveTheme, Disableable, IconName, Theme, ThemeMode, TitleBar,
+};
+use gpui_kit::prelude::*;
+use gpui_kit::{
+    bounds, canvas, div, point, px, quad, size, AnyElement, Bounds, Context, Entity, Hsla,
+    InteractiveElement, IntoElement, ParentElement, PathBuilder, PathPromptOptions, Render,
+    SharedString, Styled, Window,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -487,6 +488,15 @@ impl GnsscopeApp {
             } else {
                 RunLibrary::open_default().ok()
             };
+        Self::with_library(window, cx, library, is_preview)
+    }
+
+    fn with_library(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        library: Option<RunLibrary>,
+        is_preview: bool,
+    ) -> Self {
         let history = library
             .as_ref()
             .and_then(|library| library.list_runs().ok())
@@ -561,9 +571,10 @@ impl GnsscopeApp {
                 .default_value(100.0)
         });
         cx.subscribe(&timeline, |this, _, event, cx| {
-            let SliderEvent::Change(value) = event;
-            this.select_epoch_percent(value.end());
-            cx.notify();
+            if let SliderEvent::Change(value) = event {
+                this.select_epoch_percent(value.end());
+                cx.notify();
+            }
         })
         .detach();
         let history_search = cx.new(|cx| {
@@ -983,7 +994,9 @@ impl GnsscopeApp {
         }
         self.poll_scheduled = true;
         cx.spawn(async move |this, cx| {
-            Timer::after(Duration::from_millis(50)).await;
+            cx.background_executor()
+                .timer(Duration::from_millis(50))
+                .await;
             if let Some(this) = this.upgrade() {
                 this.update(cx, |this, cx| {
                     this.poll_scheduled = false;
@@ -996,8 +1009,7 @@ impl GnsscopeApp {
                     if notify {
                         cx.notify();
                     }
-                })
-                .ok();
+                });
             }
         })
         .detach();
@@ -1030,8 +1042,7 @@ impl GnsscopeApp {
                         }
                         .to_string();
                         cx.notify();
-                    })
-                    .ok();
+                    });
                 }
             }
         })
@@ -1216,6 +1227,13 @@ impl GnsscopeApp {
                 self.history.insert(0, run.clone());
                 self.selected_run_id = Some(run.id);
                 if self.active_run.is_some() {
+                    // The new selected run has no results yet. Do not attribute the
+                    // previously inspected history to it; active-run buffers stay intact.
+                    self.historical_epochs.clear();
+                    self.historical_channels.clear();
+                    self.historical_diagnostic_events.clear();
+                    self.selected_epoch = None;
+                    self.follow_live = false;
                     self.queue.push_back(run);
                     self.persist_queue_order();
                     self.status_message = "任务已加入等待队列".to_string();
@@ -1344,8 +1362,97 @@ impl GnsscopeApp {
         };
     }
 
+    fn request_delete_historical_run(
+        &mut self,
+        id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(run) = self.history.iter().find(|run| run.id == id) else {
+            return;
+        };
+        if matches!(run.status, RunStatus::Processing | RunStatus::Queued) {
+            return;
+        }
+        let detail = format!("{}\nID: {}\n\n{}", run.source_path.display(), id,
+            self.localized("此操作无法撤销。仅删除此运行记录及结果，不删除源 IQ 文件。", "This cannot be undone. Only this run and its results will be deleted; the source IQ file is kept."));
+        let answer = window.prompt(
+            gpui_kit::PromptLevel::Warning,
+            self.localized("删除运行记录？", "Delete this run?"),
+            Some(&detail),
+            &[
+                self.localized("取消", "Cancel"),
+                self.localized("删除运行", "Delete run"),
+            ],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(1) {
+                let _ = this.update(cx, |this, cx| {
+                    // Capture identity at request time; never use the current selection.
+                    this.delete_historical_run(id);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn select_context_run(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        // Right-click identifies the target without closing a narrow Runs overlay.
+        let expanded = self.compact_library_expanded;
+        self.page = AppPage::Workspace;
+        self.select_run(id, window, cx);
+        self.compact_library_expanded = expanded;
+        cx.notify();
+    }
+
+    fn history_context_menu(
+        &self,
+        id: Uuid,
+        cx: &Context<Self>,
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let app = cx.entity();
+        let palette = self.palette();
+        let reveal = self.localized("在 Finder 中显示", "Reveal source file");
+        let delete = self.localized("删除运行记录…", "Delete run…");
+        move |menu, window, cx| {
+            app.update(cx, |app, cx| app.select_context_run(id, window, cx));
+            let reveal_app = app.clone();
+            let delete_app = app.clone();
+            menu.min_w(px(208.))
+                .max_w(px(240.))
+                .item(
+                    crate::ui::run_rows::history_menu_item(
+                        reveal,
+                        IconName::FolderOpen,
+                        false,
+                        palette,
+                    )
+                    .on_click(move |_, _, cx| {
+                        reveal_app.update(cx, |app, cx| {
+                            app.reveal_source_file(id);
+                            cx.notify();
+                        });
+                    }),
+                )
+                .separator()
+                .item(
+                    crate::ui::run_rows::history_menu_item(delete, IconName::Delete, true, palette)
+                        .on_click(move |_, window, cx| {
+                            delete_app.update(cx, |app, cx| {
+                                app.request_delete_historical_run(id, window, cx)
+                            });
+                        }),
+                )
+        }
+    }
+
     fn delete_historical_run(&mut self, id: Uuid) {
         if self.active_run.as_ref().is_some_and(|run| run.id == id) {
+            return;
+        }
+        if self.queue.iter().any(|run| run.id == id) {
             return;
         }
         let Some(library) = &self.library else {
@@ -1715,7 +1822,7 @@ impl GnsscopeApp {
             div()
                 .flex_shrink_0()
                 .text_size(px(13.5))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(palette.text)
                 .child(title),
         )
@@ -1759,7 +1866,7 @@ impl GnsscopeApp {
                             .child(
                                 div()
                                     .text_size(px(12.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .text_color(palette.text)
                                     .child("GNSScope"),
                             ),
@@ -1776,7 +1883,7 @@ impl GnsscopeApp {
                     .child(
                         div()
                             .text_size(px(11.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .text_color(palette.text)
                             .child(page_title),
                     )
@@ -1801,7 +1908,7 @@ impl GnsscopeApp {
                             .rounded(px(4.))
                             .bg(palette.accent.opacity(0.10))
                             .text_size(px(9.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .text_color(palette.accent)
                             .child(div().size(px(6.)).rounded_full().bg(palette.accent))
                             .child(self.localized("正在处理", "Processing"))
@@ -2042,7 +2149,7 @@ impl GnsscopeApp {
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .text_size(px(11.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                 .text_color(palette.text)
                                 .child(run_label),
                         )
@@ -2106,7 +2213,7 @@ impl GnsscopeApp {
                         .child(
                             div()
                                 .text_size(px(12.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                 .child(
                                     run.source_path
                                         .file_name()
@@ -2123,7 +2230,7 @@ impl GnsscopeApp {
                         ),
                 )
                 .child(
-                    Progress::new()
+                    Progress::new("run-progress")
                         .mt(px(8.))
                         .h(px(4.))
                         .bg(palette.accent)
@@ -2391,43 +2498,7 @@ impl GnsscopeApp {
                                                 run.progress * 100.0
                                             )),
                                     )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .child(
-                                                Button::new(SharedString::from(format!(
-                                                    "reveal-run-{id}"
-                                                )))
-                                                .ghost()
-                                                .text_color(palette.muted)
-                                                .icon(IconName::FolderOpen)
-                                                .tooltip(self.localized(
-                                                    "在文件管理器中定位",
-                                                    "Reveal in file manager",
-                                                ))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.reveal_source_file(id);
-                                                    cx.notify();
-                                                })),
-                                            )
-                                            .child(
-                                                Button::new(SharedString::from(format!(
-                                                    "delete-run-{id}"
-                                                )))
-                                                .ghost()
-                                                .text_color(palette.muted)
-                                                .icon(IconName::Delete)
-                                                .tooltip(self.localized(
-                                                    "删除历史记录",
-                                                    "Delete history entry",
-                                                ))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.delete_historical_run(id);
-                                                    cx.notify();
-                                                })),
-                                            ),
-                                    )
+                                    .context_menu(self.history_context_menu(id, cx))
                             }),
                     ),
             )
@@ -2534,11 +2605,12 @@ impl GnsscopeApp {
                             this.page = AppPage::Workspace;
                             this.select_run(id, window, cx);
                         }
+                        RunAction::ContextSelect(id) => this.select_context_run(id, window, cx),
                         RunAction::MoveUp(id) => this.move_queued(id, -1),
                         RunAction::MoveDown(id) => this.move_queued(id, 1),
                         RunAction::Cancel(id) => this.cancel_queued(id),
                         RunAction::Reveal(id) => this.reveal_source_file(id),
-                        RunAction::Delete(id) => this.delete_historical_run(id),
+                        RunAction::Delete(id) => this.request_delete_historical_run(id, window, cx),
                     }
                     cx.notify();
                 });
@@ -2859,7 +2931,7 @@ impl GnsscopeApp {
                             .mb(px(5.))
                             .px(px(8.))
                             .text_size(px(9.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .text_color(palette.muted)
                             .child(self.localized("工作区", "WORKSPACE")),
                     )
@@ -2893,7 +2965,7 @@ impl GnsscopeApp {
                             .items_center()
                             .gap(px(7.))
                             .text_size(px(9.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .text_color(palette.accent)
                             .child(div().size(px(6.)).rounded_full().bg(palette.accent))
                             .child(self.localized("正在处理", "PROCESSING")),
@@ -2904,7 +2976,7 @@ impl GnsscopeApp {
                             .overflow_hidden()
                             .text_ellipsis()
                             .text_size(px(11.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .text_color(palette.text)
                             .child(
                                 run.source_path
@@ -2922,7 +2994,7 @@ impl GnsscopeApp {
                             .gap(px(8.))
                             .child(
                                 div().flex_1().child(
-                                    Progress::new()
+                                    Progress::new("queue-progress")
                                         .h(px(3.))
                                         .bg(palette.accent)
                                         .value((run.progress * 100.0) as f32),
@@ -3010,7 +3082,7 @@ impl GnsscopeApp {
                             .child(
                                 div()
                                     .text_size(px(22.))
-                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
                                     .text_color(palette.text)
                                     .child(self.localized(
                                         "创建离线信号分析",
@@ -3083,7 +3155,7 @@ impl GnsscopeApp {
                                     .child(
                                         div()
                                             .text_size(px(10.))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                             .text_color(if complete {
                                                 palette.text
                                             } else {
@@ -3149,7 +3221,7 @@ impl GnsscopeApp {
                                                             .overflow_hidden()
                                                             .text_ellipsis()
                                                             .text_size(px(11.))
-                                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                                             .text_color(if source_ready {
                                                                 palette.text
                                                             } else {
@@ -3209,7 +3281,7 @@ impl GnsscopeApp {
                                                     .child(
                                                         div()
                                                             .text_size(px(12.))
-                                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                                             .child("GPS L1 C/A"),
                                                     )
                                                     .child(
@@ -3219,7 +3291,7 @@ impl GnsscopeApp {
                                                             .rounded(px(3.))
                                                             .bg(palette.healthy.opacity(0.10))
                                                             .text_size(px(8.))
-                                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                                             .text_color(palette.healthy)
                                                             .child(self.localized("可用", "AVAILABLE")),
                                                     ),
@@ -3441,7 +3513,7 @@ impl GnsscopeApp {
                                     .child(
                                         div()
                                             .text_size(px(22.))
-                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
                                             .text_color(palette.text)
                                             .child(self.localized("运行库", "Run library")),
                                     )
@@ -3543,7 +3615,7 @@ impl GnsscopeApp {
                                             .overflow_hidden()
                                             .text_ellipsis()
                                             .text_size(px(11.))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                             .child(
                                                 run.source_path
                                                     .file_name()
@@ -3608,7 +3680,7 @@ impl GnsscopeApp {
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .text_color(palette.muted)
                                     .child(self.localized("历史分析", "HISTORY")),
                             )
@@ -3677,7 +3749,7 @@ impl GnsscopeApp {
                                             .overflow_hidden()
                                             .text_ellipsis()
                                             .text_size(px(12.))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                             .text_color(palette.text)
                                             .child(
                                                 run.source_path
@@ -3707,40 +3779,11 @@ impl GnsscopeApp {
                                     .rounded(px(3.))
                                     .bg(status_color.opacity(0.10))
                                     .text_size(px(8.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .text_color(status_color)
                                     .child(format!("{:?}", run.status)),
                             )
-                            .child(
-                                GnssButton::icon_only(
-                                    SharedString::from(format!("library-reveal-run-{id}")),
-                                    IconName::FolderOpen,
-                                    self.localized(
-                                        "在文件管理器中定位",
-                                        "Reveal in file manager",
-                                    ),
-                                    palette,
-                                )
-                                .size(ControlSize::Compact)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.reveal_source_file(id);
-                                    cx.notify();
-                                })),
-                            )
-                            .child(
-                                GnssButton::icon_only(
-                                    SharedString::from(format!("library-delete-run-{id}")),
-                                    IconName::Delete,
-                                    self.localized("删除历史记录", "Delete history entry"),
-                                    palette,
-                                )
-                                .size(ControlSize::Compact)
-                                .kind(ButtonKind::Destructive)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.delete_historical_run(id);
-                                    cx.notify();
-                                })),
-                            )
+                            .context_menu(self.history_context_menu(id, cx))
                     }))
                     .children(visible_runs_empty.then(|| {
                         div()
@@ -4217,7 +4260,7 @@ impl GnsscopeApp {
                                             .child(
                                                 div()
                                                     .text_size(px(20.0))
-                                                    .font_weight(gpui::FontWeight::BOLD)
+                                                    .font_weight(gpui_kit::FontWeight::BOLD)
                                                     .child(self.localized(
                                                         "Phase 2 · 组件状态画廊",
                                                         "Phase 2 · Component state gallery",
@@ -4315,7 +4358,7 @@ impl GnsscopeApp {
             .child(
                 div()
                     .text_size(px(13.0))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                     .child(title),
             )
             .child(
@@ -4366,7 +4409,7 @@ impl GnsscopeApp {
                             .child(
                                 div()
                                     .text_size(px(13.))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .text_color(palette.text)
                                     .child(title),
                             )
@@ -4495,7 +4538,7 @@ impl GnsscopeApp {
                                     .child(
                                         div()
                                             .text_size(px(18.))
-                                            .font_weight(gpui::FontWeight::BOLD)
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
                                             .text_color(palette.text)
                                             .child(self.localized(
                                                 "界面设置",
@@ -4673,7 +4716,7 @@ impl GnsscopeApp {
                                     .child(
                                         div()
                                             .text_size(px(13.))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                             .text_color(palette.text)
                                             .child(self.localized(
                                                 "接收机检查器",
@@ -4829,7 +4872,7 @@ impl GnsscopeApp {
                                     .child(
                                         div()
                                             .text_size(px(13.))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                             .text_color(palette.text)
                                             .child(category.label(self.interface_language)),
                                     )
@@ -5246,7 +5289,7 @@ impl GnsscopeApp {
             .border_t_1()
             .border_color(palette.border)
             .text_size(px(11.))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
             .text_color(palette.text)
             .child(title)
     }
@@ -5427,7 +5470,7 @@ impl GnsscopeApp {
                                             })
                                             .when(!compact, |this| this.text_size(px(22.)))
                                             .font_family(data_font_family())
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                             .text_color(palette.text)
                                             .child(self.file_label()),
                                     )
@@ -5618,7 +5661,7 @@ impl GnsscopeApp {
                         div()
                             .mt(px(18.))
                             .text_size(px(18.))
-                            .font_weight(gpui::FontWeight::BOLD)
+                            .font_weight(gpui_kit::FontWeight::BOLD)
                             .text_color(palette.text)
                             .child(self.localized(
                                 "从一次分析开始",
@@ -5788,7 +5831,7 @@ impl GnsscopeApp {
                     .border_1()
                     .border_color(palette.border)
                     .text_size(px(10.))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                     .text_color(palette.muted)
                     .child(div().w(px(96.)).child("PARAMETER"))
                     .child(div().flex_1().child("VALUE"))
@@ -6130,7 +6173,7 @@ impl GnsscopeApp {
                     .child(
                         div()
                             .text_size(px(11.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .text_color(palette.text)
                             .child(self.localized("卫星导航详情", "Satellite navigation detail")),
                     )
@@ -6155,7 +6198,7 @@ impl GnsscopeApp {
                                 div()
                                     .text_size(px(13.))
                                     .font_family(data_font_family())
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .text_color(signal_color)
                                     .child(
                                         selected_prn
@@ -6660,7 +6703,7 @@ impl GnsscopeApp {
                         .gap(px(6.))
                         .child(
                             div()
-                                .w(gpui::relative(0.43))
+                                .w(gpui_kit::relative(0.43))
                                 .child(self.render_navigation_signal_panel(palette)),
                         )
                         .child(
@@ -6737,7 +6780,7 @@ impl GnsscopeApp {
                             .child(
                                 div()
                                     .text_size(px(16.))
-                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .font_weight(gpui_kit::FontWeight::BOLD)
                                     .text_color(palette.text)
                                     .child("候选解比较"),
                             )
@@ -6820,7 +6863,7 @@ impl GnsscopeApp {
                     .child(
                         div()
                             .text_size(px(13.))
-                            .font_weight(gpui::FontWeight::BOLD)
+                            .font_weight(gpui_kit::FontWeight::BOLD)
                             .text_color(palette.text)
                             .child(candidate_kind_label(kind)),
                     )
@@ -6831,7 +6874,7 @@ impl GnsscopeApp {
                             .rounded(px(4.))
                             .bg(status_color.opacity(0.12))
                             .text_size(px(9.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .text_color(status_color)
                             .child(candidate_disposition_label(disposition)),
                     ),
@@ -6983,8 +7026,8 @@ impl GnsscopeApp {
             format_timeline_time(visible_start_ms + visible_duration_ms * tick as u64 / 5)
         });
         let slider = Slider::new(&self.timeline)
-            .bg(gpui::transparent_black())
-            .text_color(gpui::transparent_black())
+            .bg(gpui_kit::transparent_black())
+            .text_color(gpui_kit::transparent_black())
             .disabled(epoch_count < 2);
         let localize: crate::ui::Localize = match self.interface_language {
             InterfaceLanguage::SimplifiedChinese => |zh, _| zh,
@@ -7340,7 +7383,7 @@ fn pvt_table_row(
             div()
                 .w(px(44.))
                 .text_right()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(if valid {
                     palette.healthy
                 } else {
@@ -7404,7 +7447,7 @@ fn channel_table_row(channel: &GuiChannelStatus, palette: Palette) -> impl IntoE
                 .flex_shrink_0()
                 .text_size(px(11.))
                 .font_family(data_font_family())
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(palette.text)
                 .child(format!("G{:02}", channel.prn)),
         )
@@ -7419,7 +7462,7 @@ fn channel_table_row(channel: &GuiChannelStatus, palette: Palette) -> impl IntoE
                 .child(
                     div()
                         .text_size(px(9.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .text_color(state_color)
                         .child(state),
                 ),
@@ -7719,7 +7762,7 @@ fn event_table_row(event: &GuiDiagnosticEvent, palette: Palette) -> impl IntoEle
                 .w(px(112.))
                 .flex_shrink_0()
                 .text_size(px(9.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(kind_color)
                 .child(event_kind_label(event)),
         )
@@ -7783,7 +7826,7 @@ fn comparison_group_title(title: &'static str, palette: Palette) -> impl IntoEle
         .mt(px(9.))
         .mb(px(2.))
         .text_size(px(9.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
         .text_color(palette.muted)
         .child(title)
 }
@@ -7981,8 +8024,8 @@ fn sky_plot(
                     div()
                         .id(SharedString::from(format!("sky-prn-{prn}")))
                         .absolute()
-                        .left(gpui::relative(marker.x))
-                        .top(gpui::relative(marker.y))
+                        .left(gpui_kit::relative(marker.x))
+                        .top(gpui_kit::relative(marker.y))
                         .ml(px(-19.))
                         .mt(px(-14.))
                         .w(px(38.))
@@ -8023,7 +8066,7 @@ fn sky_plot(
                                 .w_full()
                                 .text_center()
                                 .text_size(px(10.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                 .text_color(if active { palette.accent } else { palette.text })
                                 .child(format!("G{:02}", marker.prn)),
                         )
@@ -8049,7 +8092,7 @@ fn sky_plot(
                 .child(
                     div()
                         .mb(px(5.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .child("ELEVATION (°)"),
                 )
                 .child(sky_legend_row("75–90", palette.chart_series[0], palette))
@@ -8112,8 +8155,8 @@ fn sky_plot_position(azimuth_deg: f64, elevation_deg: f64) -> Option<(f32, f32)>
 fn cardinal_label(label: &'static str, x: f32, y: f32, palette: Palette) -> impl IntoElement {
     div()
         .absolute()
-        .left(gpui::relative(x))
-        .top(gpui::relative(y))
+        .left(gpui_kit::relative(x))
+        .top(gpui_kit::relative(y))
         .ml(px(-7.))
         .mt(px(-7.))
         .w(px(14.))
@@ -8122,7 +8165,7 @@ fn cardinal_label(label: &'static str, x: f32, y: f32, palette: Palette) -> impl
         .items_center()
         .justify_center()
         .text_size(px(11.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
         .text_color(palette.muted)
         .child(label)
 }
@@ -8130,8 +8173,8 @@ fn cardinal_label(label: &'static str, x: f32, y: f32, palette: Palette) -> impl
 fn sky_elevation_label(label: &'static str, y: f32, palette: Palette) -> impl IntoElement {
     div()
         .absolute()
-        .left(gpui::relative(0.5))
-        .top(gpui::relative(y))
+        .left(gpui_kit::relative(0.5))
+        .top(gpui_kit::relative(y))
         .ml(px(4.))
         .font_family(data_font_family())
         .text_size(px(8.))
@@ -8349,7 +8392,7 @@ fn cn0_plot(
                         if let Some(point) = selected_point {
                             window.paint_quad(quad(
                                 bounds(
-                                    gpui::point(point.x - px(2.5), point.y - px(2.5)),
+                                    gpui_kit::point(point.x - px(2.5), point.y - px(2.5)),
                                     size(px(5.), px(5.)),
                                 ),
                                 px(2.5),
@@ -8378,8 +8421,8 @@ fn cn0_plot(
                 .absolute()
                 .left_0()
                 .right_0()
-                .top(gpui::relative(row as f32 / row_count as f32))
-                .h(gpui::relative(1.0 / row_count as f32))
+                .top(gpui_kit::relative(row as f32 / row_count as f32))
+                .h(gpui_kit::relative(1.0 / row_count as f32))
                 .flex()
                 .items_center()
                 .justify_between()
@@ -8403,7 +8446,7 @@ fn cn0_plot(
                         .w(px(34.))
                         .text_size(px(9.))
                         .font_family(data_font_family())
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .text_color(if active { palette.accent } else { color })
                         .child(format!("G{prn:02}")),
                 )
@@ -8649,14 +8692,14 @@ fn position_plot(
                         .absolute()
                         .left(px(2.))
                         .top(px(0.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .child("North (m)"),
                 )
                 .children(y_ticks.into_iter().map(|(position, value)| {
                     div()
                         .absolute()
                         .left(px(4.))
-                        .top(gpui::relative(position))
+                        .top(gpui_kit::relative(position))
                         .mt(px(-5.))
                         .w(px(29.))
                         .text_right()
@@ -8665,7 +8708,7 @@ fn position_plot(
                 .children(x_ticks.into_iter().map(|(position, value)| {
                     div()
                         .absolute()
-                        .left(gpui::relative(position))
+                        .left(gpui_kit::relative(position))
                         .bottom(px(14.))
                         .ml(px(-14.))
                         .w(px(28.))
@@ -8676,11 +8719,11 @@ fn position_plot(
                     div()
                         .absolute()
                         .bottom(px(0.))
-                        .left(gpui::relative(0.5))
+                        .left(gpui_kit::relative(0.5))
                         .ml(px(-28.))
                         .w(px(56.))
                         .text_center()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .child("East (m)"),
                 )
         }))
@@ -9153,6 +9196,306 @@ fn history_run_matches(run: &ProcessingRun, query: &str, filter: HistoryFilter) 
 mod history_queue_tests {
     use super::*;
     use chrono::Utc;
+
+    #[gpui_kit::test]
+    fn context_menu_selects_target_and_keeps_narrow_library_open(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::component::init);
+        let library = RunLibrary::open(":memory:").unwrap();
+        let target = library
+            .create_run(&GuiProcessingSettings::default())
+            .unwrap();
+        library
+            .update_progress(target.id, RunStatus::Completed, 1, 1, 0, "fixture")
+            .unwrap();
+        let (app, visual) = cx.add_window_view(move |window, cx| {
+            GnsscopeApp::with_library(window, cx, Some(library), false)
+        });
+        visual.update(|window, cx| {
+            let builder = app.update(cx, |app, cx| {
+                app.selected_run_id = None;
+                app.compact_library_expanded = true;
+                app.history_context_menu(target.id, cx)
+            });
+            let _menu = PopupMenu::build(window, cx, builder);
+            app.update(cx, |app, _| {
+                assert_eq!(app.selected_run_id, Some(target.id));
+                assert!(app.compact_library_expanded);
+                assert_eq!(app.history.len(), 1);
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    fn history_delete_requires_confirmation_and_keeps_original_target(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::component::init);
+        let library = RunLibrary::open(":memory:").unwrap();
+        let first = library
+            .create_run(&GuiProcessingSettings::default())
+            .unwrap();
+        let second = library
+            .create_run(&GuiProcessingSettings::default())
+            .unwrap();
+        for id in [first.id, second.id] {
+            library
+                .update_progress(id, RunStatus::Completed, 1, 1, 0, "fixture")
+                .unwrap();
+        }
+        let (app, visual) = cx.add_window_view(move |window, cx| {
+            GnsscopeApp::with_library(window, cx, Some(library), false)
+        });
+        visual.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.interface_language = InterfaceLanguage::English;
+                app.request_delete_historical_run(first.id, window, cx);
+                assert_eq!(app.history.len(), 2, "request cannot delete");
+            })
+        });
+        visual.simulate_prompt_answer("Cancel");
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                assert_eq!(app.history.len(), 2, "cancel keeps both records");
+                app.request_delete_historical_run(first.id, window, cx);
+                app.selected_run_id = Some(second.id);
+                app.history.reverse();
+            })
+        });
+        visual.simulate_prompt_answer("Delete run");
+        visual.run_until_parked();
+        app.update(visual, |app, _| {
+            assert_eq!(app.history.len(), 1);
+            assert_eq!(
+                app.history[0].id, second.id,
+                "confirmation must use captured ID"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn cancelling_queued_copy_does_not_stop_real_worker(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::component::init);
+        struct TestIq(PathBuf);
+        impl Drop for TestIq {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let source = TestIq(
+            std::env::temp_dir().join(format!("gnsscope-queue-worker-{}.iq", Uuid::new_v4())),
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&source.0)
+            .unwrap()
+            .set_len(8_000)
+            .unwrap();
+        // Deliberately undersampled zero IQ: scheduling evidence, not RF/PVT proof.
+        // 2,000 progress epochs exceed the production channel capacity, preventing
+        // the producer from finishing before we consume its first progress event.
+        let settings = GuiProcessingSettings {
+            iq_file_path: Some(source.0.clone()),
+            sample_rate_hz: 1_000.0,
+            iq_format: crate::GuiIqFormat::Int8Interleaved,
+            chunk_ms: 2,
+            pvt_output_rate_ms: 2,
+            fixed_prns: Some(vec![1]),
+            ..Default::default()
+        };
+        let library = RunLibrary::open(":memory:").unwrap();
+        let original = library.create_run(&settings).unwrap();
+        library
+            .append_epoch(original.id, 0, &crate::sample_pvt_view_model(), &[])
+            .unwrap();
+        library
+            .update_progress(
+                original.id,
+                RunStatus::Completed,
+                4_000,
+                4_000,
+                1,
+                "fixture",
+            )
+            .unwrap();
+        let original_id = original.id;
+        let (app, cx) = cx.add_window_view(move |window, cx| {
+            GnsscopeApp::with_library(window, cx, Some(library), false)
+        });
+        app.update(cx, |app, cx| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                app.settings = settings;
+                app.enqueue(cx);
+                let active_id = app.active_run.as_ref().expect("A started").id;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                let receive = |app: &mut GnsscopeApp| {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    let event = app
+                        .worker_receiver
+                        .as_ref()
+                        .unwrap()
+                        .recv_timeout(remaining)
+                        .expect("worker event before deadline");
+                    assert!(
+                        !matches!(
+                            event,
+                            WorkerEvent::Failed(_) | WorkerEvent::Cancelled { .. }
+                        ),
+                        "A must not fail or be cancelled: {event:?}"
+                    );
+                    app.apply_worker_event(event);
+                };
+                while app.active_run.as_ref().unwrap().processed_samples == 0 {
+                    receive(app);
+                }
+                let before = app.active_run.as_ref().unwrap().processed_samples;
+                assert!(!app.worker.as_ref().unwrap().is_finished());
+                app.enqueue(cx);
+                let queued_id = app.queue.front().expect("B queued").id;
+                assert_ne!(queued_id, active_id);
+                app.cancel_queued(queued_id);
+                assert!(app.queue.is_empty());
+                assert_eq!(app.active_run.as_ref().unwrap().id, active_id);
+                assert!(!app.worker.as_ref().unwrap().is_finished());
+                let mut advanced = false;
+                while app.active_run.is_some() {
+                    receive(app);
+                    if let Some(active) = &app.active_run {
+                        assert_eq!(active.id, active_id);
+                        advanced |= active.processed_samples > before;
+                    }
+                }
+                assert!(advanced, "A advances after B cancellation");
+                let library = app.library.as_ref().unwrap();
+                let runs = library.list_runs().unwrap();
+                let completed = runs.iter().find(|run| run.id == active_id).unwrap();
+                assert_eq!(completed.status, RunStatus::Completed);
+                assert_eq!(completed.processed_samples, 4_000);
+                assert_eq!(completed.total_samples, 4_000);
+                assert_eq!(completed.pvt_epoch_count, 0);
+                let cancelled = runs.iter().find(|run| run.id == queued_id).unwrap();
+                assert_eq!(cancelled.status, RunStatus::Cancelled);
+                assert_eq!(cancelled.processed_samples, 0);
+                assert_eq!(library.epochs(original_id).unwrap().len(), 1);
+                assert_eq!(
+                    library.preference("queue_order").unwrap().as_deref(),
+                    Some("[]")
+                );
+                app.delete_historical_run(queued_id);
+                let runs = app.library.as_ref().unwrap().list_runs().unwrap();
+                assert_eq!(runs.len(), 2);
+                assert!(runs
+                    .iter()
+                    .any(|run| run.id == original_id && run.status == RunStatus::Completed));
+                assert_eq!(std::fs::metadata(&source.0).unwrap().len(), 8_000);
+                assert_eq!(std::fs::read(&source.0).unwrap(), vec![0; 8_000]);
+                assert_eq!(
+                    app.library
+                        .as_ref()
+                        .unwrap()
+                        .epochs(original_id)
+                        .unwrap()
+                        .len(),
+                    1
+                );
+            }));
+            // Disconnect before joining on assertion failure: a bounded sender may
+            // otherwise remain blocked while ActiveWorker::drop waits for it.
+            app.worker_receiver.take();
+            app.worker.take();
+            if let Err(error) = result {
+                std::panic::resume_unwind(error);
+            }
+        });
+    }
+
+    #[gpui_kit::test]
+    fn enqueue_and_cancel_preserve_active_and_completed_history(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::component::init);
+        let library = RunLibrary::open(":memory:").unwrap();
+        let settings = GuiProcessingSettings {
+            iq_file_path: Some(PathBuf::from("isolated-workflow.dat")),
+            ..Default::default()
+        };
+        let original = library.create_run(&settings).unwrap();
+        library
+            .append_epoch(original.id, 0, &crate::sample_pvt_view_model(), &[])
+            .unwrap();
+        library
+            .update_progress(original.id, RunStatus::Completed, 100, 100, 1, "fixture")
+            .unwrap();
+        let original_id = original.id;
+        let (app, cx) = cx.add_window_view(move |window, cx| {
+            GnsscopeApp::with_library(window, cx, Some(library), false)
+        });
+        app.update(cx, |app, cx| {
+            let active = run("active.dat", RunStatus::Processing);
+            let active_id = active.id;
+            app.active_run = Some(active);
+            app.live_run_id = Some(active_id);
+            app.epochs = vec![crate::sample_pvt_view_model(); 2];
+            app.settings = settings;
+            app.selected_run_id = Some(original_id);
+            app.historical_epochs = vec![crate::sample_pvt_view_model()];
+            app.historical_channels = vec![Vec::new()];
+            app.historical_diagnostic_events = preview_diagnostic_events();
+            app.selected_epoch = Some(0);
+            app.follow_live = true;
+
+            app.enqueue(cx);
+            let queued_id = app.queue.front().expect("new queued run").id;
+            assert_ne!(queued_id, original_id);
+            assert_eq!(app.selected_run_id, Some(queued_id));
+            assert!(app.display_epochs().is_empty());
+            assert!(app.historical_channels.is_empty());
+            assert!(app.historical_diagnostic_events.is_empty());
+            assert_eq!(app.selected_epoch, None);
+            assert!(!app.follow_live);
+            assert_eq!(app.active_run.as_ref().unwrap().id, active_id);
+            assert_eq!(app.live_run_id, Some(active_id));
+            assert_eq!(app.epochs.len(), 2);
+
+            app.cancel_queued(queued_id);
+            assert!(app.queue.is_empty());
+            assert_eq!(app.selected_run_id, None);
+            assert_eq!(app.active_run.as_ref().unwrap().id, active_id);
+            assert_eq!(app.epochs.len(), 2);
+            let library = app.library.as_ref().unwrap();
+            let persisted = library.list_runs().unwrap();
+            assert_eq!(
+                persisted
+                    .iter()
+                    .find(|run| run.id == queued_id)
+                    .unwrap()
+                    .status,
+                RunStatus::Cancelled
+            );
+            assert_eq!(
+                persisted
+                    .iter()
+                    .find(|run| run.id == original_id)
+                    .unwrap()
+                    .status,
+                RunStatus::Completed
+            );
+            assert_eq!(library.epochs(original_id).unwrap().len(), 1);
+            assert_eq!(
+                library.preference("queue_order").unwrap().as_deref(),
+                Some("[]")
+            );
+
+            // Exercise the app command too, not just the storage API.
+            app.delete_historical_run(queued_id);
+            let library = app.library.as_ref().unwrap();
+            assert_eq!(library.list_runs().unwrap().len(), 1);
+            assert_eq!(library.epochs(original_id).unwrap().len(), 1);
+            assert_eq!(app.active_run.as_ref().unwrap().id, active_id);
+            assert_eq!(app.epochs.len(), 2);
+        });
+    }
 
     fn run(name: &str, status: RunStatus) -> ProcessingRun {
         ProcessingRun {

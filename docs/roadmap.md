@@ -133,6 +133,54 @@ for human review. Exhaustive every-control Tab traversal and Windows/Linux visua
 evidence remain explicit boundaries; dormant legacy render functions are reserved for
 the later parity cleanup rather than mixed into the accepted active-path migration.
 
+**GPUI dependency migration to GPUI Kit (2026-10-09):** `gnss-gui` now depends on
+`gpui-kit` 0.7.1 alone, replacing the direct `gpui` 0.2.2, `gpui-component` 0.5.1, and
+`gpui-component-assets` 0.5.1 dependencies. The facade pins GPUI (published as the
+`gpui-pre` 0.3.8 family), `gpui-base` 0.7.1, `gpui-component` 0.7.1, and
+`gpui-kit-assets` 0.7.1; imports use `gpui_kit::` and `gpui_kit::component::` paths,
+and `main.rs` boots through `gpui_kit::application()` and `gpui_kit::init`. Eight
+upstream API breaks were adapted: `Timer::after` became the background-executor
+timer, `Corner` became `Anchor`, the custom button variant lost its border builder
+(border now applied through Styled), `Progress` requires element ids, `update` no
+longer returns a result, `Theme::list` became a behavior flag rather than a color,
+focus takes a context argument, and `SliderEvent` gained a `Release` variant. The
+dev-only `runtime_shaders` feature no longer exists in gpui-pre 0.3.8; tests and the
+Release build pass without it. The history context-menu adapter was rebased from the
+vendored 0.5.1 copy onto the 0.7.1 API surface, and gpui-kit's Apache-2.0 attribution
+joins `licenses/`. Gates: GUI suite 83 passed/2 ignored, complete workspace tests,
+formatting, strict Clippy, Release build, and both ignored real-data regressions
+(CTTC complete-capture persistence and LabSat full-constellation PVT, 466 s) pass.
+A packaged-equivalent Release launch smoke runs stably and opens the SQLite run
+library, but the agent environment lacks Screen Recording permission, so native
+visual acceptance of the button-border treatment, the removed `theme.list` color,
+and context-menu surfaces remains open for human review.
+
+**Phase 4 deletion safety correction:** history reveal/delete actions now live in
+right-click menus, not selected-row inline controls. Delete requests a native
+Cancel-first confirmation bound to the original UUID; changing selection/order
+cannot change its target. The GPUI prompt regression passes; GUI suite 81 passed/2
+ignored, strict Clippy and Release packaging pass. Native inspection confirms
+inline buttons removed, but automated right-click delivery still fails, so native
+menu/confirmation and concurrent cancellation acceptance remain open.
+
+**Phase 4 real-worker regression (2026-09-08):** the unattended
+`cancelling_queued_copy_does_not_stop_real_worker` test drives production enqueue,
+worker events, cancellation and deletion with an isolated in-memory library and a
+temporary zero-IQ source. A real worker is unfinished when B is cancelled, then
+advances and completes all 4,000 samples; B remains cancelled with zero processed
+samples, and original history/source survive. GUI tests: 80 passed/2 ignored.
+This closes the automated real-worker scheduling check, not native mouse acceptance
+or RF/PVT validation. Native control remains unresolved; Phase 4 is still open.
+
+**Phase 4 app-command regression:** a GPUI TestAppContext regression now invokes
+production enqueue/cancel/delete methods against an injected in-memory library,
+proving queue selection clears stale replay, active buffers survive, cancellation is
+stored, and deleting the copy preserves original completed epochs. GUI tests report
+79 passed/2 ignored; strict Clippy, Release build/package/signature pass. Dev-only
+runtime shader support avoids the host's missing offline Metal compiler. Native
+concurrent-worker/click acceptance is still distinct from this passing state test;
+see `docs/ui-phase4-validation.md`.
+
 **Phase 4 narrow/Finder follow-up:** the isolated 800x720 light/English instance now
 passes 80/103 cap text, oldest-record search (1/1), keyboard selection/workbench return,
 persisted epoch reload and English empty results. Finder explicitly selects the

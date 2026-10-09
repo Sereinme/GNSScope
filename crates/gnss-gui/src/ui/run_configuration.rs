@@ -1,8 +1,8 @@
 //! Read-only run snapshot presentation. The application supplies all display values.
 use crate::visual_system::{data_font_family, metrics, Palette};
-use gpui::prelude::*;
-use gpui::{div, px, AnyElement, SharedString};
-use gpui_component::scroll::ScrollableElement;
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::prelude::*;
+use gpui_kit::{div, px, AnyElement, SharedString};
 
 pub(crate) enum ConfigurationEntry {
     Section(&'static str),
@@ -42,7 +42,7 @@ pub(crate) fn render(
                         .child(
                             div()
                                 .text_size(px(12.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                 .text_color(palette.text)
                                 .child(view.title),
                         )
@@ -50,7 +50,7 @@ pub(crate) fn render(
                             div()
                                 .mt(px(3.))
                                 .font_family(data_font_family())
-                                .text_size(px(9.))
+                                .text_size(px(11.))
                                 .text_color(palette.muted)
                                 .child(view.snapshot),
                         ),
@@ -66,11 +66,11 @@ pub(crate) fn render(
                         .mt(px(10.))
                         .px(px(8.))
                         .py(px(6.))
-                        .bg(palette.healthy.opacity(0.07))
+                        .bg(palette.surface_alt)
                         .border_1()
-                        .border_color(palette.healthy.opacity(0.28))
-                        .text_size(px(9.))
-                        .text_color(palette.healthy)
+                        .border_color(palette.border)
+                        .text_size(px(11.))
+                        .text_color(palette.muted)
                         .child(view.notice),
                 )
                 .children(view.entries.into_iter().map(|entry| match entry {
@@ -90,9 +90,9 @@ pub(crate) fn inspector_section(label: &'static str, palette: Palette) -> impl I
         .pt(px(8.))
         .border_t_1()
         .border_color(palette.border)
-        .text_size(px(10.))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(palette.healthy)
+        .text_size(px(11.))
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+        .text_color(palette.muted)
         .child(label)
 }
 
@@ -102,14 +102,14 @@ pub(crate) fn inspector_row(
     palette: Palette,
 ) -> impl IntoElement {
     div()
-        .min_h(px(26.))
+        .min_h(px(28.))
         .flex()
         .items_center()
         .child(
             div()
-                .w(px(118.))
+                .w(px(108.))
                 .flex_shrink_0()
-                .text_size(px(10.))
+                .text_size(px(11.))
                 .text_color(palette.muted)
                 .child(label),
         )
@@ -120,7 +120,7 @@ pub(crate) fn inspector_row(
                 .overflow_hidden()
                 .text_ellipsis()
                 .text_right()
-                .text_size(px(10.))
+                .text_size(px(11.))
                 .font_family(data_font_family())
                 .text_color(palette.text)
                 .child(value.into()),

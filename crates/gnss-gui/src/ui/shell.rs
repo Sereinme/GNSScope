@@ -1,6 +1,6 @@
 use crate::visual_system::{interface_font_family, Palette};
-use gpui::prelude::*;
-use gpui::{div, AnyElement};
+use gpui_kit::prelude::*;
+use gpui_kit::{div, AnyElement};
 
 const COMPACT_BREAKPOINT: f32 = 1_180.0;
 const DRAWER_REPLACES_WORKSPACE_BREAKPOINT: f32 = 900.0;

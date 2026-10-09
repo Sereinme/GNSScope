@@ -1,7 +1,7 @@
 use gnss_gui::GnsscopeApp;
-use gpui::{point, px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
-use gpui_component::{Root, TitleBar};
-use gpui_component_assets::Assets;
+use gpui_kit::assets::Assets;
+use gpui_kit::component::{Root, TitleBar};
+use gpui_kit::{point, px, size, App, AppContext, Bounds, WindowBounds, WindowOptions};
 
 fn configured_window_size() -> (f32, f32) {
     fn dimension(name: &str, fallback: f32) -> f32 {
@@ -19,10 +19,10 @@ fn configured_window_size() -> (f32, f32) {
 
 pub fn main() {
     let (window_width, window_height) = configured_window_size();
-    Application::new()
+    gpui_kit::application()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
-            gpui_component::init(cx);
+            gpui_kit::init(cx);
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {

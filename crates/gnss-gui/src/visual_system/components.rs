@@ -2,8 +2,8 @@
 
 use super::primitives::{data_font_family, interface_font_family, radius};
 use super::semantic::Palette;
-use gpui::{px, Hsla};
-use gpui_component::Theme;
+use gpui_kit::component::Theme;
+use gpui_kit::{px, Hsla};
 
 #[derive(Clone, Copy)]
 struct ComponentTokens {
@@ -132,7 +132,9 @@ pub(crate) fn apply_component_theme(theme: &mut Theme, palette: Palette) {
     theme.sidebar_primary = tokens.primary;
     theme.sidebar_primary_foreground = tokens.on_primary;
 
-    theme.list = tokens.row;
+    // `theme.list` became a behavior flag (active highlight) in gpui-component
+    // 0.7 and no longer carries a row color; the row palette still reaches the
+    // remaining list and table color roles below.
     theme.list_head = tokens.row_header;
     theme.list_hover = tokens.row_hover;
     theme.list_active = tokens.row_selected;

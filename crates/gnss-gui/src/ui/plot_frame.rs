@@ -1,7 +1,7 @@
 //! Shared plot frame; domain content and focus commands are supplied by the app.
 use crate::visual_system::{data_font_family, Palette};
-use gpui::prelude::*;
-use gpui::{div, px, AnyElement};
+use gpui_kit::prelude::*;
+use gpui_kit::{div, px, AnyElement};
 pub(crate) fn render(
     title: AnyElement,
     plot: AnyElement,
@@ -19,9 +19,9 @@ pub(crate) fn render(
         .bg(palette.surface)
         .border_1()
         .border_color(palette.border)
-        .px(px(11.))
-        .pt(px(10.))
-        .pb(px(11.))
+        .px(px(12.))
+        .pt(px(8.))
+        .pb(px(12.))
         .child(
             div()
                 .flex()
@@ -43,7 +43,7 @@ pub(crate) fn render(
                                 .border_1()
                                 .border_color(palette.border)
                                 .font_family(data_font_family())
-                                .text_size(px(9.))
+                                .text_size(px(11.))
                                 .text_color(palette.muted)
                                 .child("ENU")
                         }))

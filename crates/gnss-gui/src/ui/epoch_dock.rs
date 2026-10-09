@@ -9,7 +9,8 @@ pub(crate) enum EpochAction {
     ZoomIn,
     Follow,
 }
-pub(crate) type EpochHandler = std::rc::Rc<dyn Fn(EpochAction, &mut gpui::Window, &mut gpui::App)>;
+pub(crate) type EpochHandler =
+    std::rc::Rc<dyn Fn(EpochAction, &mut gpui_kit::Window, &mut gpui_kit::App)>;
 pub(crate) struct EpochControls {
     pub(crate) epoch_count: usize,
     pub(crate) zoom: usize,
@@ -19,7 +20,7 @@ pub(crate) struct EpochControls {
 fn epoch_handler(
     actions: &EpochHandler,
     action: EpochAction,
-) -> impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static {
+) -> impl Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static {
     let actions = actions.clone();
     move |_, window, cx| actions(action, window, cx)
 }
@@ -30,7 +31,7 @@ pub(crate) fn controls(
     palette: Palette,
 ) -> impl IntoElement {
     use crate::visual_system::{ButtonKind, ControlSize, GnssButton};
-    use gpui_component::IconName;
+    use gpui_kit::component::IconName;
     div()
         .w(px(204.))
         .h_full()
@@ -158,8 +159,8 @@ pub(crate) fn controls(
 }
 use crate::visual_system::data_font_family;
 use crate::visual_system::Palette;
-use gpui::prelude::*;
-use gpui::{div, px, AnyElement, Hsla, SharedString};
+use gpui_kit::prelude::*;
+use gpui_kit::{div, px, AnyElement, Hsla, SharedString};
 
 pub(crate) struct EpochView {
     pub(crate) title: &'static str,
@@ -202,7 +203,7 @@ pub(crate) fn render(
                     div()
                         .flex_1()
                         .text_size(px(12.5))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .text_color(palette.text)
                         .child(title),
                 )
@@ -250,7 +251,7 @@ pub(crate) fn render(
                                     let major = tick % 10 == 0;
                                     div()
                                         .absolute()
-                                        .left(gpui::relative(tick as f32 / 50.0))
+                                        .left(gpui_kit::relative(tick as f32 / 50.0))
                                         .top(if major { px(40.) } else { px(45.) })
                                         .w(px(1.))
                                         .h(if major { px(11.) } else { px(4.) })
@@ -267,7 +268,7 @@ pub(crate) fn render(
                                                 "timeline-marker-{index}"
                                             )))
                                             .absolute()
-                                            .left(gpui::relative(percent))
+                                            .left(gpui_kit::relative(percent))
                                             .top(px(4.))
                                             .ml(px(-16.))
                                             .w(px(32.))
@@ -277,7 +278,7 @@ pub(crate) fn render(
                                             .items_center()
                                             .justify_start()
                                             .text_size(px(8.5))
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                             .font_family(data_font_family())
                                             .text_color(color)
                                             .child(label)
@@ -313,7 +314,7 @@ pub(crate) fn render(
                                 .child(
                                     div()
                                         .absolute()
-                                        .left(gpui::relative(cursor_percent))
+                                        .left(gpui_kit::relative(cursor_percent))
                                         .top(px(8.))
                                         .bottom_0()
                                         .ml(px(-1.))

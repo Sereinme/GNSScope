@@ -11,10 +11,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !directory.is_absolute() {
         return Err("fixture directory must be absolute".into());
     }
+    let duration: u64 = std::env::args()
+        .nth(2)
+        .map(|arg| arg.parse())
+        .transpose()?
+        .unwrap_or(120);
+    if !(1..=1200).contains(&duration) {
+        return Err("long source duration must be 1..=1200 seconds".into());
+    }
     // create_dir refuses an existing target: no overwriting a prior run or user data.
     fs::create_dir(&directory)?;
     let source = directory.join("synthetic-zero-iq.dat");
-    fs::write(&source, vec![0_u8; 4_000_000])?; // 250 ms of 4 Msps Int16 IQ; no GNSS signal.
+    // 250 ms of 4 Msps Int16 IQ; no GNSS signal.
+    fs::write(&source, vec![0_u8; 4_000_000])?;
+    // Sparse zero IQ gives native queue/cancel checks enough time without allocating
+    // a large in-memory buffer or changing the short immutable display fixtures.
+    let long_source = directory.join(format!("synthetic-zero-iq-{duration}s.dat"));
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&long_source)?
+        .set_len(duration * 4_000_000 * 4)?;
     let database = directory.join("runs.sqlite3");
     let library = RunLibrary::open(&database)?;
     library.set_preference("validation_fixture", "gnsscope-ui-workflow-v1")?;

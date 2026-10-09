@@ -1,8 +1,8 @@
 //! Runs dock frame. Row controls are supplied by the application with their callbacks.
 use crate::visual_system::{data_font_family, metrics, Palette};
-use gpui::prelude::*;
-use gpui::{div, px, AnyElement};
-use gpui_component::scroll::ScrollableElement;
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::prelude::*;
+use gpui_kit::{div, px, AnyElement};
 
 pub(crate) struct RunSection {
     pub(crate) title: &'static str,
@@ -48,7 +48,7 @@ pub(crate) fn render(
                     div()
                         .flex_1()
                         .text_size(px(12.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .text_color(palette.text)
                         .child(view.title),
                 )
@@ -72,7 +72,7 @@ pub(crate) fn render(
                     div()
                         .px(px(12.))
                         .py(px(10.))
-                        .text_size(px(9.))
+                        .text_size(px(11.))
                         .text_color(palette.muted)
                         .child(text)
                         .into_any_element()
@@ -89,7 +89,7 @@ pub(crate) fn render(
                 .border_color(palette.border)
                 .flex()
                 .items_center()
-                .text_size(px(9.))
+                .text_size(px(11.))
                 .text_color(palette.faint)
                 .child(view.footer),
         )
@@ -102,19 +102,19 @@ fn section_header(label: &'static str, count: usize, palette: Palette) -> impl I
         .flex()
         .items_center()
         .justify_between()
-        .bg(palette.surface)
+        .bg(palette.sidebar)
         .border_b_1()
         .border_color(palette.border)
         .child(
             div()
-                .text_size(px(9.))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_size(px(11.))
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(palette.muted)
                 .child(label),
         )
         .child(
             div()
-                .text_size(px(8.))
+                .text_size(px(10.))
                 .font_family(data_font_family())
                 .text_color(palette.muted)
                 .child(count.to_string()),

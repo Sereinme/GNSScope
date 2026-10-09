@@ -1,8 +1,8 @@
 //! Native title bar with app-owned search and settings controls.
 use crate::visual_system::{data_font_family, metrics, Palette};
-use gpui::prelude::*;
-use gpui::{div, px, AnyElement, SharedString};
-use gpui_component::{IconName, TitleBar};
+use gpui_kit::component::{IconName, TitleBar};
+use gpui_kit::prelude::*;
+use gpui_kit::{div, px, AnyElement, SharedString};
 pub(crate) fn render(
     selected_name: SharedString,
     page_context: &'static str,
@@ -43,7 +43,7 @@ pub(crate) fn render(
                         .child(
                             div()
                                 .text_size(px(15.))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                 .text_color(palette.text)
                                 .child("GNSScope"),
                         ),
@@ -58,7 +58,7 @@ pub(crate) fn render(
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .text_size(px(9.))
+                                .text_size(px(10.))
                                 .text_color(palette.muted)
                                 .child(page_context),
                         )

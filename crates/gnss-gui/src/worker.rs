@@ -89,6 +89,11 @@ pub struct ActiveWorker {
 }
 
 impl ActiveWorker {
+    #[cfg(test)]
+    pub(crate) fn is_finished(&self) -> bool {
+        self.handle.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Release);
     }

@@ -1,7 +1,7 @@
 //! Product-level visual roles shared by shell, controls, plots, and statuses.
 
 use super::primitives::{color, dark, light, opacity, shared};
-use gpui::Hsla;
+use gpui_kit::Hsla;
 
 /// Semantic colors used by the GNSS workbench.
 ///

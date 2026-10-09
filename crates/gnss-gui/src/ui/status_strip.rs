@@ -1,7 +1,7 @@
 //! Presentation-only global status strip. Values and actions are supplied by the app.
 use crate::visual_system::{data_font_family, metrics, Palette};
-use gpui::prelude::*;
-use gpui::{div, px, AnyElement, Hsla};
+use gpui_kit::prelude::*;
+use gpui_kit::{div, px, AnyElement, Hsla};
 
 pub(crate) fn render(
     palette: Palette,
@@ -17,7 +17,7 @@ pub(crate) fn render(
         .border_color(palette.border)
         .flex()
         .items_center()
-        .text_size(px(9.))
+        .text_size(px(10.))
         .text_color(palette.faint)
         .child(toggle)
         .children(
@@ -52,15 +52,15 @@ fn status_bar_item(
         .gap(px(5.))
         .child(
             div()
-                .text_size(px(8.))
+                .text_size(px(9.))
                 .text_color(palette.muted)
                 .child(label),
         )
         .child(
             div()
-                .text_size(px(9.))
+                .text_size(px(10.))
                 .font_family(data_font_family())
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(value_color)
                 .child(value),
         )

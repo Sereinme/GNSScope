@@ -6,13 +6,7 @@
 
 use super::primitives::{radius, typography};
 use super::semantic::Palette;
-use gpui::prelude::FluentBuilder as _;
-use gpui::{
-    div, px, App, ClickEvent, Context, Corner, ElementId, Entity, Hsla, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, RenderOnce, SharedString,
-    StatefulInteractiveElement as _, StyleRefinement, Styled, Window,
-};
-use gpui_component::{
+use gpui_kit::component::{
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     input::{Input, InputState},
     menu::{DropdownMenu as _, PopupMenu},
@@ -20,6 +14,12 @@ use gpui_component::{
     scroll::ScrollableElement as _,
     switch::Switch,
     Disableable as _, IconName, Selectable as _, Sizable as _, Size, StyledExt as _,
+};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
+    div, px, Anchor, App, ClickEvent, Context, ElementId, Entity, Hsla, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, RenderOnce, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Window,
 };
 use std::rc::Rc;
 
@@ -352,7 +352,6 @@ impl RenderOnce for GnssButton {
         let variant = ButtonCustomVariant::new(cx)
             .color(visual.background)
             .foreground(visual.foreground)
-            .border(visual.border)
             .hover(hover_background)
             .active(active_background);
         let content = div()
@@ -362,12 +361,14 @@ impl RenderOnce for GnssButton {
             .gap(px(6.0))
             .text_color(visual.foreground)
             .text_size(px(self.size.text_size()))
-            .font_weight(gpui::FontWeight::MEDIUM)
+            .font_weight(gpui_kit::FontWeight::MEDIUM)
             .children((state != ControlState::Busy).then_some(self.icon).flatten())
             .children(self.label);
 
         let button = Button::new(self.id)
             .custom(variant)
+            .border_1()
+            .border_color(visual.border)
             .rounded(px(radius::CONTROL))
             .with_size(Size::Size(px(height)))
             .compact()
@@ -386,7 +387,7 @@ impl RenderOnce for GnssButton {
 
         if let Some(builder) = self.menu.filter(|_| !blocks_activation) {
             button
-                .dropdown_menu_with_anchor(Corner::TopRight, move |menu, window, cx| {
+                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, window, cx| {
                     builder(menu, window, cx)
                 })
                 .into_any_element()
@@ -616,7 +617,7 @@ impl RenderOnce for GnssRow {
                     .child(
                         div()
                             .text_size(px(typography::METADATA))
-                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
                             .child(self.label),
                     )
                     .child(
@@ -844,7 +845,7 @@ pub(crate) fn gnss_search_input(input: &Entity<InputState>, palette: Palette) ->
 }
 
 pub(crate) fn gnss_progress(value: f32, palette: Palette, busy: bool) -> impl IntoElement {
-    Progress::new()
+    Progress::new("gnss-progress")
         .h(px(5.0))
         .rounded(px(2.5))
         .bg(if busy {
@@ -886,7 +887,7 @@ pub(crate) fn gnss_badge(
         .border_1()
         .border_color(foreground.opacity(0.45))
         .text_size(px(typography::CAPTION))
-        .font_weight(gpui::FontWeight::MEDIUM)
+        .font_weight(gpui_kit::FontWeight::MEDIUM)
         .text_color(foreground)
         .child(label.into())
 }

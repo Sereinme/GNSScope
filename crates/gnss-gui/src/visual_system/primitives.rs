@@ -1,6 +1,6 @@
 //! Raw visual values. Product and component code must not import this module.
 
-use gpui::{rgb, Hsla};
+use gpui_kit::{rgb, Hsla};
 
 pub(super) fn color(value: u32) -> Hsla {
     rgb(value).into()

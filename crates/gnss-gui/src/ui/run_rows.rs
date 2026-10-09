@@ -1,10 +1,12 @@
 //! Run row presentation, driven by immutable display data and a scoped action callback.
+use crate::visual_system::ContextMenuExt;
 use crate::visual_system::{
-    data_font_family, gnss_progress, ButtonKind, ControlSize, GnssButton, Palette,
+    data_font_family, gnss_progress, interface_font_family, ButtonKind, ControlSize, GnssButton,
+    Palette,
 };
-use gpui::prelude::*;
-use gpui::{div, px, App, ClickEvent, Hsla, SharedString, Window};
-use gpui_component::IconName;
+use gpui_kit::component::{menu::PopupMenuItem, Icon, IconName};
+use gpui_kit::prelude::*;
+use gpui_kit::{div, px, App, ClickEvent, Hsla, SharedString, Window};
 use std::rc::Rc;
 use uuid::Uuid;
 
@@ -13,11 +15,69 @@ pub(crate) type RunHandler = Rc<dyn Fn(RunAction, &mut Window, &mut App)>;
 #[derive(Clone, Copy)]
 pub(crate) enum RunAction {
     Select(Uuid),
+    ContextSelect(Uuid),
     MoveUp(Uuid),
     MoveDown(Uuid),
     Cancel(Uuid),
     Reveal(Uuid),
     Delete(Uuid),
+}
+
+/// Compact product menu content; PopupMenu keeps keyboard navigation, focus,
+/// screen-edge positioning and the existing themed floating surface.
+pub(crate) fn history_menu_item(
+    label: &'static str,
+    icon: IconName,
+    destructive: bool,
+    palette: Palette,
+) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .id(if destructive {
+                "history-delete-content"
+            } else {
+                "history-reveal-content"
+            })
+            .h(px(30.))
+            .w_full()
+            // PopupMenu already provides 8 px horizontal item padding.
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(move |style| {
+                style.bg(if destructive {
+                    palette.danger_wash
+                } else {
+                    palette.hover
+                })
+            })
+            .active(move |style| {
+                style.bg(if destructive {
+                    palette.danger_wash
+                } else {
+                    palette.active
+                })
+            })
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .font_family(interface_font_family())
+            .text_size(px(13.))
+            .text_color(if destructive {
+                palette.danger
+            } else {
+                palette.text
+            })
+            .child(
+                Icon::new(icon.clone())
+                    .size(px(14.))
+                    .text_color(if destructive {
+                        palette.danger
+                    } else {
+                        palette.muted
+                    }),
+            )
+            .child(label)
+    })
 }
 pub(crate) struct RunRowView {
     pub(crate) id: Uuid,
@@ -63,14 +123,14 @@ pub(crate) fn active_row(
         .when(!selected, |this| {
             this.hover(|style| style.bg(palette.hover))
         })
-        .border_2()
+        .border_l_2()
         .border_color(if selected {
             palette.accent
         } else {
             palette.sidebar
         })
         .focus(|style| style.border_color(palette.focus_ring))
-        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+        .on_mouse_down(gpui_kit::MouseButton::Left, |_, window, _| {
             window.prevent_default();
         })
         .on_click(on_action(&actions, RunAction::Select(id)))
@@ -83,7 +143,7 @@ pub(crate) fn active_row(
                     div()
                         .w(px(8.))
                         .flex_shrink_0()
-                        .text_size(px(9.))
+                        .text_size(px(11.))
                         .text_color(palette.healthy)
                         .child("▶"),
                 )
@@ -116,7 +176,7 @@ pub(crate) fn active_row(
                     div()
                         .w(px(48.))
                         .flex_shrink_0()
-                        .text_size(px(9.))
+                        .text_size(px(11.))
                         .text_color(palette.healthy)
                         .child(localize("处理中", "Running")),
                 )
@@ -134,7 +194,7 @@ pub(crate) fn active_row(
                 .items_center()
                 .justify_between()
                 .font_family(data_font_family())
-                .text_size(px(8.5))
+                .text_size(px(10.))
                 .text_color(palette.muted)
                 .child(run.created_short.clone())
                 .child(format!("{elapsed} elapsed")),
@@ -167,7 +227,7 @@ pub(crate) fn queue_row(
                     div()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .text_size(px(9.))
+                        .text_size(px(11.))
                         .font_family(data_font_family())
                         .text_color(palette.text)
                         .child(run.filename.clone()),
@@ -175,7 +235,7 @@ pub(crate) fn queue_row(
                 .child(
                     div()
                         .mt(px(2.))
-                        .text_size(px(8.))
+                        .text_size(px(10.))
                         .text_color(palette.warning)
                         .child(localize("已排队", "Queued")),
                 ),
@@ -245,14 +305,14 @@ pub(crate) fn history_row(
         .when(!selected, |this| {
             this.hover(|style| style.bg(palette.hover))
         })
-        .border_2()
+        .border_l_2()
         .border_color(if selected {
             palette.accent
         } else {
-            palette.border.opacity(0.55)
+            palette.sidebar
         })
         .focus(|style| style.border_color(palette.focus_ring))
-        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+        .on_mouse_down(gpui_kit::MouseButton::Left, |_, window, _| {
             window.prevent_default();
         })
         .on_click(on_action(&actions, RunAction::Select(id)))
@@ -268,14 +328,14 @@ pub(crate) fn history_row(
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .text_size(px(10.))
+                        .text_size(px(12.))
                         .font_family(data_font_family())
                         .text_color(palette.text)
                         .child(run.filename.clone()),
                 )
                 .child(
                     div()
-                        .text_size(px(9.))
+                        .text_size(px(11.))
                         .text_color(status_color)
                         .child(status),
                 ),
@@ -291,7 +351,7 @@ pub(crate) fn history_row(
                     div()
                         .w(px(50.))
                         .flex_shrink_0()
-                        .text_size(px(8.))
+                        .text_size(px(10.))
                         .text_color(status_color)
                         .child(status),
                 )
@@ -305,36 +365,10 @@ pub(crate) fn history_row(
                         .w(px(30.))
                         .text_right()
                         .font_family(data_font_family())
-                        .text_size(px(8.))
+                        .text_size(px(10.))
                         .text_color(status_color)
                         .child(format!("{:.0}%", run.progress * 100.0)),
-                )
-                .children(selected.then(|| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .child(
-                            GnssButton::icon_only(
-                                SharedString::from(format!("dock-reveal-{id}")),
-                                IconName::FolderOpen,
-                                localize("在文件管理器中定位", "Reveal source file"),
-                                palette,
-                            )
-                            .size(ControlSize::Compact)
-                            .on_click(on_action(&actions, RunAction::Reveal(id))),
-                        )
-                        .child(
-                            GnssButton::icon_only(
-                                SharedString::from(format!("dock-delete-{id}")),
-                                IconName::Delete,
-                                localize("删除历史记录", "Delete history entry"),
-                                palette,
-                            )
-                            .kind(ButtonKind::Destructive)
-                            .size(ControlSize::Compact)
-                            .on_click(on_action(&actions, RunAction::Delete(id))),
-                        )
-                })),
+                ),
         )
         .child(
             div()
@@ -344,9 +378,33 @@ pub(crate) fn history_row(
                 .items_center()
                 .justify_between()
                 .font_family(data_font_family())
-                .text_size(px(8.))
+                .text_size(px(10.))
                 .text_color(palette.muted)
                 .child(run.created_long.clone())
                 .child(format!("{elapsed} · {} epochs", run.pvt_epoch_count)),
         )
+        .context_menu(move |menu, window, cx| {
+            actions(RunAction::ContextSelect(id), window, cx);
+            menu.min_w(px(208.))
+                .max_w(px(240.))
+                .item(
+                    history_menu_item(
+                        localize("在 Finder 中显示", "Reveal source file"),
+                        IconName::FolderOpen,
+                        false,
+                        palette,
+                    )
+                    .on_click(on_action(&actions, RunAction::Reveal(id))),
+                )
+                .separator()
+                .item(
+                    history_menu_item(
+                        localize("删除运行记录…", "Delete run…"),
+                        IconName::Delete,
+                        true,
+                        palette,
+                    )
+                    .on_click(on_action(&actions, RunAction::Delete(id))),
+                )
+        })
 }

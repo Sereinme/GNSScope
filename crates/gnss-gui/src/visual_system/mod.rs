@@ -6,11 +6,13 @@
 //! adapter in this module.
 
 mod components;
+mod context_menu;
 mod controls;
 mod primitives;
 mod semantic;
 
 pub(crate) use components::apply_component_theme;
+pub(crate) use context_menu::ContextMenuExt;
 pub(crate) use controls::{
     gnss_badge, gnss_divider, gnss_input, gnss_progress, gnss_scroll_area, gnss_search_input,
     BadgeKind, ButtonKind, ControlSize, ControlState, GnssButton, GnssMenuItem, GnssRow,
@@ -22,7 +24,7 @@ pub(crate) use semantic::Palette;
 #[cfg(test)]
 mod tests {
     use super::Palette;
-    use gpui::Hsla;
+    use gpui_kit::Hsla;
 
     fn relative_luminance(color: Hsla) -> f32 {
         let rgb = color.to_rgb();

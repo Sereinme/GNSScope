@@ -2,17 +2,25 @@
 name = "gnss-gui"
 version = "0.1.0"
 edition = "2021"
-description = "GNSScope GUI application using gpui"
+description = "GNSScope GUI application using GPUI Kit"
 
 [dependencies]
 gnss-core = { path = "../gnss-core" }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6"
-gpui = "0.2.2"
-gpui-component = "0.5.1"
-gpui-component-assets = "0.5.1"
+# Single facade over GPUI (gpui-pre), gpui-base, gpui-component, and the
+# default asset bundle. Import paths use `gpui_kit::` and
+# `gpui_kit::component::` instead of `gpui::` / `gpui_component::`.
+gpui-kit = "0.7.1"
 num-complex = "0.4"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+# TestAppContext uses no native Metal renderer; keep tests/lints independent of
+# the optional offline Xcode Metal toolchain. Production dependency stays above.
+# gpui-pre 0.3.8 no longer exposes the old `runtime_shaders` feature; shader
+# handling is covered by gpui-kit itself.
+gpui-kit = { version = "0.7.1", features = ["test-support"] }
