@@ -447,6 +447,10 @@ pub struct GnsscopeApp {
     timeline: Entity<SliderState>,
     history_search: Entity<InputState>,
     gallery_input: Entity<InputState>,
+    /// Precise epoch jump field rendered over the timeline's epoch counter.
+    epoch_jump_input: Entity<InputState>,
+    /// Whether the precise jump popover is open for the selected run.
+    epoch_jump_editing: bool,
     setting_inputs: BTreeMap<&'static str, Entity<InputState>>,
     setting_parse_errors: BTreeMap<&'static str, &'static str>,
     history_filter: HistoryFilter,
@@ -597,6 +601,37 @@ impl GnsscopeApp {
                 InterfaceLanguage::English => "Input state example",
             })
         });
+        let epoch_jump_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(match interface_language {
+                InterfaceLanguage::SimplifiedChinese => "输入历元编号",
+                InterfaceLanguage::English => "Enter epoch number",
+            })
+        });
+        // The precise jump field commits on Enter and closes on blur. The seek
+        // slider value is deliberately not refreshed here: a subscription has
+        // no `&mut Window`, and the slider is pointer-position driven, so it
+        // self-corrects on the next interaction.
+        cx.subscribe(
+            &epoch_jump_input,
+            |this, input, event: &InputEvent, cx| match event {
+                InputEvent::PressEnter { .. } => {
+                    let value = input.read(cx).value().to_string();
+                    let count = this.display_epochs().len();
+                    if let Some(index) = epoch_jump_index(&value, count) {
+                        this.selected_epoch = Some(index);
+                        this.follow_live = false;
+                    }
+                    this.epoch_jump_editing = false;
+                    cx.notify();
+                }
+                InputEvent::Blur if this.epoch_jump_editing => {
+                    this.epoch_jump_editing = false;
+                    cx.notify();
+                }
+                _ => {}
+            },
+        )
+        .detach();
         let mut setting_inputs = BTreeMap::new();
         for &field in EDITABLE_SETTING_FIELDS {
             let input = cx.new(|cx| {
@@ -665,6 +700,8 @@ impl GnsscopeApp {
             timeline,
             history_search,
             gallery_input,
+            epoch_jump_input,
+            epoch_jump_editing: false,
             setting_inputs,
             setting_parse_errors: BTreeMap::new(),
             history_filter: HistoryFilter::All,
@@ -1780,6 +1817,20 @@ impl GnsscopeApp {
             (2, false) => 1,
             (zoom, _) => zoom,
         };
+    }
+
+    /// Open the precise epoch jump popover seeded with the current epoch.
+    fn begin_epoch_jump(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.display_epochs().is_empty() {
+            return;
+        }
+        let number = self.selected_epoch.map(|index| index + 1).unwrap_or(1);
+        self.epoch_jump_editing = true;
+        self.epoch_jump_input.update(cx, |input, cx| {
+            input.set_value(number.to_string(), window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
     }
 
     fn selected_run(&self) -> Option<&ProcessingRun> {
@@ -6586,7 +6637,7 @@ impl GnsscopeApp {
             WorkspaceView::Overview => div()
                 .grid()
                 .grid_cols(if compact { 1 } else { 2 })
-                .gap(px(6.))
+                .gap(px(metrics::PLOT_GRID_GAP))
                 .child(self.plot_panel(
                     "卫星天空图",
                     sky_plot(
@@ -6731,10 +6782,13 @@ impl GnsscopeApp {
                 .into_any_element(),
         };
 
+        // Plot grid gutter recovers height for the fixed 148px timeline
+        // (design-refresh spec §3): outer padding 12/10/20 -> 4 and row gap
+        // 6 -> 4. Charts keep explicit minimums and may scroll internally.
         div()
-            .px(px(12.))
-            .pt(px(10.))
-            .pb(px(20.))
+            .px(px(metrics::PLOT_GRID_PADDING))
+            .pt(px(metrics::PLOT_GRID_PADDING))
+            .pb(px(metrics::PLOT_GRID_PADDING))
             .child(content)
             .children(
                 matches!(self.workspace_view, WorkspaceView::Position).then(|| {
@@ -6996,35 +7050,62 @@ impl GnsscopeApp {
             .unwrap_or(0.0);
         let visible_span = 1.0 / self.timeline_zoom as f32;
         let visible_start = (global_cursor - visible_span / 2.0).clamp(0.0, 1.0 - visible_span);
-        let visible_end = visible_start + visible_span;
         let cursor_percent = ((global_cursor - visible_start) / visible_span).clamp(0.0, 1.0);
-        let markers = events
+        // Real processed progress of the selected run; completed runs render a
+        // full processed block with no boundary marker (preview active run is
+        // the deterministic 0.63 fixture).
+        let processed = self
+            .selected_run()
+            .map(|run| (run.progress as f32).clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+        // Real summary subtitle: receiver-time span, PVT output rate, events.
+        let receiver_seconds = timeline_duration_ms / 1_000;
+        let pvt_hz = if epoch_period_ms > 0 && 1_000 % epoch_period_ms == 0 {
+            format!("{}", 1_000 / epoch_period_ms)
+        } else {
+            format!("{:.1}", 1_000.0 / epoch_period_ms.max(1) as f64)
+        };
+        let (time_label, event_label) = match self.interface_language {
+            InterfaceLanguage::SimplifiedChinese => ("接收机时间", "事件"),
+            InterfaceLanguage::English => ("Receiver time", "Events"),
+        };
+        let subtitle = format!(
+            "{time_label} {receiver_seconds} s · PVT {pvt_hz} Hz · {event_label} {}",
+            events.len()
+        );
+        // Real amplitude envelope for the minimap: per-epoch peak C/N0 across
+        // the selected run's channels. Empty channels stay `None` so the
+        // minimap draws the 不可用 hatch instead of a synthetic waveform.
+        let peak_per_epoch = self
+            .display_epoch_channels()
             .iter()
-            .rev()
-            .take(64)
-            .enumerate()
-            .filter_map(|(index, event)| {
-                let global_percent = event.now_ms as f32 / timeline_duration_ms as f32;
-                if global_percent < visible_start || global_percent > visible_end {
-                    return None;
-                }
-                let percent = (global_percent - visible_start) / visible_span;
-                let (label, marker_color) = match event.kind {
-                    GuiDiagnosticEventKind::Acquisition => ("ACQ", palette.healthy),
-                    GuiDiagnosticEventKind::AcquisitionFailed => ("FAIL", palette.danger),
-                    GuiDiagnosticEventKind::Reacquisition => ("REACQ", palette.accent),
-                    GuiDiagnosticEventKind::ReacquisitionFailed => ("LOSS", palette.danger),
-                    GuiDiagnosticEventKind::ChannelState => ("TRK", palette.accent),
-                    GuiDiagnosticEventKind::Navigation => ("NAV", palette.warning),
-                };
-                Some((index, percent, label, marker_color))
+            .map(|channels| {
+                let peak = channels
+                    .iter()
+                    .map(|channel| channel.cn0_db_hz)
+                    .filter(|cn0| cn0.is_finite() && *cn0 > 0.0)
+                    .fold(0.0_f64, f64::max);
+                (peak > 0.0).then_some(peak as f32)
             })
             .collect::<Vec<_>>();
-        let visible_start_ms = (timeline_duration_ms as f32 * visible_start) as u64;
-        let visible_duration_ms = (timeline_duration_ms as f32 * visible_span) as u64;
-        let labels = std::array::from_fn(|tick| {
-            format_timeline_time(visible_start_ms + visible_duration_ms * tick as u64 / 5)
-        });
+        let minimap_envelope = crate::plots::timeline::envelope_series(
+            &peak_per_epoch,
+            epoch_period_ms.max(1),
+            timeline_duration_ms,
+            crate::plots::timeline::ENVELOPE_BUCKETS,
+        );
+        let track = crate::plots::timeline::TrackView {
+            duration_ms: timeline_duration_ms,
+            visible_start,
+            visible_span,
+            cursor_percent,
+            epoch_number,
+            processed,
+            events: events
+                .iter()
+                .map(crate::plots::timeline::track_event)
+                .collect(),
+        };
         let slider = Slider::new(&self.timeline)
             .bg(gpui_kit::transparent_black())
             .text_color(gpui_kit::transparent_black())
@@ -7048,33 +7129,42 @@ impl GnsscopeApp {
                         }
                         EpochAction::ZoomOut => this.adjust_timeline_zoom(false),
                         EpochAction::ZoomIn => this.adjust_timeline_zoom(true),
+                        EpochAction::ZoomReset => this.timeline_zoom = 1,
                         EpochAction::Follow => this.return_to_live(window, cx),
+                        EpochAction::PreciseJump => this.begin_epoch_jump(window, cx),
                     }
                     cx.notify();
                 });
             });
-        let controls = crate::ui::epoch_dock::controls(
-            crate::ui::epoch_dock::EpochControls {
-                epoch_count,
-                zoom: self.timeline_zoom,
-                follow_live: self.follow_live,
-                can_follow: self.live_run_id.is_some(),
-            },
-            actions,
-            localize,
-            palette,
-        );
+        let jump_input = self.epoch_jump_editing.then(|| {
+            Input::new(&self.epoch_jump_input)
+                .w_full()
+                .bg(palette.surface.opacity(0.0))
+                .border_color(palette.surface.opacity(0.0))
+                .text_color(palette.accent)
+                .font_family(data_font_family())
+                .text_size(px(12.))
+                .into_any_element()
+        });
         crate::ui::epoch_dock::render(
             crate::ui::epoch_dock::EpochView {
-                title: self.localized("选中运行时间线", "Selected run timeline"),
+                title: self.localized("选中解算任务时间线", "Selected run timeline"),
+                subtitle,
                 epoch_number,
-                epoch_count,
-                cursor_percent,
-                markers,
-                labels,
+                track,
+                minimap_envelope,
+                jump_editing: self.epoch_jump_editing,
+                jump_input,
+                seek: slider.into_any_element(),
+                controls: crate::ui::epoch_dock::EpochControls {
+                    epoch_count,
+                    zoom: self.timeline_zoom,
+                    follow_live: self.follow_live,
+                    can_follow: self.live_run_id.is_some(),
+                },
+                actions,
+                localize,
             },
-            slider.into_any_element(),
-            controls.into_any_element(),
             palette,
         )
     }
@@ -7317,12 +7407,27 @@ impl Render for GnsscopeApp {
     }
 }
 
-fn format_timeline_time(milliseconds: u64) -> String {
+pub(crate) fn format_timeline_time(milliseconds: u64) -> String {
     let seconds = milliseconds / 1_000;
     let hours = seconds / 3_600;
     let minutes = (seconds % 3_600) / 60;
     let seconds = seconds % 60;
     format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+/// Parse the precise jump field: a 1-based epoch number clamped into the
+/// selected run's epoch range. Empty input, `0`, or a run without epochs all
+/// mean "no jump"; oversized values land on the newest available epoch rather
+/// than failing the edit.
+fn epoch_jump_index(value: &str, count: usize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let number: usize = value.trim().parse().ok()?;
+    if number == 0 {
+        return None;
+    }
+    Some((number - 1).min(count - 1))
 }
 
 fn processing_run_elapsed_ms(run: &ProcessingRun) -> u64 {
@@ -9600,11 +9705,23 @@ mod history_queue_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cn0_series, epoch_index_for_percent, format_timeline_offset, format_timeline_time,
-        nice_enu_extent, preview_diagnostic_events, preview_enu_position, preview_epoch_history,
-        toggled_side_drawer, InterfaceLanguage, PlotFocus, SettingsCategory, SideDrawer,
-        ThemePreference, WorkspaceView,
+        build_cn0_series, epoch_index_for_percent, epoch_jump_index, format_timeline_offset,
+        format_timeline_time, nice_enu_extent, preview_diagnostic_events, preview_enu_position,
+        preview_epoch_history, toggled_side_drawer, InterfaceLanguage, PlotFocus, SettingsCategory,
+        SideDrawer, ThemePreference, WorkspaceView,
     };
+
+    #[test]
+    fn precise_jump_parses_a_1_based_epoch_and_clamps_to_the_range() {
+        assert_eq!(epoch_jump_index("1", 769), Some(0));
+        assert_eq!(epoch_jump_index("120", 769), Some(119));
+        assert_eq!(epoch_jump_index("1248", 769), Some(768));
+        assert_eq!(epoch_jump_index(" 42 ", 769), Some(41));
+        assert_eq!(epoch_jump_index("0", 769), None);
+        assert_eq!(epoch_jump_index("", 769), None);
+        assert_eq!(epoch_jump_index("abc", 769), None);
+        assert_eq!(epoch_jump_index("5", 0), None);
+    }
 
     #[test]
     fn timeline_percent_maps_to_shared_epoch_index() {

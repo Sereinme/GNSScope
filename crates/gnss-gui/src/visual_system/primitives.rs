@@ -37,6 +37,7 @@ pub(crate) fn data_font_family() -> &'static str {
 }
 
 /// Shared shell geometry derived from the concept workbench.
+#[allow(dead_code)]
 pub(crate) mod metrics {
     pub(crate) const TITLE_BAR_HEIGHT: f32 = 40.0;
     pub(crate) const RUNS_DOCK_WIDTH: f32 = 316.0;
@@ -45,11 +46,28 @@ pub(crate) mod metrics {
     pub(crate) const CONFIGURATION_RAIL_MIN_WIDTH: f32 = 258.0;
     pub(crate) const RUNS_HEADER_HEIGHT: f32 = 38.0;
     pub(crate) const RUNS_SEARCH_HEIGHT: f32 = 42.0;
-    pub(crate) const WORKSPACE_HEADER_HEIGHT: f32 = 96.0;
-    pub(crate) const WORKSPACE_CONTEXT_HEIGHT: f32 = 56.0;
-    pub(crate) const WORKSPACE_TABS_HEIGHT: f32 = 40.0;
+    // Height recovery (design-refresh spec §3): the workbench header budget
+    // drops 96 -> 76 (CONTEXT 48 + TABS 28), freeing 20px for the fixed
+    // 148px epoch timeline without covering PVT/C/N0 content at 1003px.
+    pub(crate) const WORKSPACE_HEADER_HEIGHT: f32 = 76.0;
+    pub(crate) const WORKSPACE_CONTEXT_HEIGHT: f32 = 48.0;
+    pub(crate) const WORKSPACE_TABS_HEIGHT: f32 = 28.0;
     pub(crate) const STATUS_BAR_HEIGHT: f32 = 28.0;
     pub(crate) const CONTROL_RADIUS: f32 = super::radius::CONTROL;
+
+    // Design-refresh metrics (spec §2.9); not yet consumed by consumers
+    // (height recovery / timeline / runs / plots packages land next).
+    pub(crate) const TIMELINE_HEIGHT: f32 = 148.0;
+    pub(crate) const TIMELINE_HEADER_HEIGHT: f32 = 28.0;
+    pub(crate) const TIMELINE_TRACK_HEIGHT: f32 = 85.0;
+    pub(crate) const TIMELINE_LABELS_HEIGHT: f32 = 18.0;
+    pub(crate) const TIMELINE_TRANSPORT_WIDTH: f32 = 144.0;
+    pub(crate) const RUN_ROW_HEIGHT: f32 = 50.0;
+    pub(crate) const RUN_SECTION_HEADER_HEIGHT: f32 = 24.0;
+    pub(crate) const PVT_ROW_HEIGHT: f32 = 20.0;
+    pub(crate) const PLOT_PANE_HEADER_HEIGHT: f32 = 28.0;
+    pub(crate) const PLOT_GRID_PADDING: f32 = 4.0;
+    pub(crate) const PLOT_GRID_GAP: f32 = 4.0;
 }
 
 // These named scales are intentionally established before Phase 2 migrates
@@ -68,12 +86,15 @@ pub(super) mod spacing {
 
 #[allow(dead_code)]
 pub(super) mod typography {
-    pub(crate) const MICRO: f32 = 9.0;
+    // MICRO is the tick role (chart/timeline tick labels, spec §2.2 "tick").
+    pub(crate) const MICRO: f32 = 10.0;
     pub(crate) const CAPTION: f32 = 11.0;
+    pub(crate) const MEASUREMENT_SMALL: f32 = 11.0;
     pub(crate) const METADATA: f32 = 12.0;
+    pub(crate) const MEASUREMENT: f32 = 12.0;
     pub(crate) const CONTROL: f32 = 13.0;
     pub(crate) const BODY: f32 = 13.0;
-    pub(crate) const PANE_TITLE: f32 = 14.0;
+    pub(crate) const PANE_TITLE: f32 = 13.0;
     pub(crate) const WORKSPACE_TITLE: f32 = 20.0;
 }
 
@@ -166,7 +187,8 @@ pub(super) mod dark {
     pub(crate) const DANGER: u32 = 0xeb7077;
     pub(crate) const DANGER_WASH: u32 = 0x32191d;
     pub(crate) const UNAVAILABLE: u32 = 0x89939f;
-    pub(crate) const UNAVAILABLE_WASH: u32 = 0x20252c;
+    // Progress-strip groove target (spec §2.7 / theme.css --track); light unchanged.
+    pub(crate) const UNAVAILABLE_WASH: u32 = 0x262c35;
     pub(crate) const PLOT_GRID: u32 = 0x29313a;
     pub(crate) const PLOT_AXIS: u32 = 0x89939f;
 }
@@ -180,10 +202,14 @@ pub(super) mod shared {
     pub(crate) const DARK_ON_SOLID: u32 = 0x111419;
     pub(crate) const OVERLAY: u32 = 0x020305;
 
-    pub(crate) const CHART_LIGHT: [u32; 8] = [
-        0x147958, 0x3578c8, 0x985700, 0x7446a6, 0xc65f17, 0x167a94, 0x66717d, 0xb63542,
+    // 10 series colors; theme.css `--chart-1..10`. C/N0 needs 9 adjacent-distinct
+    // lanes (spec §3.7 / gap 17); entries 9/10 are the design-refresh additions.
+    pub(crate) const CHART_LIGHT: [u32; 10] = [
+        0x147958, 0x3578c8, 0x985700, 0x7446a6, 0xc65f17, 0x167a94, 0x66717d, 0xb63542, 0x8a6a2f,
+        0xa84a82,
     ];
-    pub(crate) const CHART_DARK: [u32; 8] = [
-        0x65c991, 0x78aef7, 0xe0b45b, 0xb792f4, 0xed8a4b, 0x58c7db, 0xa7b0bd, 0xeb7077,
+    pub(crate) const CHART_DARK: [u32; 10] = [
+        0x65c991, 0x78aef7, 0xe0b45b, 0xb792f4, 0xed8a4b, 0x58c7db, 0xa7b0bd, 0xeb7077, 0xc2a06f,
+        0xd48fb4,
     ];
 }

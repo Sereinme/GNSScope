@@ -4,6 +4,7 @@ pub mod app;
 pub mod events;
 pub mod layout;
 pub mod nav_status;
+mod plots;
 pub mod renderer;
 pub mod run_library;
 pub mod sample;
