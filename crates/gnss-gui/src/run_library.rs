@@ -139,6 +139,15 @@ pub struct StoredQuality {
     pub standardized_residual_rms: f64,
     pub gdop: f64,
     pub hdop: f64,
+    /// PDOP persisted since issue 19. Additive schema evolution per ADR-0003:
+    /// snapshots written before this field existed deserialize to `None`
+    /// (honest "—" on replay) and completed runs are never rewritten.
+    #[serde(default)]
+    pub pdop: Option<f64>,
+    /// VDOP persisted since issue 19; same additive rules as
+    /// [`Self::pdop`].
+    #[serde(default)]
+    pub vdop: Option<f64>,
     pub horizontal_sigma_m: f64,
     pub vertical_sigma_m: f64,
     pub velocity_sigma_mps: Option<f64>,
@@ -274,6 +283,8 @@ impl StoredEpoch {
                 standardized_residual_rms: value.quality.standardized_residual_rms,
                 gdop: value.quality.gdop,
                 hdop: value.quality.hdop,
+                pdop: value.quality.pdop,
+                vdop: value.quality.vdop,
                 horizontal_sigma_m: value.quality.horizontal_sigma_m,
                 vertical_sigma_m: value.quality.vertical_sigma_m,
                 velocity_sigma_mps: value.quality.velocity_sigma_mps,
@@ -344,6 +355,10 @@ impl StoredEpoch {
                     standardized_residual_rms: 0.0,
                     gdop: 0.0,
                     hdop: self.hdop,
+                    // Legacy compact snapshots never carried PDOP/VDOP;
+                    // they stay unavailable ("—") instead of fabricated.
+                    pdop: None,
+                    vdop: None,
                     horizontal_sigma_m: 0.0,
                     vertical_sigma_m: 0.0,
                     velocity_sigma_mps: None,
@@ -456,6 +471,8 @@ impl StoredQuality {
             standardized_residual_rms: self.standardized_residual_rms,
             gdop: self.gdop,
             hdop: self.hdop,
+            pdop: self.pdop,
+            vdop: self.vdop,
             horizontal_sigma_m: self.horizontal_sigma_m,
             vertical_sigma_m: self.vertical_sigma_m,
             velocity_sigma_mps: self.velocity_sigma_mps,
@@ -474,6 +491,8 @@ impl From<&GuiPvtQuality> for StoredQuality {
             standardized_residual_rms: value.standardized_residual_rms,
             gdop: value.gdop,
             hdop: value.hdop,
+            pdop: value.pdop,
+            vdop: value.vdop,
             horizontal_sigma_m: value.horizontal_sigma_m,
             vertical_sigma_m: value.vertical_sigma_m,
             velocity_sigma_mps: value.velocity_sigma_mps,
@@ -1459,6 +1478,166 @@ mod tests {
         assert_eq!(library.events(run.id).expect("load events").len(), 1);
         drop(writer);
         drop(library);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pre_issue19_quality_snapshot_maps_missing_pdop_vdop_to_none() {
+        // Snapshot shape written before issue 19: the quality object carries
+        // no pdop/vdop keys. The additive serde default deserializes them to
+        // `None` (honest "—"), never 0 and never a recomputed estimate.
+        let json = r#"{
+            "epoch_index": 3,
+            "solution_kind": "Raw",
+            "latitude_deg": 41.0,
+            "longitude_deg": 2.0,
+            "altitude_m": 50.0,
+            "ecef_m": [1.0, 2.0, 3.0],
+            "satellites_used": 5,
+            "hdop": 1.2,
+            "quality": {
+                "converged": true,
+                "n_sats": 5,
+                "used_prns": [1, 3, 8, 11, 20],
+                "excluded_prns": [],
+                "residual_rms_m": 0.8,
+                "standardized_residual_rms": 0.4,
+                "gdop": 2.1,
+                "hdop": 1.2,
+                "horizontal_sigma_m": 8.0,
+                "vertical_sigma_m": 12.0,
+                "velocity_sigma_mps": 0.3
+            }
+        }"#;
+
+        let stored: StoredEpoch = serde_json::from_str(json).expect("read pre-issue-19 epoch");
+        let restored = stored.to_view_model();
+        assert_eq!(restored.quality.pdop, None);
+        assert_eq!(restored.quality.vdop, None);
+        assert_ne!(restored.quality.pdop, Some(0.0));
+        assert_ne!(restored.quality.vdop, Some(0.0));
+        // Pre-existing fields are untouched by the additive migration.
+        assert_eq!(restored.quality.hdop, 1.2);
+        assert_eq!(restored.quality.n_sats, 5);
+
+        // The compact legacy path (no quality object at all) stays honest too.
+        let compact: StoredEpoch = serde_json::from_str(
+            r#"{
+                "epoch_index": 1,
+                "solution_kind": "Raw",
+                "latitude_deg": 41.0,
+                "longitude_deg": 2.0,
+                "altitude_m": 50.0,
+                "ecef_m": [1.0, 2.0, 3.0],
+                "satellites_used": 4,
+                "hdop": 1.5
+            }"#,
+        )
+        .expect("read compact legacy epoch");
+        let restored = compact.to_view_model();
+        assert_eq!(restored.quality.pdop, None);
+        assert_eq!(restored.quality.vdop, None);
+    }
+
+    #[test]
+    fn run_library_round_trips_pdop_vdop_with_full_precision() {
+        let library = RunLibrary::open(":memory:").expect("open in-memory run library");
+        let settings = GuiProcessingSettings {
+            iq_file_path: Some(PathBuf::from("capture.dat")),
+            ..Default::default()
+        };
+        let run = library.create_run(&settings).expect("create run");
+        let mut epoch = crate::sample_pvt_view_model();
+        // An odd-mantissa value proves the f64 survives the JSON seam exactly.
+        epoch.quality.pdop = Some(2.987_654_321_098_765);
+        epoch.quality.vdop = None; // mixed presence survives the seam too
+
+        library
+            .append_epoch(run.id, 0, &epoch, &[])
+            .expect("append epoch");
+
+        let stored = library.epochs(run.id).expect("load epochs");
+        assert_eq!(stored[0].quality.pdop, Some(2.987_654_321_098_765));
+        assert_eq!(stored[0].quality.vdop, None);
+        let restored = stored[0].to_view_model();
+        assert_eq!(restored.quality.pdop, Some(2.987_654_321_098_765));
+        assert_eq!(restored.quality.vdop, None);
+        // Candidate qualities cross the seam with the same guarantees.
+        for (restored, expected) in restored.candidates.iter().zip(&epoch.candidates) {
+            assert_eq!(restored.quality.pdop, expected.quality.pdop);
+            assert_eq!(restored.quality.vdop, expected.quality.vdop);
+        }
+    }
+
+    #[test]
+    fn reopening_library_keeps_completed_run_derived_results_byte_identical() {
+        let path =
+            std::env::temp_dir().join(format!("gnsscope-immutable-{}.sqlite3", Uuid::new_v4()));
+        let library = RunLibrary::open(&path).expect("open run library");
+        let settings = GuiProcessingSettings {
+            iq_file_path: Some(PathBuf::from("capture.dat")),
+            ..Default::default()
+        };
+        let run = library.create_run(&settings).expect("create run");
+        library
+            .append_epoch(run.id, 0, &crate::sample_pvt_view_model(), &[])
+            .unwrap();
+        library
+            .append_event(
+                run.id,
+                0,
+                &GuiDiagnosticEvent {
+                    now_ms: 7,
+                    sample_index: 4_000,
+                    prn: Some(20),
+                    kind: GuiDiagnosticEventKind::Acquisition,
+                    detail: "detected".to_string(),
+                },
+            )
+            .unwrap();
+        library
+            .update_progress(run.id, RunStatus::Completed, 100, 100, 1, "complete")
+            .unwrap();
+
+        let fetch = |library: &RunLibrary, sql: &str| -> String {
+            library
+                .connection
+                .query_row(sql, [run.id.to_string()], |row| row.get(0))
+                .expect("fetch stored snapshot")
+        };
+        let epoch_json = fetch(
+            &library,
+            "SELECT snapshot_json FROM epochs WHERE run_id = ?1",
+        );
+        let event_json = fetch(
+            &library,
+            "SELECT event_json FROM run_events WHERE run_id = ?1",
+        );
+        let settings_json = fetch(&library, "SELECT settings_json FROM runs WHERE id = ?1");
+        drop(library);
+
+        // Opening the library again (recovery pass included) must not rewrite
+        // any derived result of the completed run — run immutability (ADR-0003).
+        let reopened = RunLibrary::open(&path).expect("reopen run library");
+        assert_eq!(
+            epoch_json,
+            fetch(
+                &reopened,
+                "SELECT snapshot_json FROM epochs WHERE run_id = ?1"
+            )
+        );
+        assert_eq!(
+            event_json,
+            fetch(
+                &reopened,
+                "SELECT event_json FROM run_events WHERE run_id = ?1"
+            )
+        );
+        assert_eq!(
+            settings_json,
+            fetch(&reopened, "SELECT settings_json FROM runs WHERE id = ?1")
+        );
+        drop(reopened);
         let _ = std::fs::remove_file(path);
     }
 }

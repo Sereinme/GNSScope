@@ -3,6 +3,29 @@ use gnss_core::pvt::{
     PvtEpochSolutionKind, PvtQualityOutput, PvtSatelliteOutput, PvtVelocityOutput, UtcDateTime,
 };
 
+/// Positioning fix dimensionality of the selected epoch solution, derived
+/// (never fabricated) from existing receiver outputs: the GPS L1 C/A solver
+/// estimates the four-unknown state `[x, y, z, clock]`
+/// (`gnss-core/src/pvt/solver.rs`), so a converged, non-`Unconverged`
+/// solution that used at least four satellites and carries a finite position
+/// is a genuine 3D fix. Anything else derives `None` and renders as the
+/// honest "—/不可用" fallback (spec §3.11 / issue 17); the candidate kind
+/// (`Raw/Smoothed/Kalman`) is never presented as a fix type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuiFixType {
+    Fix3D,
+}
+
+impl GuiFixType {
+    /// UI label (§3.0 example: "解类型 3D Fix"; the technical label stays
+    /// English in both locales, like other measurement abbreviations).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fix3D => "3D Fix",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GuiPvtViewModel {
     pub epoch_index: usize,
@@ -84,6 +107,13 @@ pub struct GuiPvtQuality {
     pub standardized_residual_rms: f64,
     pub gdop: f64,
     pub hdop: f64,
+    /// Position dilution of precision (issue 19). `None` when the receiver
+    /// did not compute a genuine value (see [`dop_metric`]); renders as the
+    /// honest "—" — never 0, never a recomputed estimate.
+    pub pdop: Option<f64>,
+    /// Vertical dilution of precision (issue 19); same honesty rule as
+    /// [`Self::pdop`].
+    pub vdop: Option<f64>,
     pub horizontal_sigma_m: f64,
     pub vertical_sigma_m: f64,
     pub velocity_sigma_mps: Option<f64>,
@@ -132,6 +162,23 @@ impl GuiPvtViewModel {
 
     pub fn from_epoch_outputs(outputs: &[PvtEpochOutput]) -> Vec<Self> {
         outputs.iter().map(Self::from_epoch_output).collect()
+    }
+
+    /// Real fix type of the selected epoch solution, derived from existing
+    /// outputs only. `None` when the epoch has no valid position fix
+    /// (unconverged, fewer than four used satellites, or a non-finite
+    /// position) — callers must render the honest "—/不可用" fallback and
+    /// must not substitute the candidate kind Debug string (issue 17).
+    pub fn fix_type(&self) -> Option<GuiFixType> {
+        let position_finite = self.latitude_deg.is_finite()
+            && self.longitude_deg.is_finite()
+            && self.altitude_m.is_finite()
+            && self.ecef_m.iter().all(|value| value.is_finite());
+        (self.solution_kind != PvtEpochSolutionKind::Unconverged
+            && self.quality.converged
+            && self.quality.n_sats >= 4
+            && position_finite)
+            .then_some(GuiFixType::Fix3D)
     }
 
     pub fn candidate(&self, kind: PvtEpochSolutionKind) -> Option<&GuiPvtCandidate> {
@@ -217,11 +264,23 @@ impl GuiPvtQuality {
             standardized_residual_rms: output.standardized_residual_rms,
             gdop: output.gdop,
             hdop: output.hdop,
+            pdop: dop_metric(output.pdop),
+            vdop: dop_metric(output.vdop),
             horizontal_sigma_m: output.horizontal_sigma_m,
             vertical_sigma_m: output.vertical_sigma_m,
             velocity_sigma_mps: output.velocity_sigma_mps,
         }
     }
+}
+
+/// Map a core DOP metric onto the honest GUI option (issue 19). `gnss-core`
+/// reports PDOP/VDOP as a plain `f64` whose `0.0` default means "not
+/// computed" (see `PvtSolution::default` in `gnss-core/src/pvt/solver.rs`);
+/// a physical DOP is always ≥ 1, so only a finite positive value is carried.
+/// Anything else maps to `None` and renders as "—" — never 0, never a
+/// recomputed estimate (spec §3.8 / ADR-0003 run immutability).
+fn dop_metric(value: f64) -> Option<f64> {
+    (value.is_finite() && value > 0.0).then_some(value)
 }
 
 impl GuiSatelliteGeometry {
@@ -327,9 +386,82 @@ mod tests {
         assert_eq!(velocity.vertical_speed_mps, -0.5);
         assert_eq!(view.quality.n_sats, 5);
         assert_eq!(view.quality.excluded_prns, vec![17]);
+        // PDOP/VDOP cross the output seam as honest options (issue 19).
+        assert_eq!(view.quality.pdop, Some(3.0));
+        assert_eq!(view.quality.vdop, Some(2.4));
         assert_eq!(view.satellites.len(), 1);
         assert_eq!(view.satellites[0].prn, 20);
         assert!((view.satellites[0].azimuth_deg - 1.25_f64.to_degrees()).abs() < 1e-12);
         assert!((view.satellites[0].elevation_deg - 0.75_f64.to_degrees()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fix_type_is_derived_only_from_a_real_3d_solution() {
+        // The sample fixture is a converged Kalman solution with five used
+        // satellites and a finite position, so it derives a genuine 3D fix.
+        let healthy = crate::sample_pvt_view_model();
+        assert_eq!(healthy.fix_type(), Some(GuiFixType::Fix3D));
+        assert_eq!(healthy.fix_type().expect("3D fix").label(), "3D Fix");
+
+        // An unconverged selection never yields a fix type.
+        let mut unconverged = crate::sample_pvt_view_model();
+        unconverged.solution_kind = PvtEpochSolutionKind::Unconverged;
+        assert_eq!(unconverged.fix_type(), None);
+
+        // A non-converged quality flag never yields a fix type.
+        let mut not_converged = crate::sample_pvt_view_model();
+        not_converged.quality.converged = false;
+        assert_eq!(not_converged.fix_type(), None);
+
+        // Fewer than four used satellites cannot resolve [x, y, z, clock].
+        let mut undersampled = crate::sample_pvt_view_model();
+        undersampled.quality.n_sats = 3;
+        assert_eq!(undersampled.fix_type(), None);
+
+        // A non-finite position is not a fix, even when everything else holds.
+        let mut invalid_position = crate::sample_pvt_view_model();
+        invalid_position.latitude_deg = f64::NAN;
+        assert_eq!(invalid_position.fix_type(), None);
+    }
+
+    #[test]
+    fn from_output_maps_uncomputed_dop_metrics_to_none_and_never_zero() {
+        // gnss-core reports PDOP/VDOP as plain `f64`; the 0.0 default of
+        // `PvtSolution` (and any non-finite value) means "not computed" and
+        // must surface as `None` — never `Some(0.0)` (issue 19 honesty rule).
+        let output = PvtQualityOutput {
+            converged: false,
+            n_sats: 0,
+            used_prns: Vec::new(),
+            excluded_prns: Vec::new(),
+            residual_rms_m: 0.0,
+            standardized_residual_rms: 0.0,
+            max_standardized_residual: 0.0,
+            epoch_quality_scale: 1.0,
+            hdop: 0.0,
+            vdop: 0.0,
+            pdop: 0.0,
+            gdop: 0.0,
+            horizontal_sigma_m: 0.0,
+            vertical_sigma_m: 0.0,
+            position_sigma_m: 0.0,
+            velocity_sigma_mps: None,
+        };
+        let quality = GuiPvtQuality::from_output(&output);
+        assert_eq!(quality.pdop, None);
+        assert_eq!(quality.vdop, None);
+
+        let mut non_finite = output;
+        non_finite.pdop = f64::NAN;
+        non_finite.vdop = f64::INFINITY;
+        let quality = GuiPvtQuality::from_output(&non_finite);
+        assert_eq!(quality.pdop, None);
+        assert_eq!(quality.vdop, None);
+
+        // Genuine computed values pass through unchanged.
+        assert_eq!(dop_metric(3.12), Some(3.12));
+        assert_eq!(dop_metric(1.0), Some(1.0));
+        assert_eq!(dop_metric(0.0), None);
+        assert_eq!(dop_metric(-2.5), None);
     }
 }
