@@ -45,6 +45,18 @@ struct ComponentTokens {
     scrollbar: Hsla,
     scrollbar_thumb: Hsla,
     scrollbar_thumb_hover: Hsla,
+    // Design-refresh component roles (spec §2.9); not yet mapped onto a
+    // gpui-component Theme field, kept for the native-surface packages.
+    #[allow(dead_code)]
+    progress_track: Hsla,
+    #[allow(dead_code)]
+    command_field: Hsla,
+    #[allow(dead_code)]
+    tab_indicator: Hsla,
+    #[allow(dead_code)]
+    timeline_track: Hsla,
+    #[allow(dead_code)]
+    status_strip: Hsla,
 }
 
 impl From<Palette> for ComponentTokens {
@@ -88,6 +100,14 @@ impl From<Palette> for ComponentTokens {
             scrollbar: palette.background,
             scrollbar_thumb: palette.border_strong,
             scrollbar_thumb_hover: palette.muted,
+            // Spec §2.7/§3.1/§2.5/§3.10/§3.11: groove = unavailable_wash,
+            // command field = surface_alt, tab indicator = accent,
+            // timeline hairline groove = unavailable_wash (--track), strip = sidebar.
+            progress_track: palette.unavailable_wash,
+            command_field: palette.surface_alt,
+            tab_indicator: palette.accent,
+            timeline_track: palette.unavailable_wash,
+            status_strip: palette.sidebar,
         }
     }
 }

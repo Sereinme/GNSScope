@@ -65,9 +65,13 @@ pub(crate) mod metrics {
     pub(crate) const RUN_ROW_HEIGHT: f32 = 50.0;
     pub(crate) const RUN_SECTION_HEADER_HEIGHT: f32 = 24.0;
     pub(crate) const PVT_ROW_HEIGHT: f32 = 20.0;
+    pub(crate) const PVT_HEADER_ROW_HEIGHT: f32 = 22.0;
     pub(crate) const PLOT_PANE_HEADER_HEIGHT: f32 = 28.0;
     pub(crate) const PLOT_GRID_PADDING: f32 = 4.0;
     pub(crate) const PLOT_GRID_GAP: f32 = 4.0;
+    // C/N0 history lane grid (spec §3.7 / gap 17): fixed 28px lane pitch so
+    // the nine lanes never reflow when values change.
+    pub(crate) const CN0_LANE_PITCH: f32 = 28.0;
 }
 
 // These named scales are intentionally established before Phase 2 migrates
@@ -156,7 +160,8 @@ pub(super) mod light {
     pub(crate) const DANGER_WASH: u32 = 0xf8e4e6;
     pub(crate) const UNAVAILABLE: u32 = 0x66717d;
     pub(crate) const UNAVAILABLE_WASH: u32 = 0xe9ecef;
-    pub(crate) const PLOT_GRID: u32 = 0xdde2e7;
+    // Weakened for the 1px-solid grid policy (spec §2.9 / gap 19).
+    pub(crate) const PLOT_GRID: u32 = 0xe3e8ec;
     pub(crate) const PLOT_AXIS: u32 = 0x6b7580;
 }
 
@@ -189,7 +194,8 @@ pub(super) mod dark {
     pub(crate) const UNAVAILABLE: u32 = 0x89939f;
     // Progress-strip groove target (spec §2.7 / theme.css --track); light unchanged.
     pub(crate) const UNAVAILABLE_WASH: u32 = 0x262c35;
-    pub(crate) const PLOT_GRID: u32 = 0x29313a;
+    // Weakened for the 1px-solid grid policy (spec §2.9 / gap 19).
+    pub(crate) const PLOT_GRID: u32 = 0x242b33;
     pub(crate) const PLOT_AXIS: u32 = 0x89939f;
 }
 

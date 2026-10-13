@@ -42,6 +42,10 @@ pub(crate) struct Palette {
     pub(crate) healthy_wash: Hsla,
     pub(crate) warning: Hsla,
     pub(crate) warning_wash: Hsla,
+    /// Attention amber (spec §2.5 `attention(warning)`): queued / capture /
+    /// watch states. Distinct from `accent`, which owns active processing
+    /// (处理中 = accent, 排队 = attention; the two must never share a color).
+    pub(crate) attention: Hsla,
     pub(crate) danger: Hsla,
     pub(crate) danger_wash: Hsla,
     pub(crate) unavailable: Hsla,
@@ -50,7 +54,7 @@ pub(crate) struct Palette {
     pub(crate) plot_axis: Hsla,
     pub(crate) plot_cursor: Hsla,
     pub(crate) plot_selection: Hsla,
-    pub(crate) chart_series: [Hsla; 8],
+    pub(crate) chart_series: [Hsla; 10],
 }
 
 impl Palette {
@@ -87,6 +91,7 @@ impl Palette {
             healthy_wash: color(light::HEALTHY_WASH),
             warning: color(light::WARNING),
             warning_wash: color(light::WARNING_WASH),
+            attention: color(light::WARNING),
             danger: color(light::DANGER),
             danger_wash: color(light::DANGER_WASH),
             unavailable: color(light::UNAVAILABLE),
@@ -132,6 +137,7 @@ impl Palette {
             healthy_wash: color(dark::HEALTHY_WASH),
             warning: color(dark::WARNING),
             warning_wash: color(dark::WARNING_WASH),
+            attention: color(dark::WARNING),
             danger: color(dark::DANGER),
             danger_wash: color(dark::DANGER_WASH),
             unavailable: color(dark::UNAVAILABLE),
