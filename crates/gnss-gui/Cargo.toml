@@ -16,6 +16,20 @@ num-complex = "0.4"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Real system telemetry for the status strip's right segment (design-refresh
+# spec §3.11 / issue 16): CPU, memory and disk usage percentages must come
+# from platform APIs. Pure `std` cannot read them on macOS/Windows (mach
+# host_statistics / GlobalMemoryStatusEx / statvfs are all outside std), and
+# spawning per-interval helper processes is forbidden by the issue. `sysinfo`
+# is the small crate the ticket names as the acceptable option; justification
+# recorded in .scratch/ui-visual-refactor/issues/16-status-title.md under
+# ## Comments. Pinned to the 0.31 line already in Cargo.lock (via zed-scap)
+# so the dependency unifies to a single compiled copy; only the `system`
+# (CPU/memory) and `disk` (volume usage) components are requested.
+sysinfo = { version = "0.31", default-features = false, features = [
+    "disk",
+    "system",
+] }
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]

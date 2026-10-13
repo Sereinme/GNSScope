@@ -372,6 +372,28 @@ pub(crate) fn envelope_series(
     values.iter().any(Option::is_some).then_some(values)
 }
 
+/// Vertical placement of one real envelope sample inside the minimap box.
+///
+/// Sparkline convention: the polyline auto-scales to the observed min..max
+/// band of the real per-epoch values. This is an affine display transform of
+/// the observed range only — no value is altered, interpolated or
+/// synthesized — and it keeps a nearly constant but real series visible
+/// instead of collapsing it onto the viewport frame. A degenerate range
+/// renders as a flat centered line.
+pub(crate) fn envelope_y(value: f32, lo: f32, hi: f32, height: f32) -> f32 {
+    /// Vertical inset so the polyline stays inside the accent viewport frame
+    /// (frame inset 2px + 1px border + 1px breathing room).
+    const BAND_INSET: f32 = 4.0;
+    let range = hi - lo;
+    if !range.is_finite() || range <= f32::EPSILON || !value.is_finite() {
+        return height / 2.0;
+    }
+    let norm = ((value - lo) / range).clamp(0.0, 1.0);
+    let bottom = height - BAND_INSET;
+    let top = BAND_INSET;
+    bottom - norm * (bottom - top)
+}
+
 /// "00:02:04.8" decisecond timestamp for the playhead callout.
 pub(crate) fn format_decis(milliseconds: u64) -> String {
     let decis = (milliseconds % 1_000) / 100;
@@ -811,20 +833,27 @@ pub(crate) fn minimap(
         .w(px(width))
         .h(px(height))
         .bg(palette.surface_alt)
-        .child(canvas(
-            move |_, _, _| {},
-            move |bounds: Bounds<gpui_kit::Pixels>, _, window, _| {
-                paint_minimap(
-                    bounds,
-                    draw_envelope.as_deref(),
-                    frame_start,
-                    frame_span,
-                    hatch,
-                    palette,
-                    window,
-                );
-            },
-        ))
+        // The canvas is a leaf element: without an explicit size gpui lays it
+        // out as 144x0 in this column and the paint closure early-returns, so
+        // pin it to the minimap box (144x18) instead of relying on stretch.
+        .child(
+            canvas(
+                move |_, _, _| {},
+                move |bounds: Bounds<gpui_kit::Pixels>, _, window, _| {
+                    paint_minimap(
+                        bounds,
+                        draw_envelope.as_deref(),
+                        frame_start,
+                        frame_span,
+                        hatch,
+                        palette,
+                        window,
+                    );
+                },
+            )
+            .w(px(width))
+            .h(px(height)),
+        )
         .when(hatch, |this| {
             this.child(
                 div()
@@ -879,6 +908,8 @@ fn paint_minimap(
     }
     if let Some(envelope) = envelope {
         let n = envelope.len().max(2);
+        let lo = envelope.iter().flatten().cloned().fold(f32::MAX, f32::min);
+        let hi = envelope.iter().flatten().cloned().fold(f32::MIN, f32::max);
         let mut builder = PathBuilder::stroke(px(1.0));
         let mut pen_down = false;
         for (index, value) in envelope.iter().enumerate() {
@@ -887,7 +918,7 @@ fn paint_minimap(
                 continue;
             };
             let x = px(((index as f32 + 0.5) / n as f32) * w);
-            let y = px((h - 1.0) - value * (h - 3.0));
+            let y = px(envelope_y(*value, lo, hi, h));
             if pen_down {
                 builder.line_to(point(bounds.origin.x + x, bounds.origin.y + y));
             } else {
@@ -1013,6 +1044,20 @@ mod tests {
         assert!(caption.visible);
         assert!(!caption.right_of_line);
         assert_eq!(caption.top, 0.0);
+    }
+
+    #[test]
+    fn envelope_y_auto_scales_the_real_band_and_flattens_degenerate_ranges() {
+        // Min/max samples pin the band edges (18px box, 4px inset).
+        assert_eq!(envelope_y(10.0, 10.0, 20.0, 18.0), 14.0);
+        assert_eq!(envelope_y(20.0, 10.0, 20.0, 18.0), 4.0);
+        assert_eq!(envelope_y(15.0, 10.0, 20.0, 18.0), 9.0);
+        // A nearly constant real series stays visible instead of collapsing
+        // onto the viewport frame, and a degenerate range centers a flat line.
+        assert_eq!(envelope_y(0.994, 0.952, 0.994, 18.0), 4.0);
+        assert_eq!(envelope_y(0.952, 0.952, 0.994, 18.0), 14.0);
+        assert_eq!(envelope_y(42.0, 42.0, 42.0, 18.0), 9.0);
+        assert_eq!(envelope_y(f32::NAN, 0.0, 1.0, 18.0), 9.0);
     }
 
     #[test]

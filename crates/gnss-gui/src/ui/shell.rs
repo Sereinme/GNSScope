@@ -79,6 +79,10 @@ pub(crate) fn shell_body(runs_dock: Option<AnyElement>, content: Option<AnyEleme
         .into_any_element()
 }
 
+/// Layout per `design-refresh-spec.md` §8: the timeline spans only the workbench
+/// column (between the Runs dock and the side region); the side region — the
+/// run-configuration rail or a drawer — is a full-height column the timeline never
+/// truncates.
 pub(crate) fn workspace_shell(
     workspace: Option<AnyElement>,
     side_region: Option<AnyElement>,
@@ -89,17 +93,17 @@ pub(crate) fn workspace_shell(
         .min_w_0()
         .min_h_0()
         .flex()
-        .flex_col()
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .flex()
+                .flex_col()
                 .children(workspace)
-                .children(side_region),
+                .children(timeline),
         )
-        .children(timeline)
+        .children(side_region)
         .into_any_element()
 }
 

@@ -95,28 +95,28 @@ pub(crate) fn render(
         )
         .into_any_element()
 }
+/// 24px section header (spec §3.2): `surface_alt` band, pane-title 13/600
+/// in text-secondary, data-11 count in text-tertiary, no divider.
 fn section_header(label: &'static str, count: usize, palette: Palette) -> impl IntoElement {
     div()
-        .h(px(30.))
+        .h(px(metrics::RUN_SECTION_HEADER_HEIGHT))
         .px(px(12.))
         .flex()
         .items_center()
         .justify_between()
-        .bg(palette.sidebar)
-        .border_b_1()
-        .border_color(palette.border)
+        .bg(palette.surface_alt)
         .child(
             div()
-                .text_size(px(11.))
+                .text_size(px(13.))
                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(palette.muted)
                 .child(label),
         )
         .child(
             div()
-                .text_size(px(10.))
+                .text_size(px(11.))
                 .font_family(data_font_family())
-                .text_color(palette.muted)
+                .text_color(palette.faint)
                 .child(count.to_string()),
         )
 }

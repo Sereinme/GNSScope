@@ -1,3 +1,4 @@
+use crate::ui::overlays::{matches_query, CommandPaletteSelect, CommandPaletteView, CommandResult};
 use crate::ui::run_configuration::{
     inspector_row, inspector_section, ConfigurationEntry, ConfigurationView,
 };
@@ -26,11 +27,11 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    bounds, canvas, div, point, px, quad, size, AnyElement, Bounds, Context, Entity, Hsla,
+    bounds, canvas, div, point, px, quad, size, AnyElement, App, Context, Entity, Focusable, Hsla,
     InteractiveElement, IntoElement, ParentElement, PathBuilder, PathPromptOptions, Render,
     SharedString, Styled, Window,
 };
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
@@ -424,6 +425,22 @@ impl InterfaceLanguage {
     }
 }
 
+/// One executable target behind a ⌘K palette result (issue 17 item 1):
+/// either a global command or the selection of a concrete run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaletteCommand {
+    NewAnalysis,
+    OpenRunLibrary,
+    OpenWorkspace,
+    OpenInterfaceSettings,
+    ToggleTheme,
+    ReturnToLive,
+    SelectRun(Uuid),
+}
+
+/// Caps the run entries in the palette so a large library stays navigable.
+const PALETTE_RUN_LIMIT: usize = 12;
+
 pub struct GnsscopeApp {
     settings: GuiProcessingSettings,
     library: Option<RunLibrary>,
@@ -454,8 +471,10 @@ pub struct GnsscopeApp {
     setting_inputs: BTreeMap<&'static str, Entity<InputState>>,
     setting_parse_errors: BTreeMap<&'static str, &'static str>,
     history_filter: HistoryFilter,
-    hovered_prn: Option<u8>,
-    pinned_prn: Option<u8>,
+    /// Hovered PRN (consumed by `plots::sky` for the sky-plot detail line).
+    pub(crate) hovered_prn: Option<u8>,
+    /// Pinned (clicked) PRN; hover takes display precedence over pin.
+    pub(crate) pinned_prn: Option<u8>,
     focused_plot: Option<PlotFocus>,
     follow_live: bool,
     theme_preference: ThemePreference,
@@ -475,6 +494,18 @@ pub struct GnsscopeApp {
     gallery_switch_checked: bool,
     gallery_activation_count: usize,
     status_message: String,
+    /// Deterministic preview fixtures story mode (`GNSSCOPE_PREVIEW=1`);
+    /// gates env-only story behavior such as skipping the source-file
+    /// existence check for fixture paths that are not real files.
+    preview_mode: bool,
+    /// Real input hosting the title-bar command field (issue 17 item 1).
+    command_input: Entity<InputState>,
+    /// Whether the ⌘K command palette overlay is open.
+    command_palette_open: bool,
+    /// Keyboard-highlighted palette entry index (filtered view).
+    command_highlight: Option<usize>,
+    /// Global keystroke interceptor driving ⌘K / palette navigation.
+    command_interceptor: Option<gpui_kit::Subscription>,
 }
 
 impl GnsscopeApp {
@@ -584,14 +615,49 @@ impl GnsscopeApp {
         let history_search = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(match interface_language {
-                    InterfaceLanguage::SimplifiedChinese => "搜索文件名或路径",
-                    InterfaceLanguage::English => "Search file name or path",
+                    // Distinct role from the title-bar command field: this
+                    // input only filters the Runs-dock list (spec §3.1/§3.2).
+                    InterfaceLanguage::SimplifiedChinese => "筛选解算任务…",
+                    InterfaceLanguage::English => "Filter runs…",
                 })
                 .clean_on_escape()
         });
         cx.subscribe(&history_search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
+            }
+        })
+        .detach();
+        // Real command field behind the ⌘K palette (issue 17 item 1). Typing
+        // here filters the palette's command/run results.
+        let command_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(match interface_language {
+                    InterfaceLanguage::SimplifiedChinese => "搜索命令或解算任务…",
+                    InterfaceLanguage::English => "Search commands or runs…",
+                })
+                .clean_on_escape()
+        });
+        cx.subscribe(&command_input, |this, _, event: &InputEvent, cx| {
+            match event {
+                InputEvent::Change => {
+                    // Typing opens/refreshes the palette and resets the
+                    // keyboard highlight to the first result.
+                    this.command_palette_open = true;
+                    this.command_highlight = Some(0);
+                    cx.notify();
+                }
+                InputEvent::Focus => {
+                    // Clicking/tabbing into the command field opens the
+                    // palette so the field always has a visible target.
+                    this.command_palette_open = true;
+                    this.command_highlight = Some(0);
+                    cx.notify();
+                }
+                // Enter/Escape are consumed by the global keystroke
+                // interceptor while the palette is open (it owns window
+                // access for command execution).
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {}
             }
         })
         .detach();
@@ -755,6 +821,11 @@ impl GnsscopeApp {
             gallery_switch_checked: true,
             gallery_activation_count: 0,
             status_message: "请选择 IQ 文件开始解算".to_string(),
+            preview_mode: is_preview,
+            command_input,
+            command_palette_open: false,
+            command_highlight: None,
+            command_interceptor: None,
         };
         if let Some(settings) = app.selected_run().map(|run| run.settings.clone()) {
             app.settings = settings;
@@ -900,6 +971,7 @@ impl GnsscopeApp {
         if std::env::var_os("GNSSCOPE_AUTORUN").is_some() {
             app.enqueue(cx);
         }
+        app.install_command_interceptor(cx);
         app.schedule_poll(cx);
         app
     }
@@ -947,8 +1019,18 @@ impl GnsscopeApp {
         self.history_search.update(cx, |input, cx| {
             input.set_placeholder(
                 match language {
-                    InterfaceLanguage::SimplifiedChinese => "搜索文件名或路径",
-                    InterfaceLanguage::English => "Search file name or path",
+                    InterfaceLanguage::SimplifiedChinese => "筛选解算任务…",
+                    InterfaceLanguage::English => "Filter runs…",
+                },
+                window,
+                cx,
+            );
+        });
+        self.command_input.update(cx, |input, cx| {
+            input.set_placeholder(
+                match language {
+                    InterfaceLanguage::SimplifiedChinese => "搜索命令或解算任务…",
+                    InterfaceLanguage::English => "Search commands or runs…",
                 },
                 window,
                 cx,
@@ -1772,6 +1854,270 @@ impl GnsscopeApp {
         });
     }
 
+    // -----------------------------------------------------------------------
+    // ⌘K command palette state machine (issue 17 item 1)
+    // -----------------------------------------------------------------------
+
+    /// Palette result rows: global commands first, then run entries (active
+    /// run + history, capped). A run's hint is its localized status word; a
+    /// command's hint is a keyboard affordance or `None` (never fabricated).
+    fn palette_results(&self) -> Vec<(CommandResult, PaletteCommand)> {
+        let mut rows: Vec<(CommandResult, PaletteCommand)> = Vec::new();
+        let command = |rows: &mut Vec<(CommandResult, PaletteCommand)>,
+                       title: &'static str,
+                       hint: Option<&'static str>,
+                       command: PaletteCommand| {
+            rows.push((
+                CommandResult {
+                    title: title.to_string(),
+                    hint,
+                },
+                command,
+            ));
+        };
+        command(
+            &mut rows,
+            self.localized("新建分析", "New analysis"),
+            None,
+            PaletteCommand::NewAnalysis,
+        );
+        command(
+            &mut rows,
+            self.localized("运行库", "Run library"),
+            None,
+            PaletteCommand::OpenRunLibrary,
+        );
+        command(
+            &mut rows,
+            self.localized("工作台", "Workspace"),
+            None,
+            PaletteCommand::OpenWorkspace,
+        );
+        command(
+            &mut rows,
+            self.localized("界面设置", "Interface settings"),
+            None,
+            PaletteCommand::OpenInterfaceSettings,
+        );
+        command(
+            &mut rows,
+            self.localized("切换主题", "Toggle theme"),
+            None,
+            PaletteCommand::ToggleTheme,
+        );
+        if self.live_run_id.is_some() && self.selected_run_id != self.live_run_id {
+            command(
+                &mut rows,
+                self.localized("返回实时解算", "Return to live run"),
+                None,
+                PaletteCommand::ReturnToLive,
+            );
+        }
+        for run in self
+            .active_run
+            .iter()
+            .chain(self.history.iter())
+            .take(PALETTE_RUN_LIMIT)
+        {
+            let title = run
+                .source_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| run.source_path.display().to_string());
+            rows.push((
+                CommandResult {
+                    title,
+                    hint: Some(self.run_status_word(run.status)),
+                },
+                PaletteCommand::SelectRun(run.id),
+            ));
+        }
+        rows
+    }
+
+    /// Localized one-word run status, reused as the palette hint (never a fix
+    /// type or a `Debug` string).
+    fn run_status_word(&self, status: RunStatus) -> &'static str {
+        match status {
+            RunStatus::Completed => self.localized("已完成", "Completed"),
+            RunStatus::Failed => self.localized("失败", "Failed"),
+            RunStatus::Interrupted => self.localized("已中断", "Interrupted"),
+            RunStatus::Cancelled => self.localized("已取消", "Cancelled"),
+            RunStatus::Queued => self.localized("排队", "Queued"),
+            _ => self.localized("处理中", "Processing"),
+        }
+    }
+
+    /// The palette presentation snapshot for the current command input value.
+    fn palette_view(&self, window: &Window, cx: &App) -> CommandPaletteView {
+        let query = self.command_input.read(cx).value().to_string();
+        let search_focused = self.command_input.focus_handle(cx).is_focused(window);
+        CommandPaletteView {
+            query,
+            search_focused,
+            highlighted: self.command_highlight,
+            results: self
+                .palette_results()
+                .into_iter()
+                .map(|(result, _)| result)
+                .collect(),
+            zh: matches!(
+                self.interface_language,
+                InterfaceLanguage::SimplifiedChinese
+            ),
+        }
+    }
+
+    /// The commands backing each currently-visible (filtered) row, in render
+    /// order. Uses the same `matches_query` rule as the overlay so keyboard
+    /// and pointer selection resolve to the same target.
+    fn palette_filtered_commands(&self, cx: &App) -> Vec<PaletteCommand> {
+        let query = self.command_input.read(cx).value().to_string();
+        self.palette_results()
+            .into_iter()
+            .filter(|(result, _)| matches_query(&query, &result.title))
+            .map(|(_, command)| command)
+            .collect()
+    }
+
+    fn execute_palette_command(
+        &mut self,
+        command: PaletteCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            PaletteCommand::NewAnalysis => self.start_new_task(window, cx),
+            PaletteCommand::OpenRunLibrary => {
+                self.page = AppPage::RunLibrary;
+                self.compact_library_expanded = false;
+            }
+            PaletteCommand::OpenWorkspace => {
+                self.page = AppPage::Workspace;
+                self.side_drawer = None;
+            }
+            PaletteCommand::OpenInterfaceSettings => {
+                self.page = AppPage::InterfaceSettings;
+                self.side_drawer = None;
+                self.focused_plot = None;
+            }
+            PaletteCommand::ToggleTheme => {
+                let dark = match self.theme_preference {
+                    ThemePreference::System => self.system_dark,
+                    ThemePreference::Light => false,
+                    ThemePreference::Dark => true,
+                };
+                let next = if dark {
+                    ThemePreference::Light
+                } else {
+                    ThemePreference::Dark
+                };
+                self.set_theme_preference(next, window, cx);
+            }
+            PaletteCommand::ReturnToLive => self.return_to_live(window, cx),
+            PaletteCommand::SelectRun(id) => {
+                self.page = AppPage::Workspace;
+                self.select_run(id, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette_open {
+            self.close_command_palette(window, cx);
+        } else {
+            self.open_command_palette(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_palette_open = true;
+        self.command_highlight = Some(0);
+        // The real command input takes keyboard focus so typing filters the
+        // palette immediately.
+        self.command_input
+            .update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_palette_open = false;
+        self.command_highlight = None;
+        self.command_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+    }
+
+    fn move_command_highlight(&mut self, delta: i32, cx: &App) {
+        let count = self.palette_filtered_commands(cx).len();
+        if count == 0 {
+            self.command_highlight = None;
+            return;
+        }
+        let current = self.command_highlight.unwrap_or(0) as i32;
+        let next = (current + delta).clamp(0, count as i32 - 1);
+        self.command_highlight = Some(next as usize);
+    }
+
+    /// Registers the global ⌘K / Ctrl+K toggle plus the palette's Escape /
+    /// Up / Down / Enter keys while it is open (issue 17 item 1).
+    fn install_command_interceptor(&mut self, cx: &mut Context<Self>) {
+        let app = cx.weak_entity();
+        let interceptor = cx.intercept_keystrokes(move |event, window, cx| {
+            let Some(app) = app.upgrade() else {
+                return;
+            };
+            let keystroke = &event.keystroke;
+            let palette_toggle = keystroke.key.eq_ignore_ascii_case("k")
+                && (keystroke.modifiers.platform || keystroke.modifiers.control)
+                && !keystroke.modifiers.alt
+                && !keystroke.modifiers.shift;
+            app.update(cx, |this, cx| {
+                if palette_toggle {
+                    this.toggle_command_palette(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if !this.command_palette_open {
+                    return;
+                }
+                // Only own the navigation keys while the command input itself
+                // has focus; otherwise leave other inputs untouched.
+                if !this.command_input.focus_handle(cx).is_focused(window) {
+                    return;
+                }
+                match keystroke.key.as_str() {
+                    "escape" => {
+                        this.close_command_palette(window, cx);
+                        cx.stop_propagation();
+                    }
+                    "up" => {
+                        this.move_command_highlight(-1, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    "down" => {
+                        this.move_command_highlight(1, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    "enter" => {
+                        let command = this.command_highlight.and_then(|index| {
+                            this.palette_filtered_commands(cx).get(index).copied()
+                        });
+                        if let Some(command) = command {
+                            this.close_command_palette(window, cx);
+                            this.execute_palette_command(command, window, cx);
+                        }
+                        cx.stop_propagation();
+                    }
+                    _ => {}
+                }
+            });
+        });
+        self.command_interceptor = Some(interceptor);
+    }
+
     fn select_epoch_percent(&mut self, percent: f32) {
         let count = self.display_epochs().len();
         self.selected_epoch = epoch_index_for_percent(count, percent);
@@ -2142,11 +2488,21 @@ impl GnsscopeApp {
             this.focused_plot = None;
             cx.notify();
         }));
+        // The title-bar field is the real command input (issue 17 item 1): it
+        // owns keyboard focus and filters the ⌘K palette. Chrome (icon, ring,
+        // size) is title_bar's `command_field`'s job; keep the input itself
+        // transparent so the field styling shows through.
+        let command_input = Input::new(&self.command_input)
+            .w_full()
+            .bg(gpui_kit::transparent_black())
+            .border_color(gpui_kit::transparent_black())
+            .text_size(px(11.))
+            .text_color(palette.text);
         crate::ui::title_bar::render(
             selected_name,
             page_context,
             compact,
-            gnss_search_input(&self.history_search, palette).into_any_element(),
+            command_input.into_any_element(),
             settings_control.into_any_element(),
             palette,
         )
@@ -2606,12 +2962,35 @@ impl GnsscopeApp {
         run: &ProcessingRun,
         palette: Palette,
     ) -> crate::ui::run_rows::RunRowView {
-        let (status, status_color) = match run.status {
-            RunStatus::Completed => (self.localized("完成", "Completed"), palette.healthy),
-            RunStatus::Failed => (self.localized("失败", "Failed"), palette.danger),
-            RunStatus::Cancelled => (self.localized("已取消", "Cancelled"), palette.warning),
-            RunStatus::Interrupted => (self.localized("已中断", "Interrupted"), palette.warning),
-            _ => (self.localized("处理中", "Processing"), palette.accent),
+        // Source-file availability (issue 17 item 5): a persisted run whose
+        // source no longer exists still browses, but its row says 源不可用.
+        // Preview fixtures never touch the filesystem — their story paths are
+        // deterministic display data, so the check is skipped under
+        // GNSSCOPE_PREVIEW=1 (data-honesty: preview story only in preview).
+        let source_metadata = if self.preview_mode {
+            None
+        } else {
+            std::fs::metadata(&run.source_path).ok()
+        };
+        let source_missing = !self.preview_mode
+            && source_metadata.is_none()
+            && !matches!(run.status, RunStatus::Queued);
+        let (status, status_color) = if source_missing {
+            (
+                self.localized("源不可用", "Source unavailable"),
+                palette.warning,
+            )
+        } else {
+            match run.status {
+                RunStatus::Completed => (self.localized("已完成", "Completed"), palette.healthy),
+                RunStatus::Failed => (self.localized("失败", "Failed"), palette.danger),
+                RunStatus::Cancelled => (self.localized("已取消", "Cancelled"), palette.warning),
+                RunStatus::Interrupted => {
+                    (self.localized("已中断", "Interrupted"), palette.warning)
+                }
+                RunStatus::Queued => (self.localized("排队", "Queued"), palette.attention),
+                _ => (self.localized("处理中", "Processing"), palette.accent),
+            }
         };
         crate::ui::run_rows::RunRowView {
             id: run.id,
@@ -2627,6 +3006,9 @@ impl GnsscopeApp {
             elapsed: format_timeline_time(processing_run_elapsed_ms(run)),
             progress: run.progress,
             pvt_epoch_count: run.pvt_epoch_count,
+            samples_total: (run.total_samples > 0).then_some(run.total_samples),
+            size_bytes: source_metadata.as_ref().map(|metadata| metadata.len()),
+            source_path: Some(run.source_path.to_string_lossy().into_owned()),
             status,
             status_color,
             attention: matches!(run.status, RunStatus::Cancelled | RunStatus::Interrupted),
@@ -5469,24 +5851,67 @@ impl GnsscopeApp {
             })
             .unwrap_or(self.localized("未选择", "No run"));
         let status_text = status_label.to_string();
-        let run_metadata = selected_run
-            .map(|run| {
-                format!(
-                    "{}  ·  GPS L1 C/A  ·  {:.3} Msps  ·  IF {:.3} MHz  ·  {:?}",
-                    run.created_at.format("%H:%M:%S"),
-                    run.settings.sample_rate_hz / 1e6,
-                    run.settings.intermediate_frequency_hz / 1e6,
-                    run.settings.iq_format
-                )
-            })
-            .unwrap_or_else(|| {
-                format!(
-                    "GPS L1 C/A  ·  {:.3} Msps  ·  IF {:.3} MHz  ·  {:?}",
-                    self.settings.sample_rate_hz / 1e6,
-                    self.settings.intermediate_frequency_hz / 1e6,
-                    self.settings.iq_format
-                )
-            });
+        // Inline processing percentage (data 13px accent); only shown while
+        // the run is actually processing (spec §3.3).
+        let status_percent = selected_run
+            .filter(|run| matches!(run.status, RunStatus::Processing))
+            .map(|run| format!("{:.0}%", run.progress.clamp(0.0, 100.0)));
+        // Metadata segments: localized label + real value pairs (spec §3.3);
+        // missing segments are omitted, never zero-filled (spec §7.7).
+        let run_metadata = {
+            let mut segments: Vec<crate::ui::workbench::MetadataSegment> = Vec::new();
+            let (processed, total, rate_hz, if_hz) = selected_run.map_or(
+                (
+                    0,
+                    0,
+                    self.settings.sample_rate_hz,
+                    self.settings.intermediate_frequency_hz,
+                ),
+                |run| {
+                    (
+                        run.processed_samples,
+                        run.total_samples,
+                        run.settings.sample_rate_hz,
+                        run.settings.intermediate_frequency_hz,
+                    )
+                },
+            );
+            if let Some(run) = selected_run {
+                segments.push(crate::ui::workbench::MetadataSegment::new(
+                    self.localized("开始", "Started"),
+                    run.created_at.format("%H:%M:%S").to_string(),
+                ));
+            }
+            // Elapsed: active runs use the processed count, completed runs
+            // the full count; only emitted for a real, usable value.
+            let elapsed_samples = if selected_is_active {
+                processed
+            } else if selected_run.is_some() {
+                total
+            } else {
+                0
+            };
+            if let Some(elapsed) = crate::ui::workbench::format_elapsed(
+                self.localized("已用时", "Elapsed"),
+                elapsed_samples,
+                rate_hz,
+            ) {
+                segments.push(elapsed);
+            }
+            if total > 0 {
+                segments.push(crate::ui::workbench::format_sample_count(
+                    self.localized("采样数", "Samples"),
+                    total,
+                ));
+            }
+            if let Some(if_segment) = crate::ui::workbench::format_intermediate_frequency(
+                self.localized("中频", "IF"),
+                if_hz,
+            ) {
+                segments.push(if_segment);
+            }
+            segments
+        };
 
         div()
             .h(px(metrics::WORKSPACE_HEADER_HEIGHT))
@@ -5519,19 +5944,33 @@ impl GnsscopeApp {
                                             .when(compact, |this| {
                                                 this.h(px(20.)).overflow_hidden().text_size(px(14.))
                                             })
-                                            .when(!compact, |this| this.text_size(px(22.)))
+                                            // Run title: 20px semibold, not a
+                                            // 36px bold display size (spec §3.3).
+                                            .when(!compact, |this| {
+                                                this.text_size(px(20.))
+                                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                            })
                                             .font_family(data_font_family())
-                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                             .text_color(palette.text)
                                             .child(self.file_label()),
                                     )
                                     .child(div().size(px(6.)).rounded_full().bg(status_color))
                                     .children((!compact).then(|| {
                                         div()
-                                            .text_size(px(10.))
+                                            .flex()
+                                            .items_baseline()
+                                            .gap(px(6.))
+                                            .text_size(px(13.))
                                             .font_family(data_font_family())
                                             .text_color(status_color)
                                             .child(status_text)
+                                            .children(status_percent.map(|percent| {
+                                                div()
+                                                    .text_size(px(13.))
+                                                    .font_family(data_font_family())
+                                                    .text_color(palette.accent)
+                                                    .child(percent)
+                                            }))
                                     })),
                             )
                             .child(
@@ -5539,10 +5978,33 @@ impl GnsscopeApp {
                                     .mt(px(5.))
                                     .h(px(14.))
                                     .overflow_hidden()
-                                    .text_size(px(11.))
-                                    .font_family(data_font_family())
+                                    // Metadata line: labels in the metadata
+                                    // (interface) font, values in the data
+                                    // font, both 12px; separator tertiary
+                                    // (spec §3.3).
+                                    .flex()
+                                    .items_baseline()
+                                    .gap(px(4.))
+                                    .text_size(px(12.))
                                     .text_color(palette.muted)
-                                    .child(run_metadata),
+                                    .children(run_metadata.iter().enumerate().flat_map(
+                                        |(index, segment)| {
+                                            let separator = (index > 0).then(|| {
+                                                div()
+                                                    .font_family(data_font_family())
+                                                    .text_color(palette.faint)
+                                                    .child(crate::ui::workbench::SEGMENT_SEPARATOR)
+                                            });
+                                            separator.into_iter().chain([
+                                                div()
+                                                    .font_family(interface_font_family())
+                                                    .child(segment.label),
+                                                div()
+                                                    .font_family(data_font_family())
+                                                    .child(segment.value.clone()),
+                                            ])
+                                        },
+                                    )),
                             ),
                     )
                     .children((self.active_run.is_some() && !self.follow_live).then(|| {
@@ -5771,88 +6233,53 @@ impl GnsscopeApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let pvt = self.current_pvt();
-        let valid_pvt = pvt.filter(|pvt| pvt_position_is_displayable(pvt));
-        let latitude = valid_pvt
-            .map(|p| format!("{:.7}", p.latitude_deg))
-            .unwrap_or_else(|| "--".to_string());
-        let longitude = valid_pvt
-            .map(|p| format!("{:.7}", p.longitude_deg))
-            .unwrap_or_else(|| "--".to_string());
-        let altitude = valid_pvt
-            .map(|p| format!("{:.2}", p.altitude_m))
-            .unwrap_or_else(|| "--".to_string());
-        let gps_time = pvt
-            .map(|p| {
-                format!(
-                    "W{} / {}",
-                    p.time
-                        .gps_week
-                        .map(|week| week.to_string())
-                        .unwrap_or_else(|| "--".to_string()),
-                    p.time
-                        .receiver_time_sow
-                        .map(|sow| format!("{sow:.3}"))
-                        .unwrap_or_else(|| "--".to_string())
-                )
-            })
-            .unwrap_or_else(|| "--".to_string());
-        let ecef = valid_pvt.map(|p| p.ecef_m);
-        let velocity_enu = valid_pvt
-            .and_then(|p| p.velocity.as_ref())
-            .map(|v| {
-                format!(
-                    "{:+.3} / {:+.3} / {:+.3}",
-                    v.east_mps, v.north_mps, v.up_mps
-                )
-            })
-            .unwrap_or_else(|| "--".to_string());
-        let speed = valid_pvt
-            .and_then(|p| p.velocity.as_ref())
-            .map(|v| format!("{:.3}", v.speed_mps))
-            .unwrap_or_else(|| "--".to_string());
-        let clock = valid_pvt
-            .map(|p| {
-                format!(
-                    "{:+.3} / {}",
-                    p.time.receiver_clock_bias_us,
-                    p.time
-                        .receiver_clock_drift_ppm
-                        .map(|value| format!("{value:+.5}"))
-                        .unwrap_or_else(|| "--".to_string())
-                )
-            })
-            .unwrap_or_else(|| "--".to_string());
-        let dops = valid_pvt
-            .map(|p| format!("{:.2} / {:.2}", p.quality.gdop, p.quality.hdop))
-            .unwrap_or_else(|| "--".to_string());
-        let fix_type = pvt
-            .map(|p| format!("{:?}", p.solution_kind))
-            .unwrap_or_else(|| "--".to_string());
-        let satellites_used = valid_pvt
-            .map(|p| format!("{} / {}", p.quality.used_prns.len(), p.satellites.len()))
-            .unwrap_or_else(|| "--".to_string());
-        let residual_quality = valid_pvt
-            .map(|p| {
-                format!(
-                    "{:.2} / {:.2}",
-                    p.quality.residual_rms_m, p.quality.horizontal_sigma_m
-                )
-            })
-            .unwrap_or_else(|| "--".to_string());
+        // The frozen 15-row table contract (five columns, full-precision
+        // values, honest "—" cells, quiet 有效/不可用/无效 status) lives in
+        // `plots::pvt` (design-refresh spec §3.8); this slice only supplies
+        // the selected-epoch data and the pane chrome.
+        let table = crate::plots::pvt::summary_table(
+            crate::plots::pvt::SummaryInput {
+                pvt,
+                position_displayable: pvt.is_some_and(pvt_position_is_displayable),
+                preview: crate::plots::pvt::preview_mode(),
+            },
+            palette,
+        );
         div()
             .bg(palette.surface)
             .border_1()
             .border_color(palette.border)
-            .p(px(10.))
             .child(
                 div()
+                    .h(px(metrics::PLOT_PANE_HEADER_HEIGHT))
+                    .px(px(10.))
                     .flex()
-                    .items_start()
+                    .items_center()
                     .justify_between()
-                    .child(Self::section_title(
-                        self.localized("PVT 解算", "PVT solution"),
-                        palette,
-                    ))
+                    .bg(palette.surface_alt)
+                    .border_b_1()
+                    .border_color(palette.border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(6.))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(13.))
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .text_color(palette.muted)
+                                    .child(self.localized("PVT 解算", "PVT solution")),
+                            )
+                            .child(div().text_size(px(11.)).text_color(palette.faint).child(
+                                self.localized(
+                                    "（最终选中解 · 选中 epoch）",
+                                    "(final selected solution · selected epoch)",
+                                ),
+                            )),
+                    )
                     .child(
                         GnssButton::icon_only(
                             "candidate-comparison",
@@ -5871,125 +6298,7 @@ impl GnsscopeApp {
                         })),
                     ),
             )
-            .child(
-                div()
-                    .mt(px(6.))
-                    .h(px(24.))
-                    .px(px(8.))
-                    .flex()
-                    .items_center()
-                    .bg(palette.surface_alt)
-                    .border_1()
-                    .border_color(palette.border)
-                    .text_size(px(10.))
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .text_color(palette.muted)
-                    .child(div().w(px(96.)).child("PARAMETER"))
-                    .child(div().flex_1().child("VALUE"))
-                    .child(div().w(px(52.)).child("UNITS"))
-                    .child(div().w(px(44.)).text_right().child("STATUS")),
-            )
-            .child(pvt_table_row(
-                self.localized("GPS 时间", "GPS time"),
-                gps_time,
-                "week / s",
-                pvt.is_some(),
-                palette,
-            ))
-            .child(pvt_table_row(
-                "Position X (ECEF)",
-                ecef.map(|position| format!("{:.3}", position[0]))
-                    .unwrap_or_else(|| "--".to_string()),
-                "m",
-                valid_pvt.is_some(),
-                palette,
-            ))
-            .child(pvt_table_row(
-                "Position Y (ECEF)",
-                ecef.map(|position| format!("{:.3}", position[1]))
-                    .unwrap_or_else(|| "--".to_string()),
-                "m",
-                valid_pvt.is_some(),
-                palette,
-            ))
-            .child(pvt_table_row(
-                "Position Z (ECEF)",
-                ecef.map(|position| format!("{:.3}", position[2]))
-                    .unwrap_or_else(|| "--".to_string()),
-                "m",
-                valid_pvt.is_some(),
-                palette,
-            ))
-            .child(pvt_table_row(
-                self.localized("纬度", "Latitude"),
-                latitude,
-                "deg",
-                valid_pvt.is_some(),
-                palette,
-            ))
-            .child(pvt_table_row(
-                self.localized("经度", "Longitude"),
-                longitude,
-                "deg",
-                valid_pvt.is_some(),
-                palette,
-            ))
-            .child(pvt_table_row(
-                self.localized("椭球高", "Ellipsoid height"),
-                altitude,
-                "m",
-                valid_pvt.is_some(),
-                palette,
-            ))
-            .child(pvt_table_row(
-                self.localized("速度 E / N / U", "Velocity E / N / U"),
-                velocity_enu,
-                "m/s",
-                valid_pvt.is_some(),
-                palette,
-            ))
-            .child(pvt_table_row(
-                self.localized("三维速度", "3D speed"),
-                speed,
-                "m/s",
-                valid_pvt.is_some(),
-                palette,
-            ))
-            .child(pvt_table_row(
-                self.localized("接收机钟漂", "Clock drift"),
-                clock,
-                "µs / ppm",
-                valid_pvt.is_some(),
-                palette,
-            ))
-            .child(pvt_table_row(
-                "GDOP / HDOP",
-                dops,
-                "- / -",
-                valid_pvt.is_some(),
-                palette,
-            ))
-            .child(pvt_table_row(
-                self.localized("定位类型", "Fix type"),
-                fix_type,
-                "-",
-                valid_pvt.is_some(),
-                palette,
-            ))
-            .child(pvt_table_row(
-                self.localized("使用 / 可见卫星", "SV used / visible"),
-                satellites_used,
-                "SV",
-                valid_pvt.is_some(),
-                palette,
-            ))
-            .child(pvt_table_row(
-                self.localized("残差 RMS / 水平 σ", "Residual RMS / H σ"),
-                residual_quality,
-                "m / m",
-                valid_pvt.is_some(),
-                palette,
-            ))
+            .child(table)
             .into_any_element()
     }
 
@@ -6584,30 +6893,38 @@ impl GnsscopeApp {
             .map(|pvt| pvt.satellites.as_slice())
             .unwrap_or(&[]);
         let _ = viewport_height;
+        // Real C/N0 history window for pane subtitles (never a story value).
+        let cn0_history_s =
+            crate::plots::cn0::history_seconds(epoch_channels.len(), epoch_period_ms);
+        let cn0_subtitle = Some(SharedString::from(format!("（过去 {cn0_history_s} s）")));
         if let Some(focus) = self.focused_plot {
-            let (title, plot) = match focus {
+            let (title, subtitle, plot, extra_controls) = match focus {
                 PlotFocus::Sky => (
                     "卫星天空图".to_string(),
-                    sky_plot(
+                    Some(SharedString::from("（选中 epoch）")),
+                    crate::plots::sky::render(
                         satellites,
                         channels,
                         self.hovered_prn,
                         self.pinned_prn,
                         palette,
                         cx,
-                    )
-                    .into_any_element(),
+                    ),
+                    Vec::new(),
                 ),
                 PlotFocus::Position => (
                     "ENU 位置 (m)".to_string(),
-                    position_plot(epochs, self.selected_epoch, palette).into_any_element(),
+                    Some(SharedString::from("（最终选中解）")),
+                    crate::plots::enu::render(epochs, self.selected_epoch, palette),
+                    Vec::new(),
                 ),
                 PlotFocus::Cn0 => (
                     "C/N0 (dB-Hz) · GPS L1 C/A".to_string(),
-                    cn0_plot(
+                    cn0_subtitle.clone(),
+                    crate::plots::cn0::render(
                         epoch_channels,
                         channels,
-                        Cn0PlotSelection {
+                        crate::plots::cn0::Cn0PlotSelection {
                             epoch_period_ms,
                             selected_epoch: self.selected_epoch,
                             hovered_prn: self.hovered_prn,
@@ -6615,22 +6932,35 @@ impl GnsscopeApp {
                         },
                         palette,
                         cx,
-                    )
-                    .into_any_element(),
+                    ),
+                    vec![crate::plots::cn0::scale_control(palette)],
                 ),
                 PlotFocus::Velocity => (
                     "速度与钟漂".to_string(),
+                    None,
                     velocity_plot(epochs, self.selected_epoch, palette).into_any_element(),
+                    Vec::new(),
                 ),
                 PlotFocus::Altitude => (
                     "高度历史 (m)".to_string(),
+                    None,
                     altitude_plot(epochs, self.selected_epoch, palette).into_any_element(),
+                    Vec::new(),
                 ),
             };
             return div()
                 .px(px(12.))
                 .pb(px(20.))
-                .child(self.plot_panel(title, plot, palette, focus, PlotPanelLayout::Expanded, cx))
+                .child(self.plot_panel(
+                    title,
+                    subtitle,
+                    plot,
+                    palette,
+                    focus,
+                    PlotPanelLayout::Expanded,
+                    extra_controls,
+                    cx,
+                ))
                 .into_any_element();
         }
         let content = match self.workspace_view {
@@ -6640,7 +6970,8 @@ impl GnsscopeApp {
                 .gap(px(metrics::PLOT_GRID_GAP))
                 .child(self.plot_panel(
                     "卫星天空图",
-                    sky_plot(
+                    Some(SharedString::from("（选中 epoch）")),
+                    crate::plots::sky::render(
                         satellites,
                         channels,
                         self.hovered_prn,
@@ -6651,23 +6982,27 @@ impl GnsscopeApp {
                     palette,
                     PlotFocus::Sky,
                     PlotPanelLayout::Standard,
+                    Vec::new(),
                     cx,
                 ))
                 .child(self.plot_panel(
                     "ENU 位置 (m)",
-                    position_plot(epochs, self.selected_epoch, palette),
+                    Some(SharedString::from("（最终选中解）")),
+                    crate::plots::enu::render(epochs, self.selected_epoch, palette),
                     palette,
                     PlotFocus::Position,
                     PlotPanelLayout::Standard,
+                    Vec::new(),
                     cx,
                 ))
                 .child(self.render_pvt_summary(palette, false, cx))
                 .child(self.plot_panel(
                     "C/N0 (dB-Hz) · GPS L1 C/A",
-                    cn0_plot(
+                    cn0_subtitle.clone(),
+                    crate::plots::cn0::render(
                         epoch_channels,
                         channels,
-                        Cn0PlotSelection {
+                        crate::plots::cn0::Cn0PlotSelection {
                             epoch_period_ms,
                             selected_epoch: self.selected_epoch,
                             hovered_prn: self.hovered_prn,
@@ -6679,16 +7014,18 @@ impl GnsscopeApp {
                     palette,
                     PlotFocus::Cn0,
                     PlotPanelLayout::Standard,
+                    vec![crate::plots::cn0::scale_control(palette)],
                     cx,
                 ))
                 .into_any_element(),
             WorkspaceView::Channels => div()
                 .child(self.plot_panel(
                     "稳定通道 C/N0 历史",
-                    cn0_plot(
+                    cn0_subtitle.clone(),
+                    crate::plots::cn0::render(
                         epoch_channels,
                         channels,
-                        Cn0PlotSelection {
+                        crate::plots::cn0::Cn0PlotSelection {
                             epoch_period_ms,
                             selected_epoch: self.selected_epoch,
                             hovered_prn: self.hovered_prn,
@@ -6700,6 +7037,7 @@ impl GnsscopeApp {
                     palette,
                     PlotFocus::Cn0,
                     PlotPanelLayout::Standard,
+                    vec![crate::plots::cn0::scale_control(palette)],
                     cx,
                 ))
                 .child(div().mt(px(6.)).child(self.render_channel_table(palette)))
@@ -6707,10 +7045,12 @@ impl GnsscopeApp {
             WorkspaceView::Position => div()
                 .child(self.plot_panel(
                     "ENU 位置 (m)",
-                    position_plot(epochs, self.selected_epoch, palette),
+                    Some(SharedString::from("（最终选中解）")),
+                    crate::plots::enu::render(epochs, self.selected_epoch, palette),
                     palette,
                     PlotFocus::Position,
                     PlotPanelLayout::Standard,
+                    Vec::new(),
                     cx,
                 ))
                 .child(
@@ -6721,18 +7061,22 @@ impl GnsscopeApp {
                         .gap(px(6.))
                         .child(self.plot_panel(
                             "速度与钟漂",
+                            None,
                             velocity_plot(epochs, self.selected_epoch, palette),
                             palette,
                             PlotFocus::Velocity,
                             PlotPanelLayout::Standard,
+                            Vec::new(),
                             cx,
                         ))
                         .child(self.plot_panel(
                             "高度历史 (m)",
+                            None,
                             altitude_plot(epochs, self.selected_epoch, palette),
                             palette,
                             PlotFocus::Altitude,
                             PlotPanelLayout::Standard,
+                            Vec::new(),
                             cx,
                         )),
                 )
@@ -7177,25 +7521,39 @@ impl GnsscopeApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = self.active_run.as_ref();
-        let tracking_count = self
-            .channels
+        // Middle segment shows the SELECTED run's current selected epoch, not
+        // the live worker state (issue 17 item 3): browsing history while
+        // another run processes must not leak live counts/settings.
+        let display_channels = self.display_channels();
+        let tracking_count = display_channels
             .iter()
             .filter(|channel| channel.tracking_locked)
             .count();
-        let nav_count = self
-            .channels
+        let nav_count = display_channels
             .iter()
             .filter(|channel| channel.nav_locked)
             .count();
-        let fix_label = self
-            .epochs
-            .last()
-            .map(|pvt| format!("{:?}", pvt.solution_kind))
-            .unwrap_or_else(|| "No fix".to_string());
+        // Sample rate comes from the selected run's persisted snapshot; the
+        // editor settings are only a fallback when no run is selected.
+        let rate_hz = self
+            .selected_run()
+            .map(|run| run.settings.sample_rate_hz)
+            .unwrap_or(self.settings.sample_rate_hz);
+        // Honest fix type: the real 2D/3D fix derived from the selected
+        // epoch's outputs, or the unavailable fallback. The candidate kind
+        // (Raw/Smoothed/Kalman) is never presented as a fix type, and an
+        // unconverged selection is never colored healthy (spec §2.5).
+        let (fix_label, fix_color) = match self.current_pvt().and_then(|pvt| pvt.fix_type()) {
+            Some(fix) => (fix.label().to_string(), palette.healthy),
+            None => (
+                self.localized("不可用", "Unavailable").to_string(),
+                palette.muted,
+            ),
+        };
         let active_label = active
             .map(|run| {
                 format!(
-                    "{}  {:.0}%",
+                    "{} {:.0}%",
                     self.localized("处理中", "Running"),
                     run.progress * 100.0
                 )
@@ -7225,6 +7583,14 @@ impl GnsscopeApp {
             }
             cx.notify();
         }));
+        // A selection without any channel/PVT data renders "—" (the strip's
+        // empty-value fallback) instead of a fabricated 0 (spec §7).
+        let selected_context = !display_channels.is_empty() || self.current_pvt().is_some();
+        let (tracking_value, nav_value) = if selected_context {
+            (tracking_count.to_string(), nav_count.to_string())
+        } else {
+            (String::new(), String::new())
+        };
         crate::ui::status_strip::render(
             palette,
             toggle.into_any_element(),
@@ -7241,32 +7607,33 @@ impl GnsscopeApp {
                 ("SIGNAL", "GPS L1 C/A".to_string(), palette.text),
                 (
                     "RATE",
-                    format!("{:.3} MHz", self.settings.sample_rate_hz / 1e6),
+                    if selected_context {
+                        format!("{:.3} MHz", rate_hz / 1e6)
+                    } else {
+                        String::new()
+                    },
                     palette.text,
                 ),
-                ("TRACK", tracking_count.to_string(), palette.text),
-                ("NAV", nav_count.to_string(), palette.text),
-                (
-                    "FIX",
-                    fix_label,
-                    if self.epochs.is_empty() {
-                        palette.muted
-                    } else {
-                        palette.healthy
-                    },
-                ),
+                ("TRACK", tracking_value, palette.text),
+                ("NAV", nav_value, palette.text),
+                ("FIX", fix_label, fix_color),
             ],
             self.status_message.clone(),
         )
     }
 
+    // Pane composition takes title/subtitle/plot/controls plus focus state;
+    // eight positional arguments match the existing section-helper style.
+    #[allow(clippy::too_many_arguments)]
     fn plot_panel(
         &self,
         title: impl Into<SharedString>,
+        subtitle: Option<SharedString>,
         plot: impl IntoElement,
         palette: Palette,
         focus: PlotFocus,
         layout: PlotPanelLayout,
+        extra_controls: Vec<AnyElement>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let expanded = matches!(layout, PlotPanelLayout::Expanded);
@@ -7290,12 +7657,14 @@ impl GnsscopeApp {
             this.focused_plot = if expanded { None } else { Some(focus) };
             cx.notify();
         }));
-        crate::ui::plot_frame::render(
-            Self::section_title(title, palette).into_any_element(),
+        let mut controls = extra_controls;
+        controls.push(focus_control.into_any_element());
+        crate::plots::frame::render(
+            title,
+            subtitle,
             plot.into_any_element(),
-            focus_control.into_any_element(),
+            controls,
             expanded,
-            focus == PlotFocus::Position,
             palette,
         )
     }
@@ -7391,7 +7760,7 @@ impl Render for GnsscopeApp {
             .show_runs_dock
             .then(|| self.render_runs_dock(palette, shell_layout.runs_dock_replaces_content, cx));
         let body = shell_body(runs_dock, shell_layout.show_content.then_some(page_content));
-        shell_root(
+        let root = shell_root(
             palette,
             self.render_title_bar(palette, compact, cx)
                 .into_any_element(),
@@ -7403,7 +7772,42 @@ impl Render for GnsscopeApp {
                 cx,
             )
             .into_any_element(),
-        )
+        );
+        // ⌘K palette overlay (issue 17 item 1): a floating layer anchored just
+        // under the title bar, horizontally centered on a 420px column. The
+        // shell stays the layout root; the overlay is a sibling it never
+        // reflows.
+        if self.command_palette_open {
+            let view = self.palette_view(window, cx);
+            let app = cx.entity();
+            let on_select: CommandPaletteSelect = std::rc::Rc::new(move |index, window, cx| {
+                app.update(cx, |this, cx| {
+                    let command = this.palette_filtered_commands(cx).get(index).copied();
+                    if let Some(command) = command {
+                        this.close_command_palette(window, cx);
+                        this.execute_palette_command(command, window, cx);
+                    }
+                });
+            });
+            let palette_width = crate::ui::overlays::OVERLAY_WIDTH;
+            let left = ((viewport_width - palette_width) / 2.0).max(0.0);
+            div()
+                .size_full()
+                .relative()
+                .child(root)
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(metrics::TITLE_BAR_HEIGHT + 4.0))
+                        .left(px(left))
+                        .child(crate::ui::overlays::command_palette(
+                            &view, palette, on_select,
+                        )),
+                )
+                .into_any_element()
+        } else {
+            root
+        }
     }
 }
 
@@ -7435,67 +7839,6 @@ fn processing_run_elapsed_ms(run: &ProcessingRun) -> u64 {
         return 0;
     }
     ((run.processed_samples as f64 / run.settings.sample_rate_hz) * 1_000.0) as u64
-}
-
-fn format_timeline_offset(milliseconds: u64) -> String {
-    let seconds = milliseconds / 1_000;
-    let hours = seconds / 3_600;
-    let minutes = (seconds % 3_600) / 60;
-    let seconds = seconds % 60;
-    if hours > 0 {
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes:02}:{seconds:02}")
-    }
-}
-
-fn pvt_table_row(
-    label: &'static str,
-    value: String,
-    units: &'static str,
-    valid: bool,
-    palette: Palette,
-) -> impl IntoElement {
-    div()
-        .h(px(22.))
-        .px(px(8.))
-        .flex()
-        .items_center()
-        .border_l_1()
-        .border_r_1()
-        .border_b_1()
-        .border_color(palette.border)
-        .text_size(px(10.))
-        .child(div().w(px(96.)).text_color(palette.muted).child(label))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .font_family(data_font_family())
-                .text_color(palette.text)
-                .child(value),
-        )
-        .child(
-            div()
-                .w(px(52.))
-                .font_family(data_font_family())
-                .text_color(palette.muted)
-                .child(units),
-        )
-        .child(
-            div()
-                .w(px(44.))
-                .text_right()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .text_color(if valid {
-                    palette.healthy
-                } else {
-                    palette.muted
-                })
-                .child(if valid { "VALID" } else { "--" }),
-        )
 }
 
 fn table_cell(
@@ -7622,19 +7965,24 @@ fn preview_epoch_history() -> (Vec<GuiPvtViewModel>, Vec<Vec<GuiChannelStatus>>)
         .first()
         .cloned()
         .expect("sample preview must provide at least one channel");
+    // Preview story (spec §3.0): nine tracked channels, seven of them
+    // navigation-locked — gives the C/N0 pane its full nine-lane grid and the
+    // sky plot seven PVT rings. Story values exist only under preview mode.
     base_channels.extend(
         [
-            (3, 42.6, -1_253.7, Some(0.024)),
-            (8, 44.8, 2_180.0, Some(-0.031)),
-            (22, 39.5, -3_420.0, Some(0.087)),
+            (3, 42.6, -1_253.7, Some(0.024), true),
+            (8, 44.8, 2_180.0, Some(-0.031), true),
+            (22, 39.5, -3_420.0, Some(0.087), false),
+            (5, 41.2, -1_100.0, Some(0.045), false),
         ]
         .into_iter()
         .map(
-            |(prn, cn0_db_hz, doppler_hz, residual_m)| GuiChannelStatus {
+            |(prn, cn0_db_hz, doppler_hz, residual_m, nav_locked)| GuiChannelStatus {
                 prn,
                 cn0_db_hz,
                 doppler_hz,
                 residual_m,
+                nav_locked,
                 ..template.clone()
             },
         ),
@@ -7642,8 +7990,8 @@ fn preview_epoch_history() -> (Vec<GuiPvtViewModel>, Vec<Vec<GuiChannelStatus>>)
     let epoch_count = 769;
     let latitude_scale_m = 111_111.0;
     let longitude_scale_m = latitude_scale_m * base_epoch.latitude_deg.to_radians().cos();
-    let preview_azimuths = [338.0, 258.0, 112.0, 24.0, 198.0, 78.0, 146.0, 304.0];
-    let preview_elevations = [68.0, 42.0, 31.0, 53.0, 24.0, 61.0, 37.0, 47.0];
+    let preview_azimuths = [338.0, 258.0, 112.0, 24.0, 198.0, 78.0, 146.0, 304.0, 210.0];
+    let preview_elevations = [68.0, 42.0, 31.0, 53.0, 24.0, 61.0, 37.0, 47.0, 29.0];
     let epochs = (0..epoch_count)
         .map(|index| {
             let phase = index as f64 * 0.055;
@@ -7975,636 +8323,7 @@ fn format_prns(prns: &[u8]) -> String {
         .join(" · ")
 }
 
-#[derive(Clone, Copy)]
-struct SkyMarker {
-    prn: u8,
-    x: f32,
-    y: f32,
-    color: Hsla,
-    azimuth_deg: f64,
-    elevation_deg: f64,
-    residual_m: f64,
-    cn0_db_hz: Option<f64>,
-    used_in_solution: bool,
-}
-
-fn sky_plot(
-    satellites: &[GuiSatelliteGeometry],
-    channels: &[GuiChannelStatus],
-    hovered_prn: Option<u8>,
-    pinned_prn: Option<u8>,
-    palette: Palette,
-    cx: &mut Context<GnsscopeApp>,
-) -> impl IntoElement {
-    let markers = satellites
-        .iter()
-        .filter_map(|satellite| {
-            let (x, y) = sky_plot_position(satellite.azimuth_deg, satellite.elevation_deg)?;
-            let channel = channels.iter().find(|channel| channel.prn == satellite.prn);
-            let marker_color = if satellite.raim_excluded {
-                palette.danger
-            } else if channel.is_some_and(|channel| channel.tracking_locked)
-                && satellite.used_in_solution
-            {
-                palette.healthy
-            } else if channel.is_some() {
-                palette.warning
-            } else {
-                palette.muted
-            };
-            Some(SkyMarker {
-                prn: satellite.prn,
-                x,
-                y,
-                color: marker_color,
-                azimuth_deg: satellite.azimuth_deg,
-                elevation_deg: satellite.elevation_deg,
-                residual_m: satellite.residual_m,
-                cn0_db_hz: channel.map(|channel| channel.cn0_db_hz),
-                used_in_solution: satellite.used_in_solution,
-            })
-        })
-        .collect::<Vec<_>>();
-    let geometry_available = !markers.is_empty();
-    let active_prn = hovered_prn.or(pinned_prn);
-    let active_marker = active_prn.and_then(|prn| markers.iter().find(|marker| marker.prn == prn));
-    let detail = active_marker.map(|marker| {
-        format!(
-            "PRN {:02}  ·  C/N0 {}  ·  方位 {:.1}°  ·  仰角 {:.1}°  ·  残差 {:+.2} m{}",
-            marker.prn,
-            marker
-                .cn0_db_hz
-                .map(|value| format!("{value:.1} dB-Hz"))
-                .unwrap_or_else(|| "--".to_string()),
-            marker.azimuth_deg,
-            marker.elevation_deg,
-            marker.residual_m,
-            if marker.used_in_solution {
-                "  ·  PVT"
-            } else {
-                ""
-            },
-        )
-    });
-
-    div()
-        .size_full()
-        .relative()
-        .flex()
-        .justify_start()
-        .items_center()
-        .pl(px(12.))
-        .child(
-            div()
-                .relative()
-                .w(px(260.))
-                .h(px(260.))
-                .child(
-                    canvas(
-                        move |_, _, _| {},
-                        move |plot_bounds, _, window, _| {
-                            let diameter = plot_bounds.size.width.min(plot_bounds.size.height)
-                                * SKY_PLOT_DIAMETER_FRACTION;
-                            let origin = point(
-                                plot_bounds.origin.x + (plot_bounds.size.width - diameter) / 2.,
-                                plot_bounds.origin.y + (plot_bounds.size.height - diameter) / 2.,
-                            );
-                            for ratio in [1.0_f32, 5.0 / 6.0, 2.0 / 3.0, 0.5, 1.0 / 3.0, 1.0 / 6.0]
-                            {
-                                let ring_diameter = diameter * ratio;
-                                let ring = Bounds {
-                                    origin: point(
-                                        origin.x + (diameter - ring_diameter) / 2.,
-                                        origin.y + (diameter - ring_diameter) / 2.,
-                                    ),
-                                    size: size(ring_diameter, ring_diameter),
-                                };
-                                window.paint_quad(quad(
-                                    ring,
-                                    ring_diameter / 2.,
-                                    palette.surface,
-                                    px(1.),
-                                    if ratio == 1.0 {
-                                        palette.muted.opacity(0.9)
-                                    } else {
-                                        palette.border.opacity(0.72)
-                                    },
-                                    Default::default(),
-                                ));
-                            }
-                            let center_x = origin.x + diameter / 2.;
-                            let center_y = origin.y + diameter / 2.;
-                            let radius = diameter / 2.;
-                            for spoke in 0..8 {
-                                let angle = spoke as f32 * std::f32::consts::FRAC_PI_4;
-                                let end = point(
-                                    center_x + radius * angle.sin(),
-                                    center_y - radius * angle.cos(),
-                                );
-                                let mut builder = PathBuilder::stroke(px(if spoke % 2 == 0 {
-                                    1.0
-                                } else {
-                                    0.75
-                                }));
-                                builder.move_to(point(center_x, center_y));
-                                builder.line_to(end);
-                                if let Ok(path) = builder.build() {
-                                    window.paint_path(
-                                        path,
-                                        palette.border.opacity(if spoke % 2 == 0 {
-                                            0.82
-                                        } else {
-                                            0.5
-                                        }),
-                                    );
-                                }
-                            }
-                        },
-                    )
-                    .size_full(),
-                )
-                .children(markers.into_iter().map(move |marker| {
-                    let prn = marker.prn;
-                    let active = active_prn == Some(prn);
-                    div()
-                        .id(SharedString::from(format!("sky-prn-{prn}")))
-                        .absolute()
-                        .left(gpui_kit::relative(marker.x))
-                        .top(gpui_kit::relative(marker.y))
-                        .ml(px(-19.))
-                        .mt(px(-14.))
-                        .w(px(38.))
-                        .h(px(28.))
-                        .flex()
-                        .items_start()
-                        .justify_center()
-                        .cursor_pointer()
-                        .on_hover(cx.listener(move |this, hovered, _, cx| {
-                            if *hovered {
-                                this.hovered_prn = Some(prn);
-                            } else if this.hovered_prn == Some(prn) {
-                                this.hovered_prn = None;
-                            }
-                            cx.notify();
-                        }))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.pinned_prn = (this.pinned_prn != Some(prn)).then_some(prn);
-                            cx.notify();
-                        }))
-                        .child(
-                            div()
-                                .mt(px(9.))
-                                .size(if active { px(12.) } else { px(10.) })
-                                .rounded_full()
-                                .bg(marker.color)
-                                .border_1()
-                                .border_color(if active {
-                                    palette.text
-                                } else {
-                                    marker.color.opacity(0.6)
-                                }),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .top(px(18.))
-                                .w_full()
-                                .text_center()
-                                .text_size(px(10.))
-                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                .text_color(if active { palette.accent } else { palette.text })
-                                .child(format!("G{:02}", marker.prn)),
-                        )
-                }))
-                .child(cardinal_label("N", 0.5, 0.0, palette))
-                .child(cardinal_label("E", 1.0, 0.5, palette))
-                .child(cardinal_label("S", 0.5, 1.0, palette))
-                .child(cardinal_label("W", 0.0, 0.5, palette))
-                .child(sky_elevation_label("75°", 0.57, palette))
-                .child(sky_elevation_label("60°", 0.64, palette))
-                .child(sky_elevation_label("45°", 0.71, palette))
-                .child(sky_elevation_label("30°", 0.78, palette))
-                .child(sky_elevation_label("15°", 0.85, palette)),
-        )
-        .child(
-            div()
-                .absolute()
-                .right(px(8.))
-                .top(px(18.))
-                .w(px(94.))
-                .text_size(px(9.))
-                .text_color(palette.muted)
-                .child(
-                    div()
-                        .mb(px(5.))
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .child("ELEVATION (°)"),
-                )
-                .child(sky_legend_row("75–90", palette.chart_series[0], palette))
-                .child(sky_legend_row("60–75", palette.chart_series[5], palette))
-                .child(sky_legend_row("45–60", palette.chart_series[1], palette))
-                .child(sky_legend_row("30–45", palette.chart_series[3], palette))
-                .child(sky_legend_row("15–30", palette.muted, palette))
-                .child(sky_legend_row("0–15", palette.border, palette))
-                .child(
-                    div()
-                        .mt(px(8.))
-                        .pt(px(6.))
-                        .border_t_1()
-                        .border_color(palette.border)
-                        .child(sky_legend_row("PVT / TRACK", palette.healthy, palette))
-                        .child(sky_legend_row("ACQUIRED", palette.warning, palette)),
-                ),
-        )
-        .children((!geometry_available).then(|| {
-            div()
-                .absolute()
-                .bottom(px(4.))
-                .w_full()
-                .text_center()
-                .text_size(px(10.))
-                .text_color(palette.muted)
-                .child("当前 epoch 无卫星方位角/仰角")
-        }))
-        .children(detail.map(|detail| {
-            div()
-                .absolute()
-                .bottom(px(0.))
-                .left_0()
-                .right_0()
-                .text_center()
-                .text_size(px(9.))
-                .text_color(palette.text)
-                .child(detail)
-        }))
-}
-
-const SKY_PLOT_RADIUS_FRACTION: f32 = 0.48;
-const SKY_PLOT_DIAMETER_FRACTION: f32 = SKY_PLOT_RADIUS_FRACTION * 2.0;
-
-fn sky_plot_position(azimuth_deg: f64, elevation_deg: f64) -> Option<(f32, f32)> {
-    if !azimuth_deg.is_finite()
-        || !elevation_deg.is_finite()
-        || !(0.0..=90.0).contains(&elevation_deg)
-    {
-        return None;
-    }
-    let radial_fraction = ((90.0 - elevation_deg) / 90.0) as f32;
-    let azimuth_rad = azimuth_deg.to_radians();
-    Some((
-        0.5 + SKY_PLOT_RADIUS_FRACTION * radial_fraction * azimuth_rad.sin() as f32,
-        0.5 - SKY_PLOT_RADIUS_FRACTION * radial_fraction * azimuth_rad.cos() as f32,
-    ))
-}
-
-fn cardinal_label(label: &'static str, x: f32, y: f32, palette: Palette) -> impl IntoElement {
-    div()
-        .absolute()
-        .left(gpui_kit::relative(x))
-        .top(gpui_kit::relative(y))
-        .ml(px(-7.))
-        .mt(px(-7.))
-        .w(px(14.))
-        .h(px(14.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(11.))
-        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-        .text_color(palette.muted)
-        .child(label)
-}
-
-fn sky_elevation_label(label: &'static str, y: f32, palette: Palette) -> impl IntoElement {
-    div()
-        .absolute()
-        .left(gpui_kit::relative(0.5))
-        .top(gpui_kit::relative(y))
-        .ml(px(4.))
-        .font_family(data_font_family())
-        .text_size(px(8.))
-        .text_color(palette.muted)
-        .child(label)
-}
-
-fn sky_legend_row(label: &'static str, swatch: Hsla, palette: Palette) -> impl IntoElement {
-    div()
-        .h(px(17.))
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .child(div().size(px(8.)).rounded_full().bg(swatch))
-        .child(
-            div()
-                .font_family(data_font_family())
-                .text_color(palette.muted)
-                .child(label),
-        )
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct Cn0Series {
-    prn: u8,
-    samples: Vec<Option<f64>>,
-}
-
-#[derive(Clone, Copy)]
-struct Cn0PlotSelection {
-    epoch_period_ms: u64,
-    selected_epoch: Option<usize>,
-    hovered_prn: Option<u8>,
-    pinned_prn: Option<u8>,
-}
-
-impl Cn0Series {
-    fn value_at(&self, selected_epoch: Option<usize>) -> Option<f64> {
-        selected_epoch
-            .and_then(|index| self.samples.get(index).copied().flatten())
-            .or_else(|| self.samples.iter().rev().flatten().copied().next())
-    }
-}
-
-fn build_cn0_series(
-    epoch_channels: &[Vec<GuiChannelStatus>],
-    selected_epoch: Option<usize>,
-    pinned_prn: Option<u8>,
-    limit: usize,
-) -> Vec<Cn0Series> {
-    let prns = epoch_channels
-        .iter()
-        .flat_map(|channels| channels.iter())
-        .filter(|channel| channel.tracking_locked && channel.cn0_db_hz.is_finite())
-        .map(|channel| channel.prn)
-        .collect::<BTreeSet<_>>();
-    let mut series = prns
-        .into_iter()
-        .map(|prn| Cn0Series {
-            prn,
-            samples: epoch_channels
-                .iter()
-                .map(|channels| {
-                    channels
-                        .iter()
-                        .find(|channel| channel.prn == prn && channel.tracking_locked)
-                        .map(|channel| channel.cn0_db_hz)
-                        .filter(|value| value.is_finite())
-                })
-                .collect(),
-        })
-        .collect::<Vec<_>>();
-    series.sort_by(|left, right| {
-        let left_pinned = Some(left.prn) == pinned_prn;
-        let right_pinned = Some(right.prn) == pinned_prn;
-        right_pinned.cmp(&left_pinned).then_with(|| {
-            right
-                .value_at(selected_epoch)
-                .unwrap_or(f64::NEG_INFINITY)
-                .total_cmp(&left.value_at(selected_epoch).unwrap_or(f64::NEG_INFINITY))
-        })
-    });
-    series.truncate(limit);
-    series
-}
-
-fn cn0_plot(
-    epoch_channels: &[Vec<GuiChannelStatus>],
-    current_channels: &[GuiChannelStatus],
-    selection: Cn0PlotSelection,
-    palette: Palette,
-    cx: &mut Context<GnsscopeApp>,
-) -> impl IntoElement {
-    let fallback_history;
-    let epoch_channels = if epoch_channels.is_empty() && !current_channels.is_empty() {
-        fallback_history = vec![current_channels.to_vec()];
-        fallback_history.as_slice()
-    } else {
-        epoch_channels
-    };
-    let series = build_cn0_series(
-        epoch_channels,
-        selection.selected_epoch,
-        selection.pinned_prn,
-        8,
-    );
-    let series_empty = series.is_empty();
-    let sample_count = epoch_channels.len().max(1);
-    let history_duration_ms = sample_count.saturating_sub(1) as u64 * selection.epoch_period_ms;
-    let row_count = series.len().max(1);
-    let plot_series = series.clone();
-    let colors = palette.chart_series;
-    div()
-        .size_full()
-        .relative()
-        .child(
-            canvas(
-                move |_, _, _| {},
-                move |plot_bounds, _, window, _| {
-                    let left = plot_bounds.origin.x + px(42.);
-                    let right = plot_bounds.origin.x + plot_bounds.size.width - px(44.);
-                    let width = (right - left).max(px(1.));
-                    let row_height = plot_bounds.size.height / row_count as f32;
-                    for grid_index in 0..=4 {
-                        let x = left + width * (grid_index as f32 / 4.0);
-                        window.paint_quad(quad(
-                            bounds(
-                                point(x, plot_bounds.origin.y),
-                                size(px(1.), plot_bounds.size.height),
-                            ),
-                            px(0.),
-                            palette.border.opacity(0.55),
-                            px(0.),
-                            palette.border,
-                            Default::default(),
-                        ));
-                    }
-                    for row in 0..=row_count {
-                        let y = plot_bounds.origin.y + row_height * row as f32;
-                        window.paint_quad(quad(
-                            bounds(point(left, y), size(width, px(1.))),
-                            px(0.),
-                            palette.border.opacity(0.75),
-                            px(0.),
-                            palette.border,
-                            Default::default(),
-                        ));
-                    }
-                    if let Some(index) = selection
-                        .selected_epoch
-                        .filter(|index| *index < sample_count)
-                    {
-                        let ratio = if sample_count <= 1 {
-                            1.0
-                        } else {
-                            index as f32 / (sample_count - 1) as f32
-                        };
-                        let x = left + width * ratio;
-                        window.paint_quad(quad(
-                            bounds(
-                                point(x, plot_bounds.origin.y),
-                                size(px(1.), plot_bounds.size.height),
-                            ),
-                            px(0.),
-                            palette.accent.opacity(0.85),
-                            px(0.),
-                            palette.accent,
-                            Default::default(),
-                        ));
-                    }
-                    for (row, item) in plot_series.iter().enumerate() {
-                        let row_top = plot_bounds.origin.y + row_height * row as f32;
-                        let inner_height = (row_height - px(6.)).max(px(1.));
-                        let color = colors[row % colors.len()];
-                        let available = item.samples.iter().flatten().copied().collect::<Vec<_>>();
-                        let data_min = available.iter().copied().fold(f64::INFINITY, f64::min);
-                        let data_max = available.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                        let center = (data_min + data_max) * 0.5;
-                        let span = (data_max - data_min).max(6.0);
-                        let min_y = center - span * 0.5;
-                        let max_y = center + span * 0.5;
-                        let mut builder = PathBuilder::stroke(px(1.2));
-                        let mut segment_started = false;
-                        let mut selected_point = None;
-                        for (index, sample) in item.samples.iter().enumerate() {
-                            let Some(value) = sample else {
-                                segment_started = false;
-                                continue;
-                            };
-                            let x_ratio = if sample_count <= 1 {
-                                1.0
-                            } else {
-                                index as f32 / (sample_count - 1) as f32
-                            };
-                            let y_ratio = ((value.clamp(min_y, max_y) - min_y) / span) as f32;
-                            let plot_point = point(
-                                left + width * x_ratio,
-                                row_top + px(3.) + inner_height * (1.0 - y_ratio),
-                            );
-                            if segment_started {
-                                builder.line_to(plot_point);
-                            } else {
-                                builder.move_to(plot_point);
-                                segment_started = true;
-                            }
-                            if selection.selected_epoch == Some(index)
-                                || selection.selected_epoch.is_none()
-                            {
-                                selected_point = Some(plot_point);
-                            }
-                        }
-                        if let Ok(path) = builder.build() {
-                            window.paint_path(path, color);
-                        }
-                        if let Some(point) = selected_point {
-                            window.paint_quad(quad(
-                                bounds(
-                                    gpui_kit::point(point.x - px(2.5), point.y - px(2.5)),
-                                    size(px(5.), px(5.)),
-                                ),
-                                px(2.5),
-                                color,
-                                px(1.),
-                                palette.surface,
-                                Default::default(),
-                            ));
-                        }
-                    }
-                },
-            )
-            .absolute()
-            .top_0()
-            .left_0()
-            .right_0()
-            .bottom(px(12.)),
-        )
-        .children(series.into_iter().enumerate().map(|(row, item)| {
-            let prn = item.prn;
-            let active = selection.hovered_prn.or(selection.pinned_prn) == Some(prn);
-            let value = item.value_at(selection.selected_epoch);
-            let color = palette.chart_series[row % palette.chart_series.len()];
-            div()
-                .id(SharedString::from(format!("cn0-line-prn-{prn}")))
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(gpui_kit::relative(row as f32 / row_count as f32))
-                .h(gpui_kit::relative(1.0 / row_count as f32))
-                .flex()
-                .items_center()
-                .justify_between()
-                .px(px(4.))
-                .cursor_pointer()
-                .when(active, |this| this.bg(palette.accent.opacity(0.06)))
-                .on_hover(cx.listener(move |app, hovered, _, cx| {
-                    if *hovered {
-                        app.hovered_prn = Some(prn);
-                    } else if app.hovered_prn == Some(prn) {
-                        app.hovered_prn = None;
-                    }
-                    cx.notify();
-                }))
-                .on_click(cx.listener(move |app, _, _, cx| {
-                    app.pinned_prn = (app.pinned_prn != Some(prn)).then_some(prn);
-                    cx.notify();
-                }))
-                .child(
-                    div()
-                        .w(px(34.))
-                        .text_size(px(9.))
-                        .font_family(data_font_family())
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .text_color(if active { palette.accent } else { color })
-                        .child(format!("G{prn:02}")),
-                )
-                .child(
-                    div()
-                        .w(px(38.))
-                        .text_right()
-                        .text_size(px(9.))
-                        .font_family(data_font_family())
-                        .text_color(if active { palette.accent } else { palette.text })
-                        .child(
-                            value
-                                .map(|value| format!("{value:.1}"))
-                                .unwrap_or_else(|| "--".to_string()),
-                        ),
-                )
-        }))
-        .child(
-            div()
-                .absolute()
-                .left(px(42.))
-                .right(px(44.))
-                .bottom(px(0.))
-                .h(px(12.))
-                .px(px(3.))
-                .flex()
-                .items_center()
-                .justify_between()
-                .bg(palette.surface.opacity(0.88))
-                .text_size(px(8.))
-                .font_family(data_font_family())
-                .text_color(palette.muted)
-                .child(format!("−{}", format_timeline_offset(history_duration_ms)))
-                .child(format!(
-                    "−{}",
-                    format_timeline_offset(history_duration_ms / 2)
-                ))
-                .child("Now"),
-        )
-        .children(series_empty.then(|| {
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(10.))
-                .text_color(palette.muted)
-                .child("等待可用的通道 C/N0 历史")
-        }))
-}
-
-fn pvt_position_is_displayable(pvt: &GuiPvtViewModel) -> bool {
+pub(crate) fn pvt_position_is_displayable(pvt: &GuiPvtViewModel) -> bool {
     let quality = gnss_core::pvt::PositionQualityConfig::default();
     pvt.quality.converged
         && pvt.ecef_m.iter().all(|value| value.is_finite())
@@ -8612,250 +8331,6 @@ fn pvt_position_is_displayable(pvt: &GuiPvtViewModel) -> bool {
         && pvt.longitude_deg.is_finite()
         && pvt.altitude_m.is_finite()
         && (quality.min_altitude_m..=quality.max_altitude_m).contains(&pvt.altitude_m)
-}
-
-fn position_plot(
-    epochs: &[GuiPvtViewModel],
-    selected_epoch: Option<usize>,
-    palette: Palette,
-) -> impl IntoElement {
-    let lla = epochs
-        .iter()
-        .enumerate()
-        .filter(|(_, pvt)| pvt_position_is_displayable(pvt))
-        .map(|(index, pvt)| (index, pvt.latitude_deg, pvt.longitude_deg))
-        .collect::<Vec<_>>();
-    let points = lla
-        .first()
-        .map_or_else(Vec::new, |(_, latitude_0, longitude_0)| {
-            let cos_latitude = latitude_0.to_radians().cos();
-            lla.iter()
-                .map(|(index, latitude, longitude)| {
-                    let east = (longitude - longitude_0).to_radians() * 6_378_137.0 * cos_latitude;
-                    let north = (latitude - latitude_0).to_radians() * 6_378_137.0;
-                    (*index, east, north)
-                })
-                .collect()
-        });
-    let has_points = !points.is_empty();
-    let mut extents = points
-        .iter()
-        .map(|(_, east, north)| east.abs().max(north.abs()))
-        .filter(|extent| extent.is_finite())
-        .collect::<Vec<_>>();
-    extents.sort_by(f64::total_cmp);
-    let raw_extent = extents
-        .get(((extents.len().saturating_sub(1)) as f64 * 0.95).round() as usize)
-        .copied()
-        .unwrap_or(1.0)
-        .max(1.0);
-    let extent = nice_enu_extent(raw_extent);
-    let y_ticks = [
-        (0.055_f32, extent),
-        (0.275, extent / 2.0),
-        (0.5, 0.0),
-        (0.725, -extent / 2.0),
-        (0.91, -extent),
-    ];
-    let x_ticks = [
-        (0.10_f32, -extent),
-        (0.30, -extent / 2.0),
-        (0.50, 0.0),
-        (0.70, extent / 2.0),
-        (0.90, extent),
-    ];
-    div()
-        .size_full()
-        .relative()
-        .child(
-            canvas(
-                move |_, _, _| {},
-                move |plot_bounds, _, window, _| {
-                    let plot_left = plot_bounds.origin.x + px(38.);
-                    let plot_right = plot_bounds.origin.x + plot_bounds.size.width - px(12.);
-                    let plot_top = plot_bounds.origin.y + px(10.);
-                    let plot_bottom = plot_bounds.origin.y + plot_bounds.size.height - px(30.);
-                    let plot_width = (plot_right - plot_left).max(px(1.));
-                    let plot_height = (plot_bottom - plot_top).max(px(1.));
-                    let center = point(plot_left + plot_width / 2., plot_top + plot_height / 2.);
-                    for grid_index in 0..=8 {
-                        if grid_index == 4 {
-                            continue;
-                        }
-                        let x = plot_left + plot_width * (grid_index as f32 / 8.0);
-                        window.paint_quad(quad(
-                            bounds(point(x, plot_top), size(px(1.), plot_height)),
-                            px(0.),
-                            palette.border.opacity(0.58),
-                            px(0.),
-                            palette.border,
-                            Default::default(),
-                        ));
-                    }
-                    for grid_index in 0..=6 {
-                        if grid_index == 3 {
-                            continue;
-                        }
-                        let y = plot_top + plot_height * (grid_index as f32 / 6.0);
-                        window.paint_quad(quad(
-                            bounds(point(plot_left, y), size(plot_width, px(1.))),
-                            px(0.),
-                            palette.border.opacity(0.58),
-                            px(0.),
-                            palette.border,
-                            Default::default(),
-                        ));
-                    }
-                    for segment in (0..28).step_by(2) {
-                        let y = plot_top + plot_height * (segment as f32 / 28.0);
-                        window.paint_quad(quad(
-                            bounds(point(center.x, y), size(px(1.), plot_height / 28.0)),
-                            px(0.),
-                            palette.muted.opacity(0.95),
-                            px(0.),
-                            palette.muted,
-                            Default::default(),
-                        ));
-                    }
-                    for segment in (0..36).step_by(2) {
-                        let x = plot_left + plot_width * (segment as f32 / 36.0);
-                        window.paint_quad(quad(
-                            bounds(point(x, center.y), size(plot_width / 36.0, px(1.))),
-                            px(0.),
-                            palette.muted.opacity(0.95),
-                            px(0.),
-                            palette.muted,
-                            Default::default(),
-                        ));
-                    }
-                    if points.is_empty() {
-                        return;
-                    }
-                    let half_width = plot_width / 2.;
-                    let half_height = plot_height / 2.;
-                    let visible_points = points
-                        .iter()
-                        .filter(|(_, east, north)| east.abs() <= extent && north.abs() <= extent)
-                        .map(|(index, east, north)| {
-                            (
-                                *index,
-                                point(
-                                    center.x + half_width * (*east / extent) as f32,
-                                    center.y - half_height * (*north / extent) as f32,
-                                ),
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    let mut trajectory = PathBuilder::stroke(px(2.2));
-                    for (point_index, (_, plot_point)) in visible_points.iter().enumerate() {
-                        if point_index == 0 {
-                            trajectory.move_to(*plot_point);
-                        } else {
-                            trajectory.line_to(*plot_point);
-                        }
-                    }
-                    if let Ok(path) = trajectory.build() {
-                        window.paint_path(path, palette.chart_series[1]);
-                    }
-                    for (index, east, north) in &points {
-                        if east.abs() > extent || north.abs() > extent {
-                            continue;
-                        }
-                        let x = center.x + half_width * (*east / extent) as f32;
-                        let y = center.y - half_height * (*north / extent) as f32;
-                        let selected = Some(*index) == selected_epoch;
-                        let diameter = if selected { px(10.) } else { px(2.8) };
-                        window.paint_quad(quad(
-                            bounds(
-                                point(x - diameter / 2., y - diameter / 2.),
-                                size(diameter, diameter),
-                            ),
-                            diameter / 2.,
-                            if selected {
-                                palette.surface
-                            } else {
-                                palette.chart_series[1]
-                            },
-                            if selected { px(2.) } else { px(0.) },
-                            palette.accent,
-                            Default::default(),
-                        ));
-                    }
-                },
-            )
-            .size_full(),
-        )
-        .children(has_points.then(|| {
-            div()
-                .absolute()
-                .inset_0()
-                .font_family(data_font_family())
-                .text_size(px(9.5))
-                .text_color(palette.muted)
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(2.))
-                        .top(px(0.))
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .child("North (m)"),
-                )
-                .children(y_ticks.into_iter().map(|(position, value)| {
-                    div()
-                        .absolute()
-                        .left(px(4.))
-                        .top(gpui_kit::relative(position))
-                        .mt(px(-5.))
-                        .w(px(29.))
-                        .text_right()
-                        .child(format_enu_tick(value))
-                }))
-                .children(x_ticks.into_iter().map(|(position, value)| {
-                    div()
-                        .absolute()
-                        .left(gpui_kit::relative(position))
-                        .bottom(px(14.))
-                        .ml(px(-14.))
-                        .w(px(28.))
-                        .text_center()
-                        .child(format_enu_tick(value))
-                }))
-                .child(
-                    div()
-                        .absolute()
-                        .bottom(px(0.))
-                        .left(gpui_kit::relative(0.5))
-                        .ml(px(-28.))
-                        .w(px(56.))
-                        .text_center()
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .child("East (m)"),
-                )
-        }))
-}
-
-fn nice_enu_extent(raw_extent: f64) -> f64 {
-    let raw_extent = raw_extent.max(1.0);
-    let magnitude = 10_f64.powf(raw_extent.log10().floor());
-    let normalized = raw_extent / magnitude;
-    let nice = if normalized <= 1.0 {
-        1.0
-    } else if normalized <= 2.0 {
-        2.0
-    } else if normalized <= 5.0 {
-        5.0
-    } else {
-        10.0
-    };
-    nice * magnitude
-}
-
-fn format_enu_tick(value: f64) -> String {
-    if value.abs() >= 10.0 || value.fract().abs() < f64::EPSILON {
-        format!("{value:.0}")
-    } else {
-        format!("{value:.1}")
-    }
 }
 
 fn velocity_plot(
@@ -9031,26 +8506,6 @@ mod settings_editor_tests {
         );
         assert!(parse_fixed_prns("1,abc").is_err());
         assert!(parse_initial_lla("41.25,1.98").is_err());
-    }
-}
-
-#[cfg(test)]
-mod sky_plot_tests {
-    use super::sky_plot_position;
-
-    #[test]
-    fn sky_plot_uses_north_up_and_east_right() {
-        let north_horizon = sky_plot_position(0.0, 0.0).unwrap();
-        let east_horizon = sky_plot_position(90.0, 0.0).unwrap();
-        let zenith = sky_plot_position(225.0, 90.0).unwrap();
-
-        assert!((north_horizon.0 - 0.5).abs() < 1e-6);
-        assert!(north_horizon.1 < 0.5);
-        assert!(east_horizon.0 > 0.5);
-        assert!((east_horizon.1 - 0.5).abs() < 1e-6);
-        assert!((zenith.0 - 0.5).abs() < 1e-6);
-        assert!((zenith.1 - 0.5).abs() < 1e-6);
-        assert!(sky_plot_position(0.0, -0.1).is_none());
     }
 }
 
@@ -9700,16 +9155,180 @@ mod history_queue_tests {
         assert_eq!(poll_decision(true, 2), (true, true));
         assert_eq!(poll_decision(false, 0), (false, false));
     }
+
+    // -----------------------------------------------------------------------
+    // Issue 17 acceptance tests (items 1-5)
+    // -----------------------------------------------------------------------
+
+    fn channel(prn: u8, tracking_locked: bool, nav_locked: bool) -> GuiChannelStatus {
+        GuiChannelStatus {
+            prn,
+            acquired: true,
+            tracking_locked,
+            nav_locked,
+            cn0_db_hz: 42.0,
+            doppler_hz: -1200.0,
+            residual_m: Some(1.5),
+        }
+    }
+
+    /// Item 3: browsing a historical run must surface that run's own epoch and
+    /// channel view, never the live worker's counts (issue 17 review finding).
+    #[gpui_kit::test]
+    fn selected_run_context_is_isolated_from_live_processing(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::component::init);
+        let (app, visual) =
+            cx.add_window_view(|window, cx| GnsscopeApp::with_library(window, cx, None, false));
+        visual.update(|_, cx| {
+            app.update(cx, |app, _| {
+                let live_id = Uuid::new_v4();
+                let history_id = Uuid::new_v4();
+                // A live run is processing with rich channel/PVT data.
+                app.live_run_id = Some(live_id);
+                app.active_run = Some(run("live.dat", RunStatus::Processing));
+                app.channels = vec![channel(1, true, true), channel(2, true, false)];
+                app.epochs = vec![crate::sample_pvt_view_model()];
+                app.epoch_channels = vec![vec![channel(1, true, true)]];
+                // A selected historical run has its own, distinct view.
+                app.historical_epochs = vec![crate::sample_pvt_view_model()];
+                app.historical_channels = vec![vec![
+                    channel(5, true, true),
+                    channel(6, true, true),
+                    channel(7, true, true),
+                ]];
+                app.selected_run_id = Some(history_id);
+                app.selected_epoch = Some(0);
+
+                // display_* resolve to the SELECTED (historical) run.
+                assert_eq!(app.display_epochs().len(), 1);
+                let channels = app.display_channels();
+                assert_eq!(channels.len(), 3, "historical channels, not live");
+                assert_eq!(channels[0].prn, 5);
+                assert!(
+                    channels.iter().all(|channel| channel.nav_locked),
+                    "the historical epoch is fully locked, unlike the live set"
+                );
+            });
+        });
+    }
+
+    /// Item 1: the palette state machine opens, filters by the command-input
+    /// query, and maps a filtered index back to the right command/run.
+    #[gpui_kit::test]
+    fn command_palette_opens_filters_and_selects(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::component::init);
+        let library = RunLibrary::open(":memory:").unwrap();
+        let completed = library
+            .create_run(&GuiProcessingSettings::default())
+            .unwrap();
+        library
+            .update_progress(completed.id, RunStatus::Completed, 1, 1, 0, "fixture")
+            .unwrap();
+        let (app, visual) = cx.add_window_view(move |window, cx| {
+            GnsscopeApp::with_library(window, cx, Some(library), false)
+        });
+        visual.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                // Opens closed → open, focusing the command field.
+                assert!(!app.command_palette_open);
+                app.open_command_palette(window, cx);
+                assert!(app.command_palette_open);
+                assert_eq!(app.command_highlight, Some(0));
+
+                // Every global command plus the completed run is present.
+                let all = app.palette_results();
+                assert!(
+                    all.iter()
+                        .any(|(_, command)| *command == PaletteCommand::OpenRunLibrary),
+                    "global commands are offered"
+                );
+                assert!(
+                    all.iter()
+                        .any(|(_, command)| matches!(command, PaletteCommand::SelectRun(id) if *id == completed.id)),
+                    "the persisted run is offered"
+                );
+
+                // Typing a query that only the run title matches leaves it as
+                // the sole filtered target (the shared substring rule).
+                app.command_input
+                    .update(cx, |input, cx| input.set_value("no-such-entry", window, cx));
+                assert!(
+                    app.palette_filtered_commands(cx).is_empty(),
+                    "an unmatched query yields no executable target"
+                );
+                app.command_input
+                    .update(cx, |input, cx| input.set_value("运行库", window, cx));
+                let filtered = app.palette_filtered_commands(cx);
+                assert_eq!(filtered, vec![PaletteCommand::OpenRunLibrary]);
+                app.command_highlight = Some(0);
+
+                // Selecting the highlighted entry navigates and closes.
+                app.execute_palette_command(PaletteCommand::OpenRunLibrary, window, cx);
+                assert!(matches!(app.page, AppPage::RunLibrary));
+                app.open_command_palette(window, cx);
+                app.close_command_palette(window, cx);
+                assert!(!app.command_palette_open);
+                assert_eq!(app.command_highlight, None);
+            });
+        });
+    }
+
+    /// Item 5: a persisted run whose source file is gone reports 源不可用; a
+    /// completed run with a real file reports 已完成 with a healthy color.
+    #[gpui_kit::test]
+    fn runs_row_view_flags_missing_source_and_keeps_completed_honest(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        cx.update(gpui_kit::component::init);
+        let (app, visual) =
+            cx.add_window_view(|window, cx| GnsscopeApp::with_library(window, cx, None, false));
+        visual.update(|_, cx| {
+            app.update(cx, |app, _| {
+                app.interface_language = InterfaceLanguage::SimplifiedChinese;
+                let palette = Palette::light();
+
+                let missing = run("definitely/missing/capture.iq", RunStatus::Completed);
+                let view = app.runs_row_view(&missing, palette);
+                assert_eq!(view.status, "源不可用");
+                assert_eq!(view.status_color, palette.warning);
+
+                // A queued run is never flagged 源不可用 (it has not started).
+                let queued = run("definitely/missing/queued.iq", RunStatus::Queued);
+                let queued_view = app.runs_row_view(&queued, palette);
+                assert_eq!(queued_view.status, "排队");
+
+                // A completed run whose source exists keeps the honest
+                // 已完成 label and healthy color, and carries its real size.
+                let existing =
+                    std::env::temp_dir().join(format!("gnsscope-row-{}.iq", Uuid::new_v4()));
+                std::fs::write(&existing, [0u8; 2048]).unwrap();
+                let mut done = run("done.dat", RunStatus::Completed);
+                done.source_path = existing.clone();
+                done.total_samples = 4_000_000;
+                let done_view = app.runs_row_view(&done, palette);
+                assert_eq!(done_view.status, "已完成");
+                assert_eq!(done_view.status_color, palette.healthy);
+                assert_eq!(done_view.samples_total, Some(4_000_000));
+                assert_eq!(done_view.size_bytes, Some(2048));
+                assert_eq!(
+                    done_view.source_path.as_deref(),
+                    Some(existing.to_string_lossy().as_ref())
+                );
+                let _ = std::fs::remove_file(&existing);
+            });
+        });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cn0_series, epoch_index_for_percent, epoch_jump_index, format_timeline_offset,
-        format_timeline_time, nice_enu_extent, preview_diagnostic_events, preview_enu_position,
-        preview_epoch_history, toggled_side_drawer, InterfaceLanguage, PlotFocus, SettingsCategory,
-        SideDrawer, ThemePreference, WorkspaceView,
+        epoch_index_for_percent, epoch_jump_index, format_timeline_time, preview_diagnostic_events,
+        preview_enu_position, preview_epoch_history, toggled_side_drawer, InterfaceLanguage,
+        PlotFocus, SettingsCategory, SideDrawer, ThemePreference, WorkspaceView,
     };
+    use crate::plots::cn0;
+    use crate::plots::enu;
 
     #[test]
     fn precise_jump_parses_a_1_based_epoch_and_clamps_to_the_range() {
@@ -9736,17 +9355,17 @@ mod tests {
     fn timeline_labels_use_instrument_time_format() {
         assert_eq!(format_timeline_time(0), "00:00:00");
         assert_eq!(format_timeline_time(3_661_000), "01:01:01");
-        assert_eq!(format_timeline_offset(179_000), "02:59");
-        assert_eq!(format_timeline_offset(3_661_000), "01:01:01");
     }
 
     #[test]
     fn enu_extent_rounds_outward_to_instrument_ticks() {
-        assert_eq!(nice_enu_extent(0.4), 1.0);
-        assert_eq!(nice_enu_extent(1.3), 2.0);
-        assert_eq!(nice_enu_extent(3.1), 5.0);
-        assert_eq!(nice_enu_extent(8.2), 10.0);
-        assert_eq!(nice_enu_extent(42.0), 50.0);
+        // Moved to `plots::enu` with the ENU track pane; kept here as a
+        // regression anchor for the shared ladder.
+        assert_eq!(enu::nice_enu_extent(0.4), 1.0);
+        assert_eq!(enu::nice_enu_extent(1.3), 2.0);
+        assert_eq!(enu::nice_enu_extent(3.1), 5.0);
+        assert_eq!(enu::nice_enu_extent(8.2), 10.0);
+        assert_eq!(enu::nice_enu_extent(42.0), 50.0);
     }
 
     #[test]
@@ -9807,7 +9426,12 @@ mod tests {
     #[test]
     fn visual_preview_provides_aligned_cn0_history() {
         let (epochs, channels) = preview_epoch_history();
-        let series = build_cn0_series(&channels, epochs.len().checked_sub(1), Some(20), 8);
+        let series = cn0::build_cn0_series(
+            &channels,
+            epochs.len().checked_sub(1),
+            Some(20),
+            cn0::LANE_COUNT,
+        );
 
         assert_eq!(epochs.len(), 769);
         assert_eq!(channels.len(), epochs.len());
