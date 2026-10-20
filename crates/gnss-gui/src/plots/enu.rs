@@ -198,226 +198,275 @@ pub(crate) fn render(
     let points = enu_points(epochs);
     let has_points = !points.is_empty();
     let extent = nice_enu_extent(raw_extent(&points));
-    let colors = palette.chart_series;
+    // Data identity colour: the blue series, not the status green — a
+    // trajectory must not read as "healthy" state (spec §3.4).
+    let trajectory_color = palette.chart_series[1];
     let selected = selected_epoch;
     div()
         .size_full()
         .relative()
         .flex()
-        .items_center()
-        .justify_center()
-        // Square data region: equal px/m on both axes (spec §3.6).
+        .flex_col()
+        // Square data region: equal px/m on both axes (spec §3.6). It takes
+        // the space above the x-axis title strip so the centered title can
+        // never collide with the centered "0" tick label.
         .child(
             div()
-                .h_full()
-                .aspect_square()
+                .flex_1()
+                .min_h_0()
+                .w_full()
                 .relative()
+                .flex()
+                .items_center()
+                .justify_center()
                 .child(
-                    canvas(
-                        move |_, _, _| {},
-                        move |plot_bounds, _, window, _| {
-                            let half_width = f32::from(plot_bounds.size.width) * 0.5;
-                            let half_height = f32::from(plot_bounds.size.height) * 0.5;
-                            let center = point(
-                                plot_bounds.origin.x + px(half_width),
-                                plot_bounds.origin.y + px(half_height),
-                            );
-                            // One px/m for both axes: no distortion.
-                            let scale = equal_scale(
-                                f32::from(plot_bounds.size.width),
-                                f32::from(plot_bounds.size.height),
-                                extent,
-                            );
-                            // Grid: 1px solid plot_grid at the tick lines.
-                            for value in axis_tick_values(extent) {
-                                let x = center.x + px((value * scale as f64) as f32);
-                                frame::paint_v_line(
-                                    window,
-                                    f32::from(x),
-                                    f32::from(plot_bounds.origin.y),
-                                    f32::from(plot_bounds.origin.y + plot_bounds.size.height),
-                                    frame::LineRole::Grid,
-                                    palette,
-                                );
-                                let y = center.y - px((value * scale as f64) as f32);
-                                frame::paint_h_line(
-                                    window,
-                                    f32::from(y),
-                                    f32::from(plot_bounds.origin.x),
-                                    f32::from(plot_bounds.origin.x + plot_bounds.size.width),
-                                    frame::LineRole::Grid,
-                                    palette,
-                                );
-                            }
-                            // Axes: bottom edge (x) and left edge (y).
-                            frame::paint_h_line(
-                                window,
-                                f32::from(plot_bounds.origin.y + plot_bounds.size.height),
-                                f32::from(plot_bounds.origin.x),
-                                f32::from(plot_bounds.origin.x + plot_bounds.size.width),
-                                frame::LineRole::Axis,
-                                palette,
-                            );
-                            frame::paint_v_line(
-                                window,
-                                f32::from(plot_bounds.origin.x),
-                                f32::from(plot_bounds.origin.y),
-                                f32::from(plot_bounds.origin.y + plot_bounds.size.height),
-                                frame::LineRole::Axis,
-                                palette,
-                            );
-                            if points.is_empty() {
-                                return;
-                            }
-                            let project = |east: f64, north: f64| {
-                                point(
-                                    center.x + px((east * scale as f64) as f32),
-                                    center.y - px((north * scale as f64) as f32),
-                                )
-                            };
-                            // Tick stubs on the axes (4px, plot_axis).
-                            for value in axis_tick_values(extent) {
-                                let x = center.x + px((value * scale as f64) as f32);
-                                window.paint_quad(quad(
-                                    bounds(
-                                        point(x, plot_bounds.origin.y + plot_bounds.size.height),
-                                        size(px(1.), px(TICK_STUB)),
-                                    ),
-                                    px(0.),
-                                    palette.plot_axis,
-                                    px(0.),
-                                    palette.plot_axis,
-                                    Default::default(),
-                                ));
-                                let y = center.y - px((value * scale as f64) as f32);
-                                window.paint_quad(quad(
-                                    bounds(
-                                        point(plot_bounds.origin.x - px(TICK_STUB), y),
-                                        size(px(TICK_STUB), px(1.)),
-                                    ),
-                                    px(0.),
-                                    palette.plot_axis,
-                                    px(0.),
-                                    palette.plot_axis,
-                                    Default::default(),
-                                ));
-                            }
-                            // Track: chart_series[0] 1.5px (spec §3.6).
-                            let mut trajectory = PathBuilder::stroke(px(TRACK_STROKE));
-                            for (point_index, (_, east, north)) in points.iter().enumerate() {
-                                let plot_point = project(*east, *north);
-                                if point_index == 0 {
-                                    trajectory.move_to(plot_point);
-                                } else {
-                                    trajectory.line_to(plot_point);
-                                }
-                            }
-                            if let Ok(path) = trajectory.build() {
-                                window.paint_path(path, colors[0]);
-                            }
-                            // Selected epoch: accent hollow ring + crosshair.
-                            if let Some((_, east, north)) = selected
-                                .and_then(|index| points.iter().find(|(i, _, _)| *i == index))
-                            {
-                                let selected_point = project(*east, *north);
-                                let line_color = palette.accent.opacity(0.85);
-                                window.paint_quad(quad(
-                                    bounds(
-                                        point(plot_bounds.origin.x, selected_point.y - px(0.5)),
-                                        size(plot_bounds.size.width, px(1.)),
-                                    ),
-                                    px(0.),
-                                    line_color,
-                                    px(0.),
-                                    line_color,
-                                    Default::default(),
-                                ));
-                                window.paint_quad(quad(
-                                    bounds(
-                                        point(selected_point.x - px(0.5), plot_bounds.origin.y),
-                                        size(px(1.), plot_bounds.size.height),
-                                    ),
-                                    px(0.),
-                                    line_color,
-                                    px(0.),
-                                    line_color,
-                                    Default::default(),
-                                ));
-                                window.paint_quad(quad(
-                                    bounds(
+                    div()
+                        .h_full()
+                        .aspect_square()
+                        .relative()
+                        .child(
+                            canvas(
+                                move |_, _, _| {},
+                                move |plot_bounds, _, window, _| {
+                                    let half_width = f32::from(plot_bounds.size.width) * 0.5;
+                                    let half_height = f32::from(plot_bounds.size.height) * 0.5;
+                                    let center = point(
+                                        plot_bounds.origin.x + px(half_width),
+                                        plot_bounds.origin.y + px(half_height),
+                                    );
+                                    // One px/m for both axes: no distortion.
+                                    let scale = equal_scale(
+                                        f32::from(plot_bounds.size.width),
+                                        f32::from(plot_bounds.size.height),
+                                        extent,
+                                    );
+                                    // Grid: 1px solid plot_grid at the tick lines.
+                                    for value in axis_tick_values(extent) {
+                                        let x = center.x + px((value * scale as f64) as f32);
+                                        frame::paint_v_line(
+                                            window,
+                                            f32::from(x),
+                                            f32::from(plot_bounds.origin.y),
+                                            f32::from(
+                                                plot_bounds.origin.y + plot_bounds.size.height,
+                                            ),
+                                            frame::LineRole::Grid,
+                                            palette,
+                                        );
+                                        let y = center.y - px((value * scale as f64) as f32);
+                                        frame::paint_h_line(
+                                            window,
+                                            f32::from(y),
+                                            f32::from(plot_bounds.origin.x),
+                                            f32::from(
+                                                plot_bounds.origin.x + plot_bounds.size.width,
+                                            ),
+                                            frame::LineRole::Grid,
+                                            palette,
+                                        );
+                                    }
+                                    // Axes: bottom edge (x) and left edge (y).
+                                    frame::paint_h_line(
+                                        window,
+                                        f32::from(plot_bounds.origin.y + plot_bounds.size.height),
+                                        f32::from(plot_bounds.origin.x),
+                                        f32::from(plot_bounds.origin.x + plot_bounds.size.width),
+                                        frame::LineRole::Axis,
+                                        palette,
+                                    );
+                                    frame::paint_v_line(
+                                        window,
+                                        f32::from(plot_bounds.origin.x),
+                                        f32::from(plot_bounds.origin.y),
+                                        f32::from(plot_bounds.origin.y + plot_bounds.size.height),
+                                        frame::LineRole::Axis,
+                                        palette,
+                                    );
+                                    if points.is_empty() {
+                                        return;
+                                    }
+                                    let project = |east: f64, north: f64| {
                                         point(
-                                            selected_point.x - px(SELECTED_RING_RADIUS),
-                                            selected_point.y - px(SELECTED_RING_RADIUS),
-                                        ),
-                                        size(
-                                            px(SELECTED_RING_RADIUS * 2.0),
-                                            px(SELECTED_RING_RADIUS * 2.0),
-                                        ),
-                                    ),
-                                    px(SELECTED_RING_RADIUS),
-                                    Hsla::transparent_black(),
-                                    px(SELECTED_RING_STROKE),
-                                    palette.accent,
-                                    Default::default(),
-                                ));
-                            }
-                            // Current end: small filled dot (spec §3.6).
-                            if let Some((_, east, north)) = points.last() {
-                                let end_point = project(*east, *north);
-                                window.paint_quad(quad(
-                                    bounds(
-                                        point(
-                                            end_point.x - px(ENDPOINT_RADIUS),
-                                            end_point.y - px(ENDPOINT_RADIUS),
-                                        ),
-                                        size(px(ENDPOINT_RADIUS * 2.0), px(ENDPOINT_RADIUS * 2.0)),
-                                    ),
-                                    px(ENDPOINT_RADIUS),
-                                    colors[0],
-                                    px(0.),
-                                    colors[0],
-                                    Default::default(),
-                                ));
-                            }
-                        },
-                    )
-                    .size_full(),
-                )
-                // Tick labels: x only along the bottom edge, y only along
-                // the left edge, at the same fractions as the canvas grid.
-                .children(
-                    has_points
-                        .then(|| tick_label_elements(extent, palette))
-                        .into_iter()
-                        .flatten(),
+                                            center.x + px((east * scale as f64) as f32),
+                                            center.y - px((north * scale as f64) as f32),
+                                        )
+                                    };
+                                    // Tick stubs on the axes (4px, plot_axis).
+                                    for value in axis_tick_values(extent) {
+                                        let x = center.x + px((value * scale as f64) as f32);
+                                        window.paint_quad(quad(
+                                            bounds(
+                                                point(
+                                                    x,
+                                                    plot_bounds.origin.y + plot_bounds.size.height,
+                                                ),
+                                                size(px(1.), px(TICK_STUB)),
+                                            ),
+                                            px(0.),
+                                            palette.plot_axis,
+                                            px(0.),
+                                            palette.plot_axis,
+                                            Default::default(),
+                                        ));
+                                        let y = center.y - px((value * scale as f64) as f32);
+                                        window.paint_quad(quad(
+                                            bounds(
+                                                point(plot_bounds.origin.x - px(TICK_STUB), y),
+                                                size(px(TICK_STUB), px(1.)),
+                                            ),
+                                            px(0.),
+                                            palette.plot_axis,
+                                            px(0.),
+                                            palette.plot_axis,
+                                            Default::default(),
+                                        ));
+                                    }
+                                    // Track: chart_series[0] 1.5px (spec §3.6).
+                                    let mut trajectory = PathBuilder::stroke(px(TRACK_STROKE));
+                                    for (point_index, (_, east, north)) in points.iter().enumerate()
+                                    {
+                                        let plot_point = project(*east, *north);
+                                        if point_index == 0 {
+                                            trajectory.move_to(plot_point);
+                                        } else {
+                                            trajectory.line_to(plot_point);
+                                        }
+                                    }
+                                    // Older track recedes; the most recent
+                                    // fifth stays at full strength so the eye
+                                    // reads direction of travel. Same 1.5px
+                                    // stroke, one series colour.
+                                    if let Ok(path) = trajectory.build() {
+                                        window.paint_path(path, trajectory_color.opacity(0.55));
+                                    }
+                                    let tail_start =
+                                        points.len().saturating_sub((points.len() / 5).max(2));
+                                    let mut tail = PathBuilder::stroke(px(TRACK_STROKE));
+                                    for (index, (_, east, north)) in
+                                        points.iter().enumerate().skip(tail_start)
+                                    {
+                                        let plot_point = project(*east, *north);
+                                        if index == tail_start {
+                                            tail.move_to(plot_point);
+                                        } else {
+                                            tail.line_to(plot_point);
+                                        }
+                                    }
+                                    if let Ok(path) = tail.build() {
+                                        window.paint_path(path, trajectory_color);
+                                    }
+                                    // Selected epoch: accent hollow ring + crosshair.
+                                    if let Some((_, east, north)) = selected.and_then(|index| {
+                                        points.iter().find(|(i, _, _)| *i == index)
+                                    }) {
+                                        let selected_point = project(*east, *north);
+                                        let line_color = palette.accent.opacity(0.85);
+                                        window.paint_quad(quad(
+                                            bounds(
+                                                point(
+                                                    plot_bounds.origin.x,
+                                                    selected_point.y - px(0.5),
+                                                ),
+                                                size(plot_bounds.size.width, px(1.)),
+                                            ),
+                                            px(0.),
+                                            line_color,
+                                            px(0.),
+                                            line_color,
+                                            Default::default(),
+                                        ));
+                                        window.paint_quad(quad(
+                                            bounds(
+                                                point(
+                                                    selected_point.x - px(0.5),
+                                                    plot_bounds.origin.y,
+                                                ),
+                                                size(px(1.), plot_bounds.size.height),
+                                            ),
+                                            px(0.),
+                                            line_color,
+                                            px(0.),
+                                            line_color,
+                                            Default::default(),
+                                        ));
+                                        window.paint_quad(quad(
+                                            bounds(
+                                                point(
+                                                    selected_point.x - px(SELECTED_RING_RADIUS),
+                                                    selected_point.y - px(SELECTED_RING_RADIUS),
+                                                ),
+                                                size(
+                                                    px(SELECTED_RING_RADIUS * 2.0),
+                                                    px(SELECTED_RING_RADIUS * 2.0),
+                                                ),
+                                            ),
+                                            px(SELECTED_RING_RADIUS),
+                                            Hsla::transparent_black(),
+                                            px(SELECTED_RING_STROKE),
+                                            palette.accent,
+                                            Default::default(),
+                                        ));
+                                    }
+                                    // Current end: small filled dot (spec §3.6).
+                                    if let Some((_, east, north)) = points.last() {
+                                        let end_point = project(*east, *north);
+                                        window.paint_quad(quad(
+                                            bounds(
+                                                point(
+                                                    end_point.x - px(ENDPOINT_RADIUS),
+                                                    end_point.y - px(ENDPOINT_RADIUS),
+                                                ),
+                                                size(
+                                                    px(ENDPOINT_RADIUS * 2.0),
+                                                    px(ENDPOINT_RADIUS * 2.0),
+                                                ),
+                                            ),
+                                            px(ENDPOINT_RADIUS),
+                                            trajectory_color,
+                                            px(0.),
+                                            trajectory_color,
+                                            Default::default(),
+                                        ));
+                                    }
+                                },
+                            )
+                            .size_full(),
+                        )
+                        // Tick labels: x only along the bottom edge, y only along
+                        // the left edge, at the same fractions as the canvas grid.
+                        .children(
+                            has_points
+                                .then(|| tick_label_elements(extent, palette))
+                                .into_iter()
+                                .flatten(),
+                        ),
                 ),
         )
-        // Axis titles (caption 11px) around the square data region.
-        .children(
-            has_points
-                .then(|| {
-                    [
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom(px(0.))
-                            .text_center()
-                            .text_size(px(11.)) /* CAPTION */
-                            .text_color(palette.faint)
-                            .child("东 (m)"),
-                        div()
-                            .absolute()
-                            .left(px(0.))
-                            .top_0()
-                            .text_size(px(11.)) /* CAPTION */
-                            .text_color(palette.faint)
-                            .child("北 (m)"),
-                    ]
-                })
-                .into_iter()
-                .flatten(),
+        // x-axis title strip below the plot area: the centered title sits a
+        // full row under the tick labels, so it can never collide with the
+        // centered "0" tick (spec §3.6).
+        .child(
+            div()
+                .h(px(16.))
+                .w_full()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(10.)) /* MICRO */
+                .text_color(palette.faint)
+                .child(if has_points { "东" } else { "" }),
         )
+        // y-axis title (caption 11px) at the head of the left axis.
+        .children(has_points.then(|| {
+            div()
+                .absolute()
+                .left(px(0.))
+                .top_0()
+                .text_size(px(10.)) /* MICRO */
+                .text_color(palette.faint)
+                .child("北")
+        }))
         .children(
             has_points
                 .then_some(())

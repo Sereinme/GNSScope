@@ -173,23 +173,29 @@ pub(crate) fn render(
     palette: Palette,
 ) -> AnyElement {
     div()
-        .min_h(if expanded { px(620.) } else { px(310.) })
+        // Standard panes keep at least the height that fits the fixed-size
+        // plot geometry (the 290px sky box plus cardinals) plus chrome;
+        // shorter windows scroll the overview page instead of clipping pane
+        // content mid-glyph at the timeline boundary (spec gap 1).
+        .min_h(if expanded { px(620.) } else { px(332.) })
         .h_full()
         .flex()
         .flex_col()
         .bg(palette.surface)
         .border_1()
         .border_color(palette.border)
+        .rounded(px(super::super::visual_system::radius_panel()))
+        .overflow_hidden()
+        .shadow(super::super::visual_system::panel_shadow(palette))
+        .child(super::super::visual_system::panel_sheen(palette))
         .child(
             div()
-                .h(px(metrics::PLOT_PANE_HEADER_HEIGHT))
-                .px(px(10.))
+                .h(px(metrics::PLOT_PANE_HEADER_HEIGHT_V3))
+                .px(px(14.))
                 .flex()
                 .items_center()
                 .justify_between()
                 .bg(palette.surface_alt)
-                .border_b_1()
-                .border_color(palette.border)
                 .child(
                     div()
                         .flex()
@@ -263,8 +269,10 @@ mod tests {
     }
 
     #[test]
-    fn pane_head_is_twenty_eight_pixels() {
-        assert_eq!(metrics::PLOT_PANE_HEADER_HEIGHT, 28.0);
+    fn pane_head_is_thirty_pixels() {
+        // Raised from 28 to 30 for the 2026-10-20 floating chassis: the
+        // rounded panel needs a hairline of breathing room under its corner.
+        assert_eq!(metrics::PLOT_PANE_HEADER_HEIGHT, 30.0);
         assert_eq!(HEAD_CONTROL_HEIGHT, 20.0);
     }
 }

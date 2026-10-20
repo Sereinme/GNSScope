@@ -659,15 +659,19 @@ pub(crate) fn track(
                 .h(px(metrics::TIMELINE_TRACK_HEIGHT))
                 .w(px(1.5))
                 .bg(palette.accent)
+                // Playhead cap: a 6px accent dot with a 2px surface ring, so
+                // the head reads as an instrument cursor instead of a text
+                // glyph (design pass).
                 .child(
                     div()
                         .absolute()
-                        .top(px(-1.))
-                        .left(px(-3.5))
-                        .text_size(px(9.))
-                        .line_height(px(10.))
-                        .text_color(palette.accent)
-                        .child("▼"),
+                        .top(px(-3.))
+                        .left(px(-3.))
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(palette.accent)
+                        .border_2()
+                        .border_color(palette.surface),
                 )
                 .child(callout(view, cursor_time, localize, palette)),
         )
@@ -930,9 +934,16 @@ fn paint_minimap(
             window.paint_path(path, palette.faint);
         }
     }
-    // Accent viewport frame, inset 2px so it never touches the minimap edge.
+    // Viewport frame, inset 2px so it never touches the minimap edge. At 1x
+    // zoom the frame covers the whole map and therefore encodes nothing, so
+    // it drops to a neutral rule instead of painting an accent outline.
     let frame_x = 2.0 + frame_start * (w - 4.0);
     let frame_w = ((frame_span * (w - 4.0)).max(2.0)).min(w - 4.0 - (frame_x - 2.0).max(0.0));
+    let frame_color = if frame_span >= 0.97 {
+        palette.border_strong
+    } else {
+        palette.accent
+    };
     window.paint_quad(quad(
         Bounds {
             origin: point(bounds.origin.x + px(frame_x), bounds.origin.y + px(2.0)),
@@ -941,7 +952,7 @@ fn paint_minimap(
         0.0,
         gpui_kit::transparent_black(),
         px(1.0),
-        palette.accent,
+        frame_color,
         Default::default(),
     ));
 }

@@ -1,7 +1,9 @@
 //! PVT summary table for the final selected solution (design-refresh spec §3.8).
 //!
-//! This module owns the frozen five-column contract (参数 / 值 / σ (1σ) / 单位 /
-//! 状态 with widths 146/170/72/40/46 = 474 px), the language-frozen 15-row key
+//! This module owns the five-column contract (参数 / 值 / σ (1σ) / 单位 /
+//! 状态 — frozen 146/170/72/40/46 at the 474 px reference table width,
+//! narrowing proportionally to 388 px of column minima on smaller panes and
+//! scrolling horizontally only below that), the language-frozen 15-row key
 //! list in exact order, full-precision value formatting (never truncated), the
 //! honest "—" presentation for unavailable sigma/value cells (never 0), and the
 //! quiet bare-text status mapping (有效 / 不可用 / 无效). It renders display-only
@@ -14,21 +16,38 @@
 use crate::visual_system::{data_font_family, interface_font_family, metrics, Palette};
 use crate::GuiPvtViewModel;
 use gnss_core::pvt::{PvtEpochSolutionKind, UtcDateTime};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::prelude::*;
 use gpui_kit::{div, px, AnyElement};
 
 // ---------------------------------------------------------------------------
-// Frozen geometry (spec §3.8)
+// Adaptive column geometry (spec §3.8)
 // ---------------------------------------------------------------------------
 
-/// Frozen column widths: 参数 146 / 值 170 / σ 72 / 单位 40 / 状态 46.
-pub(crate) const COL_KEY: f32 = 146.0;
-pub(crate) const COL_VALUE: f32 = 170.0;
-pub(crate) const COL_SIGMA: f32 = 72.0;
-pub(crate) const COL_UNIT: f32 = 40.0;
-pub(crate) const COL_STATUS: f32 = 46.0;
-/// Total table width (474 px); matches the mockup `viewBox 474`.
-pub(crate) const TABLE_WIDTH: f32 = COL_KEY + COL_VALUE + COL_SIGMA + COL_UNIT + COL_STATUS;
+/// Frozen reference widths: 参数 146 / 值 170 / σ 72 / 单位 40 / 状态 46 at
+/// the 474 px reference table width (mockup `viewBox 474`).
+pub(crate) const TABLE_WIDTH: f32 = 474.0;
+/// Column minima sized to the real content (longest key/value strings never
+/// truncate): 参数 130 / 值 140 / σ 48 / 单位 30 / 状态 40 = 388 px.
+pub(crate) const COL_MIN: [f32; 5] = [130.0, 140.0, 48.0, 30.0, 40.0];
+/// Surplus distribution: below 474 px the columns narrow proportionally
+/// toward their minima; the grow shares land exactly on the frozen widths at
+/// 474 px (16/30/24/10/6 of the 86 px surplus).
+pub(crate) const COL_GROW: [f32; 5] = [16.0, 30.0, 24.0, 10.0, 6.0];
+/// Smallest table width; below this the pane scrolls horizontally instead of
+/// clipping a column (spec §3.8: values are never truncated).
+pub(crate) const TABLE_MIN_WIDTH: f32 = 388.0;
+
+/// One table column: basis = minimum, grows into its frozen width share.
+fn column_div(index: usize) -> gpui_kit::Div {
+    div()
+        .flex_basis(px(COL_MIN[index]))
+        .flex_grow(COL_GROW[index])
+        .flex_shrink_0()
+        .min_w(px(COL_MIN[index]))
+        .overflow_hidden()
+        .whitespace_nowrap()
+}
 
 /// Header captions, Chinese, never all-caps English (gap 10).
 pub(crate) const HEADER_LABELS: [&str; 5] = ["参数", "值", "σ (1σ)", "单位", "状态"];
@@ -387,13 +406,18 @@ pub(crate) fn rows(input: SummaryInput<'_>) -> Vec<PvtTableRow> {
 // Drawing
 // ---------------------------------------------------------------------------
 
-fn header_cell(label: &'static str, width: f32, inset: f32) -> impl IntoElement {
-    div()
-        .w(px(width))
-        .flex_shrink_0()
-        .px(px(inset))
-        .whitespace_nowrap()
-        .child(label)
+fn header_cell(index: usize, label: &'static str) -> impl IntoElement {
+    let cell = column_div(index);
+    // Headers follow their column's alignment: the key column is left-aligned
+    // and inset like the rows; the value and sigma headers right-align over
+    // right-aligned numbers.
+    match index {
+        0 => cell.px(px(12.)).child(label),
+        1 => cell.pr(px(8.)).text_right().child(label),
+        2 => cell.pr(px(12.)).text_right().child(label),
+        3 => cell.pr(px(6.)).child(label),
+        _ => cell.child(label),
+    }
 }
 
 fn header_row(palette: Palette) -> impl IntoElement {
@@ -407,11 +431,12 @@ fn header_row(palette: Palette) -> impl IntoElement {
         .text_size(px(11.))
         .font_family(interface_font_family())
         .text_color(palette.muted)
-        .child(header_cell(HEADER_LABELS[0], COL_KEY, 12.))
-        .child(header_cell(HEADER_LABELS[1], COL_VALUE, 0.))
-        .child(header_cell(HEADER_LABELS[2], COL_SIGMA, 0.))
-        .child(header_cell(HEADER_LABELS[3], COL_UNIT, 0.))
-        .child(header_cell(HEADER_LABELS[4], COL_STATUS, 0.))
+        .children(
+            HEADER_LABELS
+                .into_iter()
+                .enumerate()
+                .map(|(index, label)| header_cell(index, label).into_any_element()),
+        )
 }
 
 fn row_element(row: &PvtTableRow, is_last: bool, palette: Palette) -> AnyElement {
@@ -424,74 +449,69 @@ fn row_element(row: &PvtTableRow, is_last: bool, palette: Palette) -> AnyElement
             this.border_b_1().border_color(palette.border)
         })
         .child(
-            div()
-                .w(px(COL_KEY))
-                .flex_shrink_0()
+            column_div(0)
                 .px(px(12.))
                 .text_size(px(11.))
                 .font_family(interface_font_family())
                 .text_color(palette.muted)
-                .whitespace_nowrap()
                 .child(row.key),
         )
         .child(
-            div()
-                .w(px(COL_VALUE))
-                .flex_shrink_0()
+            // Measurements right-align on the decimal side and end with the
+            // unit column, so the eye can compare magnitudes down the stack.
+            column_div(1)
+                .text_right()
+                .pr(px(8.))
                 .text_size(px(12.))
                 .font_family(data_font_family())
                 .text_color(palette.text)
-                .whitespace_nowrap()
                 .child(row.value.clone()),
         )
         .child(
-            div()
-                .w(px(COL_SIGMA))
-                .flex_shrink_0()
+            column_div(2)
+                .text_right()
+                .pr(px(12.))
                 .text_size(px(12.))
                 .font_family(data_font_family())
                 .text_color(if row.sigma.is_some() {
-                    palette.text
+                    palette.muted
                 } else {
                     palette.faint
                 })
-                .whitespace_nowrap()
                 .child(row.sigma_display().to_string()),
         )
         .child(
-            div()
-                .w(px(COL_UNIT))
-                .flex_shrink_0()
+            column_div(3)
+                .pr(px(6.))
                 .text_size(px(11.))
                 .font_family(interface_font_family())
                 .text_color(palette.faint)
-                .whitespace_nowrap()
                 .child(row.unit.unwrap_or(UNAVAILABLE)),
         )
         .child(
-            div()
-                .w(px(COL_STATUS))
-                .flex_shrink_0()
+            column_div(4)
                 .text_size(px(11.))
                 .font_family(interface_font_family())
                 .text_color(row.status.color(palette))
-                .whitespace_nowrap()
                 .child(row.status.label()),
         )
         .into_any_element()
 }
 
-/// Full-width wrapper that centers the frozen 474 px table inside the pane
-/// well (mockup: 474 in a 480 well, 3 px margins).
+/// The table fills the pane well up to the 474 px reference width, narrows
+/// proportionally down to the 388 px column minima, and scrolls
+/// horizontally only below that — the 状态 column is never clipped
+/// unreachable behind the pane edge (spec §3.8 precision rules).
 pub(crate) fn summary_table(input: SummaryInput<'_>, palette: Palette) -> AnyElement {
     let rows = rows(input);
     div()
         .w_full()
-        .flex()
-        .justify_center()
+        .overflow_x_scrollbar()
         .child(
             div()
-                .w(px(TABLE_WIDTH))
+                .w_full()
+                .min_w(px(TABLE_MIN_WIDTH))
+                .max_w(px(TABLE_WIDTH))
                 .flex()
                 .flex_col()
                 .child(header_row(palette))
@@ -561,15 +581,22 @@ mod tests {
     }
 
     #[test]
-    fn frozen_geometry_matches_the_spec() {
+    fn column_model_reproduces_frozen_widths_at_the_reference_table() {
         assert_eq!(HEADER_LABELS, ["参数", "值", "σ (1σ)", "单位", "状态"]);
-        assert_eq!(TABLE_WIDTH, 474.0);
-        assert_eq!(
-            (COL_KEY, COL_VALUE, COL_SIGMA, COL_UNIT, COL_STATUS),
-            (146.0, 170.0, 72.0, 40.0, 46.0)
-        );
-        assert_eq!(metrics::PVT_HEADER_ROW_HEIGHT, 22.0);
-        assert_eq!(metrics::PVT_ROW_HEIGHT, 20.0);
+        // 18.5/20 (down from 20/22) keeps all fifteen rows visible inside the
+        // 30px pane head after the floating chassis took 8px of gutters.
+        assert_eq!(metrics::PVT_ROW_HEIGHT, 18.5);
+        assert_eq!(metrics::PVT_HEADER_ROW_HEIGHT, 20.0);
+        assert_eq!(COL_MIN.iter().sum::<f32>(), TABLE_MIN_WIDTH);
+        let surplus = TABLE_WIDTH - TABLE_MIN_WIDTH;
+        assert_eq!(COL_GROW.iter().sum::<f32>(), surplus);
+        // Each column's min + its grow share of the 86px surplus lands
+        // exactly on the frozen 146/170/72/40/46 at the 474px reference.
+        let frozen = [146.0, 170.0, 72.0, 40.0, 46.0];
+        for (index, frozen_width) in frozen.into_iter().enumerate() {
+            let width = COL_MIN[index] + surplus * COL_GROW[index] / surplus;
+            assert_eq!(width, frozen_width, "column {index} at reference width");
+        }
     }
 
     #[test]

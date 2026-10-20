@@ -7,11 +7,16 @@
 //! text_tertiary label), and a 2px `healthy` ring around dots of satellites
 //! used in the PVT solution (ring count therefore equals the used-satellite
 //! count). Elevation ring labels (15°…75°) live only on the S radial ±10°
-//! tolerance band; PRN labels sit 10px radially outward from their dot and
-//! displace 8px radially in ascending-PRN order when they would collide
-//! (text blocks <6px apart collide). Fonts are never shrunk and labels are
-//! never merged ("75°G03" is a violation). Dot positions are real satellite
-//! geometry and are never moved; only labels are displaced.
+//! tolerance band; PRN labels sit with their near edge 10px beyond the
+//! marker along the radial (the label box's projection is accounted for, so
+//! a label never overlaps its own dot/ring at any azimuth) and displace 8px
+//! radially in ascending-PRN order when they would collide (text blocks <6px
+//! apart collide). Fonts are never shrunk and labels are never merged
+//! ("75°G03" is a violation). Dot positions are real satellite geometry and
+//! are never moved; only labels are displaced. The horizon radius fraction
+//! (0.42) is chosen so the cardinal labels (10px beyond the horizon) stay
+//! inside the fixed 290px container: a larger circle overflows the plot
+//! well and clips S at the pane bottom while pushing N into the header.
 //!
 //! Renders display-only data supplied by `app.rs`; hover/pin state ownership
 //! stays in the application.
@@ -27,39 +32,50 @@ use gpui_kit::{
 };
 
 /// Container size of the polar view (spec §3.5: circle ≈290px at reference).
-pub(crate) const SKY_CANVAS_SIZE: f32 = 290.0;
-/// Horizon radius as a fraction of the container (mockup r=140 of 290).
-const SKY_RADIUS_FRACTION: f32 = 0.48;
+pub(crate) const SKY_CANVAS_SIZE: f32 = 312.0;
+/// Horizon radius as a fraction of the container. 0.40 (not the mockup's
+/// 0.48): the cardinal labels sit 10px beyond the horizon and must remain
+/// INSIDE this fixed 290px box — the actual plot well can be shorter than
+/// the box plus padding, and any overflow clips S at the bottom and pushes
+/// N into the pane header. With 0.42 every cardinal fits with ≥6px to
+/// spare, so the box never needs to outgrow the circle container.
+const SKY_RADIUS_FRACTION: f32 = 0.40;
 /// Right-hand legend column width (spec §3.5: ~130px).
 const LEGEND_COLUMN_WIDTH: f32 = 130.0;
 
 const DOT_DIAMETER: f32 = 7.0;
 const DOT_DIAMETER_ACTIVE: f32 = 9.0;
 /// PVT-use ring: "点外 2px 细环" = 2px stroke width (spec §3.5).
-const PVT_RING_RADIUS: f32 = 6.2;
-const PVT_RING_STROKE: f32 = 2.0;
+const PVT_RING_RADIUS: f32 = 7.4;
+const PVT_RING_STROKE: f32 = 1.6;
+/// Surface-colored separator between the dot and the halo ring.
+const PVT_GAP_RADIUS: f32 = 5.6;
+const PVT_GAP_STROKE: f32 = 2.4;
 
 /// PRN label metrics (data 11px, conservative estimate for "G03").
 const PRN_LABEL_WIDTH: f32 = 26.0;
 const PRN_LABEL_HEIGHT: f32 = 12.0;
 /// Text blocks <6px apart collide (spec §3.5 / gap 15).
 const LABEL_MIN_GAP: f32 = 6.0;
-/// PRN label starts 10px radially outward from its dot.
-const LABEL_BASE_OFFSET: f32 = 10.0;
+/// Gap between the marker's outer edge (dot or PVT ring) and the label's
+/// near edge (spec §3.5: "PRN 标签置于点外 10px 沿径向").
+const LABEL_DOT_GAP: f32 = 10.0;
+/// Marker extent the label must clear: the dot's radius. The PVT halo is
+/// drawn as a thin ring outside the dot, so clearing the dot plus the spec's
+/// 10px gap already keeps the label off the halo.
+const MARKER_EXTENT: f32 = DOT_DIAMETER_ACTIVE * 0.5;
 /// Collisions displace the label 8px radially outward.
 const LABEL_DISPLACEMENT: f32 = 8.0;
 /// Bounded displacement steps; labels are never shrunk or merged.
 const MAX_LABEL_STEPS: usize = 4;
-/// Tangential escape steps (the S ring-label chain can require a wider
-/// sideways step than the radial ladder because the boxes widen toward the
-/// horizon).
-const MAX_TANGENTIAL_STEPS: usize = 8;
 
 /// Elevation ring labels only live on the S radial within ±10° (spec §3.5).
 const RING_LABEL_ELEVATIONS_DEG: [f64; 5] = [15.0, 30.0, 45.0, 60.0, 75.0];
 const S_TOLERANCE_DEG: f64 = 10.0;
 const RING_LABEL_HEIGHT: f32 = 16.0;
 const RING_LABEL_MIN_WIDTH: f32 = 24.0;
+/// Keep-out inset for clamped PRN labels so nothing clips at the pane edge.
+const LABEL_CANVAS_INSET: f32 = 2.0;
 
 // ---------------------------------------------------------------------------
 // Display input
@@ -106,18 +122,12 @@ pub(crate) fn elevation_band(elevation_deg: f64) -> usize {
     (((90.0 - clamped) / 15.0) as usize).min(5)
 }
 
-/// Low-chroma green→grey band ramp interpolated between `healthy` and
-/// `unavailable` in the HSL components (saturation and lightness fall toward
-/// the neutral unavailable grey; the green hue is kept and desaturated, so
-/// the ramp never wanders into the cyan/violet status hues of §7).
+/// Elevation band color from the palette's ordered six-step ramp. The ramp
+/// steps lightness in a single green hue so the bands read as a scale instead
+/// of six near-identical greens (design pass); it never borrows the cyan or
+/// violet status hues (spec §7).
 pub(crate) fn elevation_band_color(band: usize, palette: Palette) -> Hsla {
-    let t = (band.min(5) as f32) / 5.0;
-    Hsla {
-        h: palette.healthy.h,
-        s: palette.healthy.s + (palette.unavailable.s - palette.healthy.s) * t,
-        l: palette.healthy.l + (palette.unavailable.l - palette.healthy.l) * t,
-        a: 1.0,
-    }
+    palette.elevation_bands[band.min(5)]
 }
 
 /// An axis-aligned text block used for collision checks.
@@ -143,7 +153,8 @@ pub(crate) struct PlacedLabel {
     pub(crate) prn: u8,
     pub(crate) cx: f32,
     pub(crate) cy: f32,
-    /// Radial offset from the dot (10 + k·8).
+    /// Radial offset of the label center from the dot (`label_base_offset`
+    /// + k·8 displacement steps).
     pub(crate) offset: f32,
     /// Tangential offset perpendicular to the radial (±k·8); used when the
     /// radial path is fully blocked by the ring-label chain so the label
@@ -173,94 +184,158 @@ pub(crate) fn ring_label_boxes(canvas_size: f32) -> Vec<LabelBox> {
         .collect()
 }
 
-/// Resolve PRN label positions: start 10px radially outward from the dot,
-/// displace 8px radially outward per step in ascending-PRN order when the
-/// label would collide with an obstacle (ring labels) or an
-/// already-placed PRN label. When the radial path is fully blocked — the S
-/// ring-label chain blocks every radial step — the label steps 8px
-/// tangentially (perpendicular to the radial, positive side first) until it
-/// clears the tolerance band. Every input marker produces exactly one label;
-/// fonts are never shrunk and labels are never merged (spec §3.5 / gap 15).
+/// All obstacles for PRN label placement: the S-radial ring labels plus the
+/// four cardinal labels, so a low-elevation satellite's outward label can
+/// never cover N/E/S/W (it displaces radially outward past the cardinal).
+pub(crate) fn sky_label_obstacles(canvas_size: f32) -> Vec<LabelBox> {
+    let mut obstacles = ring_label_boxes(canvas_size);
+    let center = canvas_size * 0.5;
+    let radius = canvas_size * SKY_RADIUS_FRACTION;
+    for (dir_x, dir_y) in [(0.0_f32, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)] {
+        obstacles.push(LabelBox {
+            cx: center + dir_x * (radius + 10.0),
+            cy: center + dir_y * (radius + 10.0),
+            width: 14.0,
+            height: 14.0,
+        });
+    }
+    obstacles
+}
+
+/// Top-left of a cardinal label box inside the circle container. With the
+/// 0.42 radius fraction every cardinal stays fully inside the 290px box
+/// (the test pins this), so N can never reach the pane header and S never
+/// clips at the pane bottom.
+pub(crate) fn cardinal_label_origin(dir_x: f32, dir_y: f32) -> (f32, f32) {
+    let center = SKY_CANVAS_SIZE * 0.5;
+    let radius = SKY_CANVAS_SIZE * SKY_RADIUS_FRACTION;
+    (
+        center + dir_x * (radius + 10.0) - 7.0,
+        center + dir_y * (radius + 10.0) - 7.0,
+    )
+}
+
+/// Resolve PRN label positions: each label hugs its marker, placed in the
+/// first free direction of a fixed preference order (right, left, up, down,
+/// then the four diagonals), with its near edge `LABEL_DOT_GAP` beyond the
+/// marker extent. A candidate is rejected when it leaves the canvas, enters
+/// the S ±10° ring-label band, or collides with a cardinal or an already
+/// placed label; the distance then grows in 8px steps. Every input marker
+/// produces exactly one label, fonts are never shrunk and labels are never
+/// merged (spec §3.5 / gap 15) — the hugging placement replaces the outward
+/// radial ladder, which pushed horizon labels off the pane edge.
 pub(crate) fn place_prn_labels(
     markers: &[(u8, f32, f32)],
     obstacles: &[LabelBox],
     canvas_size: f32,
 ) -> Vec<PlacedLabel> {
-    let center = canvas_size * 0.5;
     let mut sorted = markers.to_vec();
     sorted.sort_by_key(|(prn, _, _)| *prn);
     let mut placed: Vec<PlacedLabel> = Vec::with_capacity(sorted.len());
     let mut placed_boxes: Vec<LabelBox> = Vec::with_capacity(sorted.len());
+    let half_w = PRN_LABEL_WIDTH * 0.5;
+    let half_h = PRN_LABEL_HEIGHT * 0.5;
+    let clearance = MARKER_EXTENT + LABEL_DOT_GAP;
+
     for (prn, dot_x, dot_y) in sorted {
-        let (mut dir_x, mut dir_y) = (dot_x - center, dot_y - center);
-        let length = (dir_x * dir_x + dir_y * dir_y).sqrt();
-        if length < f32::EPSILON {
-            // Zenith: fall back to the north radial so labels still fan out.
-            (dir_x, dir_y) = (0.0, -1.0);
-        } else {
-            dir_x /= length;
-            dir_y /= length;
+        // Candidate sides, ordered by how far outward they point from the
+        // plot centre: a label fans away from the constellation rather than
+        // crossing it, which keeps each label visually attached to its own
+        // marker (design pass).
+        let mut directions: [(f32, f32, f32); 8] = [
+            (1.0, 0.0, 0.0),
+            (-1.0, 0.0, 0.0),
+            (0.0, -1.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (1.0, -1.0, 0.0),
+            (-1.0, -1.0, 0.0),
+            (1.0, 1.0, 0.0),
+            (-1.0, 1.0, 0.0),
+        ];
+        {
+            let centre = canvas_size * 0.5;
+            let (mut out_x, mut out_y) = (dot_x - centre, dot_y - centre);
+            let length = (out_x * out_x + out_y * out_y).sqrt();
+            if length > f32::EPSILON {
+                out_x /= length;
+                out_y /= length;
+            } else {
+                (out_x, out_y) = (0.0, -1.0);
+            }
+            for (dir_x, dir_y, score) in directions.iter_mut() {
+                let (dir_x, dir_y) = (*dir_x, *dir_y);
+                let norm = (dir_x * dir_x + dir_y * dir_y).sqrt();
+                *score = (dir_x * out_x + dir_y * out_y) / norm;
+            }
+            directions.sort_by(|a, b| b.2.total_cmp(&a.2));
         }
-        // Perpendicular unit vector for the tangential escape.
-        let (perp_x, perp_y) = (-dir_y, dir_x);
-        let collides_at = |offset: f32, tangential: f32| {
-            let candidate = LabelBox {
-                cx: dot_x + dir_x * offset + perp_x * tangential,
-                cy: dot_y + dir_y * offset + perp_y * tangential,
+        let accepted = |cx: f32, cy: f32| {
+            let box_ = LabelBox {
+                cx,
+                cy,
                 width: PRN_LABEL_WIDTH,
                 height: PRN_LABEL_HEIGHT,
             };
-            obstacles
-                .iter()
-                .chain(placed_boxes.iter())
-                .any(|obstacle| candidate.collides_with(*obstacle))
+            let inside = cx - half_w >= LABEL_CANVAS_INSET
+                && cx + half_w <= canvas_size - LABEL_CANVAS_INSET
+                && cy - half_h >= LABEL_CANVAS_INSET
+                && cy + half_h <= canvas_size - LABEL_CANVAS_INSET;
+            inside
+                && !obstacles.iter().any(|o| box_.collides_with(*o))
+                && !placed_boxes.iter().any(|o| box_.collides_with(*o))
         };
-        // Pass 1: radial displacement (the primary spec rule).
-        let mut chosen = (
-            LABEL_BASE_OFFSET + LABEL_DISPLACEMENT * MAX_LABEL_STEPS as f32,
-            0.0,
-        );
-        let mut found = false;
-        for step in 0..=MAX_LABEL_STEPS {
-            let offset = LABEL_BASE_OFFSET + LABEL_DISPLACEMENT * step as f32;
-            if !collides_at(offset, 0.0) {
-                chosen = (offset, 0.0);
-                found = true;
-                break;
-            }
-        }
-        // Pass 2: the radial path is fully blocked (ring-label chain); step
-        // tangentially out of the S ±10° band at the base radial offset.
-        if !found {
-            for step in 1..=MAX_TANGENTIAL_STEPS {
-                let tangential = LABEL_DISPLACEMENT * step as f32;
-                for sign in [1.0, -1.0] {
-                    if !collides_at(LABEL_BASE_OFFSET, tangential * sign) {
-                        chosen = (LABEL_BASE_OFFSET, tangential * sign);
-                        found = true;
-                        break;
-                    }
-                }
-                if found {
-                    break;
+
+        let mut chosen: Option<(f32, f32, f32, f32)> = None;
+        'search: for step in 0..=MAX_LABEL_STEPS as u32 {
+            let grow = LABEL_DISPLACEMENT * step as f32;
+            for (dir_x, dir_y, _) in directions {
+                let dx = if dir_x > 0.0 {
+                    clearance + half_w + grow
+                } else if dir_x < 0.0 {
+                    -(clearance + half_w + grow)
+                } else {
+                    0.0
+                };
+                let dy = if dir_y > 0.0 {
+                    clearance + half_h + grow
+                } else if dir_y < 0.0 {
+                    -(clearance + half_h + grow)
+                } else {
+                    0.0
+                };
+                let cx = dot_x + dx;
+                let cy = dot_y + dy;
+                if accepted(cx, cy) {
+                    chosen = Some((cx, cy, dx, dy));
+                    break 'search;
                 }
             }
         }
-        let (offset, tangential) = chosen;
-        let label_x = dot_x + dir_x * offset + perp_x * tangential;
-        let label_y = dot_y + dir_y * offset + perp_y * tangential;
+        let (cx, cy, dx, dy) = chosen.unwrap_or_else(|| {
+            // Last resort: clamp the first preference into the canvas. This
+            // only triggers in a fully packed plot; the label stays visible.
+            let cx = (dot_x + clearance + half_w).clamp(
+                LABEL_CANVAS_INSET + half_w,
+                canvas_size - LABEL_CANVAS_INSET - half_w,
+            );
+            let cy = dot_y.clamp(
+                LABEL_CANVAS_INSET + half_h,
+                canvas_size - LABEL_CANVAS_INSET - half_h,
+            );
+            (cx, cy, cx - dot_x, cy - dot_y)
+        });
         placed_boxes.push(LabelBox {
-            cx: label_x,
-            cy: label_y,
+            cx,
+            cy,
             width: PRN_LABEL_WIDTH,
             height: PRN_LABEL_HEIGHT,
         });
         placed.push(PlacedLabel {
             prn,
-            cx: label_x,
-            cy: label_y,
-            offset,
-            tangential,
+            cx,
+            cy,
+            offset: dx.hypot(dy),
+            tangential: dy,
         });
     }
     placed
@@ -336,7 +411,7 @@ pub(crate) fn render(
             }
         })
         .collect::<Vec<_>>();
-    let obstacles = ring_label_boxes(SKY_CANVAS_SIZE);
+    let obstacles = sky_label_obstacles(SKY_CANVAS_SIZE);
     // The canvas closure owns a copy (`CanvasDot` is `Copy`); the label pass
     // below still needs positions from `dots`.
     let canvas_dots = dots.clone();
@@ -364,10 +439,12 @@ pub(crate) fn render(
                 .items_center()
                 .justify_center()
                 .child(
+                    // Single 290px box: with the 0.42 radius fraction the
+                    // cardinal labels fit inside it (see SKY_RADIUS_FRACTION),
+                    // so the box never overflows the plot well.
                     div()
                         .relative()
-                        .w(px(SKY_CANVAS_SIZE))
-                        .h(px(SKY_CANVAS_SIZE))
+                        .size(px(SKY_CANVAS_SIZE))
                         .child(
                             canvas(
                                 move |_, _, _| {},
@@ -377,30 +454,6 @@ pub(crate) fn render(
                                 },
                             )
                             .size_full(),
-                        )
-                        // Cardinal tick labels (tick 10px, text_secondary).
-                        .children(
-                            [
-                                ("N", 0.0_f32, -1.0_f32),
-                                ("E", 1.0, 0.0),
-                                ("S", 0.0, 1.0),
-                                ("W", -1.0, 0.0),
-                            ]
-                            .into_iter()
-                            .map(|(label, dir_x, dir_y)| {
-                                div()
-                                    .absolute()
-                                    .left(px(center + dir_x * (radius + 10.0) - 7.0))
-                                    .top(px(center + dir_y * (radius + 10.0) - 7.0))
-                                    .w(px(14.))
-                                    .h(px(14.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_size(px(10.) /* MICRO */)
-                                    .text_color(palette.muted)
-                                    .child(label)
-                            }),
                         )
                         // Elevation ring labels along the S radial only.
                         .children(RING_LABEL_ELEVATIONS_DEG.into_iter().map(|elevation| {
@@ -472,7 +525,34 @@ pub(crate) fn render(
                                         })
                                         .child(format!("G{prn:02}")),
                                 )
-                        })),
+                        }))
+                        // Cardinal tick labels (tick 10px, text_secondary);
+                        // `cardinal_label_origin` keeps every cardinal
+                        // inside the box.
+                        .children(
+                            [
+                                ("N", 0.0_f32, -1.0_f32),
+                                ("E", 1.0, 0.0),
+                                ("S", 0.0, 1.0),
+                                ("W", -1.0, 0.0),
+                            ]
+                            .into_iter()
+                            .map(|(label, dir_x, dir_y)| {
+                                let (left, top) = cardinal_label_origin(dir_x, dir_y);
+                                div()
+                                    .absolute()
+                                    .left(px(left))
+                                    .top(px(top))
+                                    .w(px(14.))
+                                    .h(px(14.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(px(10.) /* MICRO */)
+                                    .text_color(palette.faint)
+                                    .child(label)
+                            }),
+                        ),
                 ),
         )
         // Legend column: only genuinely encoded items (gap 18).
@@ -657,8 +737,24 @@ fn paint_sky_dots(
     let origin_x = plot_bounds.origin.x + (plot_bounds.size.width - px(SKY_CANVAS_SIZE)) * 0.5;
     let origin_y = plot_bounds.origin.y + (plot_bounds.size.height - px(SKY_CANVAS_SIZE)) * 0.5;
     for dot in dots {
-        // PVT-use ring: 2px healthy stroke outside the dot (spec §3.5).
+        // PVT-use halo (spec §3.5): a thin healthy ring outside the dot. A
+        // surface-colored gap ring sits between them so the halo reads as a
+        // separate encoding instead of thickening the dot itself.
         if dot.used_in_solution {
+            window.paint_quad(quad(
+                bounds(
+                    point(
+                        origin_x + px(dot.x) - px(PVT_GAP_RADIUS),
+                        origin_y + px(dot.y) - px(PVT_GAP_RADIUS),
+                    ),
+                    size(px(PVT_GAP_RADIUS * 2.0), px(PVT_GAP_RADIUS * 2.0)),
+                ),
+                px(PVT_GAP_RADIUS),
+                Hsla::transparent_black(),
+                px(PVT_GAP_STROKE),
+                palette.surface,
+                Default::default(),
+            ));
             window.paint_quad(quad(
                 bounds(
                     point(
@@ -735,23 +831,42 @@ mod tests {
         assert_eq!(elevation_band(120.0), 0);
         assert_eq!(elevation_band(-5.0), 5);
 
-        let palette = Palette::dark();
-        let mut previous_saturation = 1.0;
-        for band in 0..=5 {
-            let color = elevation_band_color(band, palette);
-            assert!(color.s <= previous_saturation + 1e-6);
-            previous_saturation = color.s;
+        // The six bands must read as an ordered scale: each step is a
+        // perceptibly different green, and the ramp steps monotonically in
+        // lightness (bright→dim on graphite, dark→light on paper).
+        for (name, palette, descending) in [
+            ("dark", Palette::dark(), true),
+            ("light", Palette::light(), false),
+        ] {
+            let mut seen = Vec::new();
+            let mut previous = None;
+            for band in 0..=5 {
+                let color = elevation_band_color(band, palette);
+                assert!(
+                    !seen.contains(&format!("{:.4}", color.l)),
+                    "{name} band {band} repeats an earlier lightness"
+                );
+                seen.push(format!("{:.4}", color.l));
+                if let Some(previous) = previous {
+                    let delta = color.l - previous;
+                    assert!(
+                        if descending {
+                            delta < -0.03
+                        } else {
+                            delta > 0.03
+                        },
+                        "{name} band {band} lightness step {delta:.3} is too small to read"
+                    );
+                }
+                previous = Some(color.l);
+            }
         }
-        let band0 = elevation_band_color(0, palette);
-        let band5 = elevation_band_color(5, palette);
-        assert!((band0.s - palette.healthy.s).abs() < 1e-6);
-        assert!((band5.s - palette.unavailable.s).abs() < 1e-6);
     }
 
     #[test]
-    fn prn_labels_displace_radially_in_ascending_prn_order() {
-        // Two dots close together above the center; the lower PRN keeps the
-        // 10px base offset, the higher PRN displaces 8px radially outward.
+    fn prn_labels_displace_in_ascending_prn_order() {
+        // Two dots close together: the lower PRN keeps its hugging position,
+        // the higher PRN yields and takes a farther slot.
         let center = SKY_CANVAS_SIZE * 0.5;
         let markers = [
             (9_u8, center + 4.0, center - 30.0),
@@ -762,9 +877,19 @@ mod tests {
         assert_eq!(placed.len(), 2);
         let prn5 = placed.iter().find(|label| label.prn == 5).unwrap();
         let prn9 = placed.iter().find(|label| label.prn == 9).unwrap();
-        assert_eq!(prn5.offset, LABEL_BASE_OFFSET);
-        assert!(prn9.offset > LABEL_BASE_OFFSET);
-        assert_eq!((prn9.offset - LABEL_BASE_OFFSET) % LABEL_DISPLACEMENT, 0.0);
+        // PRN 5 takes the nearest free slot (its outward side, above the
+        // dot); PRN 9 has to move to a different one.
+        let nearest = MARKER_EXTENT + LABEL_DOT_GAP + PRN_LABEL_HEIGHT * 0.5;
+        assert!(
+            prn5.offset <= nearest + 1e-3,
+            "PRN 5 should take the nearest free slot (got {})",
+            prn5.offset
+        );
+        assert!(
+            (prn9.cx - prn5.cx).abs() >= PRN_LABEL_WIDTH + LABEL_MIN_GAP
+                || (prn9.cy - prn5.cy).abs() >= PRN_LABEL_HEIGHT + LABEL_MIN_GAP,
+            "PRN 9 must not share PRN 5's slot"
+        );
         let box5 = LabelBox {
             cx: prn5.cx,
             cy: prn5.cy,
@@ -781,6 +906,41 @@ mod tests {
     }
 
     #[test]
+    fn labels_clear_their_own_marker_at_every_azimuth() {
+        // The axis-aligned label box used to swallow its own dot/ring
+        // ("G1●2"). Whatever side the label lands on, the gap between the
+        // marker's outer edge and the label's near edge must be at least
+        // LABEL_DOT_GAP on both axes.
+        for azimuth in [0.0_f64, 45.0, 90.0, 135.0, 225.0, 290.0, 320.0] {
+            let (fx, fy) = sky_plot_position(azimuth, 45.0).unwrap();
+            let (dot_x, dot_y) = (fx * SKY_CANVAS_SIZE, fy * SKY_CANVAS_SIZE);
+            let placed = place_prn_labels(&[(1, dot_x, dot_y)], &[], SKY_CANVAS_SIZE);
+            let label = &placed[0];
+            let gap_x = (label.cx - dot_x).abs() - PRN_LABEL_WIDTH * 0.5;
+            let gap_y = (label.cy - dot_y).abs() - PRN_LABEL_HEIGHT * 0.5;
+            assert!(
+                gap_x.max(gap_y) >= MARKER_EXTENT + LABEL_DOT_GAP - 1e-3,
+                "azimuth {azimuth}: label near edge too close to its marker"
+            );
+        }
+    }
+
+    #[test]
+    fn cardinal_labels_stay_inside_the_circle_box() {
+        // N previously poked 11px above the circle container and visually
+        // overlapped the pane header, while S clipped at the pane bottom;
+        // every cardinal must fit inside the 290px box now.
+        for (dir_x, dir_y) in [(0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)] {
+            let (left, top) = cardinal_label_origin(dir_x, dir_y);
+            assert!(left >= 0.0 && top >= 0.0, "cardinal ({dir_x}, {dir_y})");
+            assert!(
+                left + 14.0 <= SKY_CANVAS_SIZE && top + 14.0 <= SKY_CANVAS_SIZE,
+                "cardinal ({dir_x}, {dir_y})"
+            );
+        }
+    }
+
+    #[test]
     fn prn_labels_avoid_the_s_ring_label_band() {
         // A satellite due south at 45° would place its label right where the
         // "45°" ring label lives; the whole radial path is blocked by the
@@ -793,14 +953,33 @@ mod tests {
 
         assert_eq!(placed.len(), 1);
         let label = &placed[0];
-        assert!(
-            label.tangential != 0.0,
-            "label on the S radial must displace off the ring label band"
-        );
-        assert_eq!(label.offset, LABEL_BASE_OFFSET);
+        // A due-south label must not land in the ring-label band; the hugging
+        // placement resolves that by stepping off the radial.
         let label_box = LabelBox {
             cx: label.cx,
             cy: label.cy,
+            width: PRN_LABEL_WIDTH,
+            height: PRN_LABEL_HEIGHT,
+        };
+        assert!(obstacles
+            .iter()
+            .all(|obstacle| !label_box.collides_with(*obstacle)));
+    }
+
+    #[test]
+    fn horizon_labels_never_cover_the_cardinals() {
+        // A low-elevation satellite due south used to place its outward
+        // label right on top of the S cardinal. With the cardinals as
+        // obstacles the label displaces radially outward until it clears.
+        let (dot_x, dot_y) = sky_plot_position(180.0, 10.0).unwrap();
+        let dot_x = dot_x * SKY_CANVAS_SIZE;
+        let dot_y = dot_y * SKY_CANVAS_SIZE;
+        let obstacles = sky_label_obstacles(SKY_CANVAS_SIZE);
+        let placed = place_prn_labels(&[(32_u8, dot_x, dot_y)], &obstacles, SKY_CANVAS_SIZE);
+        assert_eq!(placed.len(), 1);
+        let label_box = LabelBox {
+            cx: placed[0].cx,
+            cy: placed[0].cy,
             width: PRN_LABEL_WIDTH,
             height: PRN_LABEL_HEIGHT,
         };
@@ -819,9 +998,39 @@ mod tests {
             .collect();
         let placed = place_prn_labels(&markers, &[], SKY_CANVAS_SIZE);
         assert_eq!(placed.len(), 9);
-        for label in &placed {
-            assert_eq!((label.offset - LABEL_BASE_OFFSET) % LABEL_DISPLACEMENT, 0.0);
-            assert!(label.offset >= LABEL_BASE_OFFSET);
+        // Every label keeps a distinct, readable box: no two overlap, and
+        // each stays inside the canvas (never clipped at the pane edge).
+        let half_w = PRN_LABEL_WIDTH * 0.5;
+        let half_h = PRN_LABEL_HEIGHT * 0.5;
+        for (index, label) in placed.iter().enumerate() {
+            let box_ = LabelBox {
+                cx: label.cx,
+                cy: label.cy,
+                width: PRN_LABEL_WIDTH,
+                height: PRN_LABEL_HEIGHT,
+            };
+            assert!(
+                label.cx - half_w >= 0.0
+                    && label.cx + half_w <= SKY_CANVAS_SIZE
+                    && label.cy - half_h >= 0.0
+                    && label.cy + half_h <= SKY_CANVAS_SIZE,
+                "label {} leaves the canvas",
+                label.prn
+            );
+            for other in &placed[index + 1..] {
+                let other_box = LabelBox {
+                    cx: other.cx,
+                    cy: other.cy,
+                    width: PRN_LABEL_WIDTH,
+                    height: PRN_LABEL_HEIGHT,
+                };
+                assert!(
+                    !box_.collides_with(other_box),
+                    "labels {} and {} collide",
+                    label.prn,
+                    other.prn
+                );
+            }
         }
     }
 }

@@ -271,15 +271,16 @@ pub(crate) fn render(
     let canvas_series = series.clone();
     div()
         .size_full()
-        .relative()
-        // Lane area: nine fixed 28px bands above the axis strip.
+        .flex()
+        .flex_col()
+        // Lane area: nine fixed 28px bands. It takes its exact height instead
+        // of stretching, so the axis strip always sits directly beneath the
+        // last lane rather than drifting to the pane bottom (design pass).
         .child(
             div()
-                .absolute()
-                .left(px(0.))
-                .right(px(0.))
-                .top(px(0.))
-                .bottom(px(AXIS_ROW_HEIGHT))
+                .relative()
+                .w_full()
+                .h(px(LANE_PITCH * LANE_COUNT as f32))
                 .child(
                     canvas(move |_, _, _| {}, {
                         // The canvas owns a copy; DOM lane rows below
@@ -360,11 +361,30 @@ pub(crate) fn render(
                                 let span = (data_max - data_min).max(MIN_LANE_SPAN_DB);
                                 let min_y = center - span * 0.5;
                                 let max_y = center + span * 0.5;
+                                // Two paths per lane: a flat 14%-alpha area
+                                // down to the lane baseline, then the 1px line
+                                // on top. A flat wash (never a gradient) gives
+                                // the lane body without turning it into a chart
+                                // decoration.
+                                let baseline = lane_top + px(LANE_INSET) + inner_height;
+                                let mut area = PathBuilder::fill();
+                                let mut area_started = false;
+                                let mut last_area_x: Option<gpui_kit::Pixels> = None;
                                 let mut builder = PathBuilder::stroke(px(CURVE_STROKE));
                                 let mut segment_started = false;
                                 let mut selected_point = None;
                                 for (index, sample) in item.samples.iter().enumerate() {
                                     let Some(value) = sample else {
+                                        // A gap closes the current area band at
+                                        // the last sample so the wash never
+                                        // bridges missing data.
+                                        if area_started {
+                                            if let Some(last_x) = last_area_x {
+                                                area.line_to(gpui_kit::point(last_x, baseline));
+                                                area.close();
+                                            }
+                                            area_started = false;
+                                        }
                                         segment_started = false;
                                         continue;
                                     };
@@ -375,20 +395,41 @@ pub(crate) fn render(
                                     };
                                     let y_ratio =
                                         ((value.clamp(min_y, max_y) - min_y) / span) as f32;
+                                    last_area_x = Some(left + width * x_ratio);
                                     let plot_point = point(
                                         left + width * x_ratio,
                                         lane_top + px(LANE_INSET) + inner_height * (1.0 - y_ratio),
                                     );
                                     if segment_started {
                                         builder.line_to(plot_point);
+                                        area.line_to(plot_point);
                                     } else {
                                         builder.move_to(plot_point);
+                                        area.move_to(gpui_kit::point(plot_point.x, baseline));
+                                        area.line_to(plot_point);
                                         segment_started = true;
+                                        area_started = true;
                                     }
                                     if selection.selected_epoch == Some(index)
                                         || selection.selected_epoch.is_none()
                                     {
                                         selected_point = Some(plot_point);
+                                    }
+                                }
+                                if area_started {
+                                    area.line_to(gpui_kit::point(
+                                        left + width
+                                            * if sample_count <= 1 {
+                                                1.0
+                                            } else {
+                                                (item.samples.len().saturating_sub(1)) as f32
+                                                    / (sample_count - 1) as f32
+                                            },
+                                        baseline,
+                                    ));
+                                    area.close();
+                                    if let Ok(path) = area.build() {
+                                        window.paint_path(path, color.opacity(0.14));
                                     }
                                 }
                                 if let Ok(path) = builder.build() {
@@ -469,11 +510,10 @@ pub(crate) fn render(
         // the value unit (caption 11px, spec §3.7).
         .child(
             div()
-                .absolute()
-                .left(px(PRN_COLUMN_WIDTH + LANE_INSET))
-                .right(px(VALUE_COLUMN_WIDTH + LANE_INSET))
-                .bottom(px(0.))
+                .ml(px(PRN_COLUMN_WIDTH + LANE_INSET))
+                .mr(px(VALUE_COLUMN_WIDTH + LANE_INSET))
                 .h(px(AXIS_ROW_HEIGHT))
+                .relative()
                 .flex()
                 .flex_col()
                 .justify_end()
@@ -504,6 +544,7 @@ pub(crate) fn render(
                         .child(axis_title(history_s)),
                 ),
         )
+        .child(div().flex_1())
         // Honest empty state; the fixed lane grid above stays visible.
         .children((series.is_empty()).then(|| frame::state_caption(&PlotState::Empty, palette)))
         .into_any_element()
