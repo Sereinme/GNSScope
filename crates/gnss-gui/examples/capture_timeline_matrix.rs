@@ -118,12 +118,15 @@ fn capture(width: u32, height: u32, theme: &str, language: &str) -> image::RgbaI
     std::env::remove_var("GNSSCOPE_THEME");
     std::env::remove_var("GNSSCOPE_LANGUAGE");
 
-    // The off-screen window is created at the requested logical size; accept
-    // the device scale factor doubling rather than pinning a single scale.
+    // The off-screen window is created at the requested logical size; the
+    // backing scale factor follows the host display (2x on a default Retina
+    // mode, ~1.91 in a scaled mode), so verify the canvas aspect and a sane
+    // scale rather than pinning one exact factor.
     let (captured_width, captured_height) = image.dimensions();
+    let scale_x = captured_width as f64 / width as f64;
+    let scale_y = captured_height as f64 / height as f64;
     assert!(
-        (captured_width == width && captured_height == height)
-            || (captured_width == width * 2 && captured_height == height * 2),
+        scale_x >= 1.0 && (scale_x - scale_y).abs() < 0.01,
         "unexpected capture dimensions {captured_width}x{captured_height} for {width}x{height}"
     );
     image

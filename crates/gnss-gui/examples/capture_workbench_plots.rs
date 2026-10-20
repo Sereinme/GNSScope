@@ -99,11 +99,15 @@ fn capture_reference_pane(theme: &str, view: &str) -> image::RgbaImage {
     let image = cx
         .capture_screenshot(window.into())
         .unwrap_or_else(|error| panic!("{theme}/{view} capture failed: {error}"));
-    // The off-screen window is created at logical 1568x1003; accept the
-    // device scale factor doubling rather than pinning a single scale.
+    // The off-screen window is created at logical 1568x1003; the backing
+    // scale factor follows the host display (2x on a default Retina mode,
+    // ~1.91 in a scaled mode), so verify the canvas aspect and a sane scale
+    // rather than pinning one exact factor.
     let (width, height) = image.dimensions();
+    let scale_x = width as f64 / REFERENCE_WIDTH as f64;
+    let scale_y = height as f64 / REFERENCE_HEIGHT as f64;
     assert!(
-        (width == 1568 && height == 1003) || (width == 3136 && height == 2006),
+        scale_x >= 1.0 && (scale_x - scale_y).abs() < 0.01,
         "unexpected capture dimensions {width}x{height}"
     );
     image
