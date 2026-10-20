@@ -11,7 +11,6 @@
 //! (1568/1440/1100/800), so clearance decisions stay conservative on wider
 //! windows instead of clipping.
 
-use crate::ui::Localize;
 use crate::visual_system::{data_font_family, metrics, Palette};
 use crate::{GuiDiagnosticEvent, GuiDiagnosticEventKind};
 use gpui_kit::prelude::*;
@@ -24,20 +23,18 @@ use gpui_kit::{canvas, div, point, px, AnyElement, Bounds, PathBuilder, SharedSt
 /// Ticks live in the first 4px of the band; the lanes start below them. The
 /// time labels are the row directly above (rendered by `axis_labels`), so the
 /// ruler reads as one line across label, tick, lane.
-const RULER_HEIGHT: f32 = 4.0;
 const LANE_PITCH: f32 = 13.0;
-const LANE_COUNT: usize = 4;
-const BASELINE_TOP: f32 = RULER_HEIGHT + LANE_PITCH * LANE_COUNT as f32;
+/// Lanes above the rail (drawn top-down) and below it.
+const LANES_ABOVE: usize = 2;
+const LANES_BELOW: usize = 2;
+const LANE_COUNT: usize = LANES_ABOVE + LANES_BELOW;
+const RAIL_TOP: f32 = LANE_PITCH * LANES_ABOVE as f32;
+const RAIL_HEIGHT: f32 = 20.0;
+const RAIL_BOTTOM: f32 = RAIL_TOP + RAIL_HEIGHT;
+/// Bottom of the lane stack; the extent bar sits under it.
+const BASELINE_TOP: f32 = RAIL_BOTTOM + LANE_PITCH * LANES_BELOW as f32;
 const CAP_RING: f32 = 7.0;
 const PROGRESS_HEIGHT: f32 = 2.0;
-const CALLOUT_HEIGHT: f32 = 15.0;
-const CALLOUT_GAP: f32 = 10.0;
-/// Cursor fraction beyond which the callout flips to the left of the playhead.
-/// Chosen so the chip plus gap clears the right edge at the narrowest track
-/// (1 - (10 + 160) / 585 = 0.70 with margin).
-const CALLOUT_FLIP: f32 = 0.68;
-/// Conservative rendered width of "00:02:04.8 · 历元 1248" at 11px.
-const CALLOUT_WIDTH_EST: f32 = 160.0;
 /// Conservative rendered width of "处理边界 63%" at 11px.
 /// The boundary tag is now a bare percentage; estimate its width for the
 /// collision test against the playhead callout.
@@ -117,8 +114,6 @@ pub(crate) struct TrackView {
     pub(crate) visible_span: f32,
     /// Cursor position inside the visible window, 0..1.
     pub(crate) cursor_percent: f32,
-    /// 1-based selected epoch number for the callout.
-    pub(crate) epoch_number: usize,
     /// Real processed progress of the selected run, 0..1.
     pub(crate) processed: f32,
     /// All persisted events of the selected run (window filtering happens here).
@@ -132,7 +127,7 @@ impl TrackView {
         (start, span)
     }
 
-    fn cursor_time_ms(&self) -> u64 {
+    pub(crate) fn cursor_time_ms(&self) -> u64 {
         let (start, span) = self.window_ms();
         start + (span as f32 * self.cursor_percent) as u64
     }
@@ -268,13 +263,6 @@ pub(crate) fn axis_label_set(
     labels
 }
 
-/// Does the callout flip to the left of the playhead? Conservative: flips
-/// before strict necessity so the chip never reaches the divider at any
-/// window width in the acceptance matrix.
-pub(crate) fn callout_flipped(cursor_percent: f32) -> bool {
-    cursor_percent > CALLOUT_FLIP
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BoundaryCaption {
     /// `true` = caption right of the line, `false` = left of the line.
@@ -288,62 +276,30 @@ pub(crate) struct BoundaryCaption {
 /// and never crosses the track edge. Falls back to the stem-free lane
 /// interior right of the processed edge, then hides (the boundary line and
 /// progress cap remain) when no placement is clear.
-pub(crate) fn boundary_caption(boundary: f32, cursor: f32, stems: &[f32]) -> BoundaryCaption {
-    let boundary_px = boundary * NARROW_TRACK_REF;
-    let cursor_px = cursor * NARROW_TRACK_REF;
-    let (callout_left, callout_right) = if callout_flipped(cursor) {
-        (
-            cursor_px - CALLOUT_GAP - CALLOUT_WIDTH_EST,
-            cursor_px - CALLOUT_GAP,
-        )
-    } else {
-        (
-            cursor_px + CALLOUT_GAP,
-            cursor_px + CALLOUT_GAP + CALLOUT_WIDTH_EST,
-        )
-    };
-    let overlaps_callout =
-        |left: f32, right: f32| left < callout_right + 4.0 && right > callout_left - 4.0;
+pub(crate) fn boundary_caption(_boundary: f32, _cursor: f32, _stems: &[f32]) -> BoundaryCaption {
+    // The tag is now a three-character percentage with no in-track callout to
+    // avoid: put it right of its rule unless the record ends inside the tag's
+    // own width.
+    let boundary_px = _boundary * NARROW_TRACK_REF;
     let right_room = NARROW_TRACK_REF - boundary_px + TRACK_RIGHT_PAD;
-    if right_room >= CAPTION_WIDTH_EST
-        && !overlaps_callout(boundary_px, boundary_px + CAPTION_WIDTH_EST)
-    {
-        return BoundaryCaption {
-            right_of_line: true,
-            top: 0.0,
-            visible: true,
-        };
-    }
-    if boundary_px >= CAPTION_WIDTH_EST
-        && !overlaps_callout(boundary_px - CAPTION_WIDTH_EST, boundary_px)
-    {
-        return BoundaryCaption {
-            right_of_line: false,
-            top: 0.0,
-            visible: true,
-        };
-    }
     if right_room >= CAPTION_WIDTH_EST {
-        return BoundaryCaption {
+        BoundaryCaption {
             right_of_line: true,
-            top: 46.0,
+            top: 0.0,
             visible: true,
-        };
-    }
-    let stem_near_left = stems
-        .iter()
-        .any(|stem| stem * NARROW_TRACK_REF >= boundary_px - CAPTION_WIDTH_EST - 4.0);
-    if !stem_near_left {
-        return BoundaryCaption {
+        }
+    } else if boundary_px >= CAPTION_WIDTH_EST {
+        BoundaryCaption {
             right_of_line: false,
-            top: 46.0,
+            top: 0.0,
             visible: true,
-        };
-    }
-    BoundaryCaption {
-        right_of_line: true,
-        top: 0.0,
-        visible: false,
+        }
+    } else {
+        BoundaryCaption {
+            right_of_line: true,
+            top: 0.0,
+            visible: false,
+        }
     }
 }
 
@@ -438,7 +394,8 @@ fn event_window(view: &TrackView) -> Vec<(f32, EventKind)> {
 
 /// Cap shape drawn at the top of an event stem (6px cap in an 8px surface
 /// ring, matching `.cap--*` in theme.css; LOSS uses a glyph triangle).
-/// Each event kind owns one lane, top to bottom, in legend order.
+/// Each event kind owns one row: acquisition and tracking above the rail,
+/// navigation and loss below it.
 fn lane_of(kind: EventKind) -> usize {
     match kind {
         EventKind::Acquisition => 0,
@@ -448,15 +405,30 @@ fn lane_of(kind: EventKind) -> usize {
     }
 }
 
+/// The row's top edge in track coordinates.
+pub(crate) fn lane_top(index: usize) -> f32 {
+    if index < LANES_ABOVE {
+        LANE_PITCH * index as f32
+    } else {
+        RAIL_BOTTOM + LANE_PITCH * (index - LANES_ABOVE) as f32
+    }
+}
+
+/// Whether the row hangs below the rail (its cap faces down, away from it).
+pub(crate) fn lane_below(index: usize) -> bool {
+    index >= LANES_ABOVE
+}
+
 /// Short lane label used in the left rail.
 pub(crate) fn lane_label(index: usize) -> &'static str {
     ["ACQ", "TRK", "NAV", "LOSS"][index.min(LANE_COUNT - 1)]
 }
 
-/// Geometry the epoch dock needs to draw the left lane rail in register with
-/// the track: the ruler height and the lane pitch.
-pub(crate) const fn lane_rail_geometry() -> (f32, f32, usize) {
-    (RULER_HEIGHT, LANE_PITCH, LANE_COUNT)
+/// Geometry the epoch dock needs to place the left lane labels: each row's
+/// top edge is looked up through `lane_top`, so the labels sit in register with
+/// the mirrored lane stack.
+pub(crate) const fn lane_rows() -> usize {
+    LANE_COUNT
 }
 
 fn cap(kind: EventKind, palette: Palette) -> AnyElement {
@@ -504,9 +476,9 @@ fn tick_element(level: TickLevel, percent: f32, palette: Palette) -> impl IntoEl
     // ticks are a touch taller so a labelled time is findable without the
     // ruler becoming a picket fence.
     let (top, height) = match level {
-        TickLevel::Minor => (0.0, 3.0),
-        TickLevel::Mid => (0.0, 5.0),
-        TickLevel::Major => (0.0, 7.0),
+        TickLevel::Minor => (RAIL_TOP, 4.0),
+        TickLevel::Mid => (RAIL_TOP, 7.0),
+        TickLevel::Major => (RAIL_TOP, RAIL_HEIGHT),
     };
     let color = palette
         .border_strong
@@ -524,12 +496,7 @@ fn tick_element(level: TickLevel, percent: f32, palette: Palette) -> impl IntoEl
 /// standing on a hairline baseline, a 2px processed bar riding that baseline,
 /// and the playhead. The transparent seek slider from the app is the only
 /// interactive layer.
-pub(crate) fn track(
-    view: &TrackView,
-    seek: AnyElement,
-    localize: Localize,
-    palette: Palette,
-) -> AnyElement {
+pub(crate) fn track(view: &TrackView, seek: AnyElement, palette: Palette) -> AnyElement {
     let processed = view.processed.clamp(0.0, 1.0);
     // The boundary marker only exists while the record has both processed and
     // unprocessed regions; completed runs show a full processed block only.
@@ -542,81 +509,121 @@ pub(crate) fn track(
         .map(|(percent, _)| *percent)
         .collect::<Vec<_>>();
     let boundary = boundary_caption(processed, view.cursor_percent, &stem_percents);
-    let cursor_time = format_decis(view.cursor_time_ms());
 
     div()
         .relative()
         .h(px(metrics::TIMELINE_TRACK_HEIGHT))
         .w_full()
-        // Paint order: lane field, ruler, tick ladder, event marks, extent
-        // strip, boundary rule, playhead. Everything lives on the panel; the
-        // structure comes from the ruler and the four lanes, not from filled
-        // bands.
+        // Mirrored instrument band. Two event lanes sit above a two-line time
+        // rail and two below it, so the axis is the centre of the element
+        // instead of a border, and every mark hangs toward the side it belongs
+        // to.
         //
-        // 1. Lane field: four 13px rows with a hairline under the ruler. A
-        //    faint signal area sits behind them so the band carries real
-        //    amplitude without becoming a separate chart.
+        // 1. Row rules: one hairline between each pair of rows.
+        .children([LANE_PITCH, RAIL_BOTTOM + LANE_PITCH].into_iter().map(|y| {
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(y))
+                .h(px(1.))
+                .bg(palette.border.opacity(0.5))
+        }))
+        // 2. The rail: two 1px rules 14px apart. `border_strong` on both keeps
+        //    it readable as one element and lets the labels sit between them.
         .child(
             div()
                 .absolute()
                 .left_0()
                 .right_0()
-                .top(px(RULER_HEIGHT))
-                .h(px(LANE_PITCH * LANE_COUNT as f32))
-                .bg(palette.surface_alt.opacity(0.45))
-                .border_t_1()
-                .border_b_1()
-                .border_color(palette.border)
-                .children((1..LANE_COUNT).map(|lane| {
+                .top(px(RAIL_TOP))
+                .h(px(RAIL_HEIGHT))
+                .bg(palette.surface_alt)
+                .child(
                     div()
                         .absolute()
                         .left_0()
                         .right_0()
-                        .top(px(LANE_PITCH * lane as f32))
+                        .top_0()
                         .h(px(1.))
-                        .bg(palette.border.opacity(0.55))
-                })),
+                        .bg(palette.plot_axis),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .h(px(1.))
+                        .bg(palette.plot_axis),
+                ),
         )
-        // 3. Tick ladder under the ruler.
+        // 3. Time labels ride inside the rail.
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(RAIL_TOP))
+                .h(px(RAIL_HEIGHT))
+                .child(axis_labels(view, palette, RAIL_HEIGHT)),
+        )
+        // 4. Tick ladder: short stubs hanging from the rail's top rule.
         .children(
             ticks(ladder, start_ms, span_ms)
                 .into_iter()
                 .map(|(percent, level)| tick_element(level, percent, palette)),
         )
-        // 4. Event marks: each event is a 1px flag with its cap at the top of
-        //    its own lane, so ACQ / TRK / NAV / LOSS never overlap.
+        // 5. Event marks. Above rows hang down to the rail's top rule with the
+        //    cap at the row's outer edge; below rows mirror that.
         .children(
             stems
                 .into_iter()
                 .enumerate()
                 .map(|(index, (percent, kind))| {
-                    let lane = lane_of(kind) as f32;
+                    let lane = lane_of(kind);
+                    let row_top = lane_top(lane);
+                    let below = lane_below(lane);
+                    let cap_top = if below {
+                        row_top + LANE_PITCH - CAP_RING - 1.0
+                    } else {
+                        row_top + 1.0
+                    };
+                    let stem_top = if below {
+                        RAIL_BOTTOM
+                    } else {
+                        cap_top + CAP_RING
+                    };
+                    let stem_height = if below {
+                        cap_top - RAIL_BOTTOM
+                    } else {
+                        RAIL_TOP - (cap_top + CAP_RING)
+                    };
                     div()
                         .id(SharedString::from(format!("timeline-stem-{index}")))
                         .absolute()
                         .left(gpui_kit::relative(percent))
-                        .top(px(RULER_HEIGHT + lane * LANE_PITCH + 1.0))
+                        .top(px(stem_top))
                         .w(px(1.))
-                        .h(px(LANE_PITCH - 3.0))
+                        .h(px(stem_height.max(1.0)))
                         .bg(kind.color(palette).opacity(0.75))
                         .child(
                             div()
                                 .absolute()
                                 .left_0()
                                 .ml(px(-(CAP_RING - 1.0) / 2.0))
-                                .top(px(-1.))
+                                .top(px(cap_top - stem_top))
                                 .child(cap(kind, palette)),
                         )
                 }),
         )
-        // 5. Record extent: a 2px bar on the bottom edge of the band, which is
-        //    where a loaded range belongs.
+        // 6. Record extent on the bottom edge of the band.
         .child(
             div()
                 .absolute()
                 .left_0()
                 .right_0()
-                .bottom_0()
+                .top(px(BASELINE_TOP))
                 .h(px(PROGRESS_HEIGHT))
                 .bg(palette.surface_alt)
                 .child(
@@ -629,21 +636,20 @@ pub(crate) fn track(
                         .bg(palette.accent),
                 ),
         )
-        // 6. Boundary: one hairline through the lanes with a bare percentage
-        //    tag in the ruler.
+        // 7. Boundary: one hairline through both halves, percentage at its foot.
         .children(show_boundary.then(|| {
             div()
                 .absolute()
                 .left(gpui_kit::relative(processed))
-                .top(px(RULER_HEIGHT))
-                .h(px(LANE_PITCH * LANE_COUNT as f32))
+                .top_0()
+                .h(px(BASELINE_TOP))
                 .w(px(1.))
                 .bg(palette.border_strong)
                 .when(boundary.visible, |this| {
                     this.child(
                         div()
                             .absolute()
-                            .top(px(LANE_PITCH * LANE_COUNT as f32 - 13.0))
+                            .top(px(BASELINE_TOP - 14.0))
                             .font_family(data_font_family())
                             .text_size(px(10.))
                             .text_color(palette.faint)
@@ -654,8 +660,8 @@ pub(crate) fn track(
                     )
                 })
         }))
-        // 7. Playhead: 1.5px accent line through every lane, a 7px square cap
-        //    on the ruler edge, and the compact callout.
+        // 7b. Playhead: 1.5px accent line through the whole band, a 7px cap on
+        //     the rail, callout riding the rail.
         .child(
             div()
                 .absolute()
@@ -668,12 +674,11 @@ pub(crate) fn track(
                 .child(
                     div()
                         .absolute()
-                        .top(px(-2.))
+                        .top(px(RAIL_TOP + RAIL_HEIGHT / 2.0 - 3.5))
                         .left(px(-2.75))
                         .size(px(7.))
                         .bg(palette.accent),
-                )
-                .child(callout(view, cursor_time, localize, palette)),
+                ),
         )
         // 8. Transparent seek slider spanning the track (shared cursor).
         .child(
@@ -691,65 +696,14 @@ pub(crate) fn track(
         .into_any_element()
 }
 
-fn callout(
-    view: &TrackView,
-    cursor_time: String,
-    localize: Localize,
-    palette: Palette,
-) -> AnyElement {
-    let flipped = callout_flipped(view.cursor_percent);
-    let chip = div()
-        .absolute()
-        .top(px(RULER_HEIGHT + 2.0))
-        .when(flipped, |this| this.right(px(CALLOUT_GAP)))
-        .when(!flipped, |this| this.left(px(CALLOUT_GAP)))
-        .h(px(CALLOUT_HEIGHT))
-        .px(px(6.))
-        .flex()
-        .items_center()
-        .gap(px(5.))
-        .border_1()
-        .border_color(palette.border_strong)
-        .bg(palette.surface_alt)
-        // 1px accent connector anchoring the chip to the playhead.
-        .child(
-            div()
-                .absolute()
-                .top(px(6.))
-                .when(flipped, |this| this.right(px(-11.)))
-                .when(!flipped, |this| this.left(px(-11.)))
-                .w(px(10.))
-                .h(px(1.))
-                .bg(palette.accent),
-        )
-        .child(
-            div()
-                .font_family(data_font_family())
-                .text_size(px(11.))
-                .text_color(palette.accent)
-                .child(cursor_time),
-        )
-        .child(
-            div()
-                .text_size(px(11.))
-                .text_color(palette.muted)
-                .child(format!(
-                    "{} {}",
-                    localize("历元", "Epoch"),
-                    view.epoch_number
-                )),
-        );
-    chip.into_any_element()
-}
-
 /// Axis label row (18px) beneath the track. The end label is right-aligned to
 /// the track edge, leaving the 12px right gutter clear of the divider.
-pub(crate) fn axis_labels(view: &TrackView, palette: Palette) -> AnyElement {
+pub(crate) fn axis_labels(view: &TrackView, palette: Palette, height: f32) -> AnyElement {
     let (start_ms, span_ms) = view.window_ms();
     let ladder = tick_ladder(span_ms);
     div()
         .relative()
-        .h(px(metrics::TIMELINE_LABELS_HEIGHT))
+        .h(px(height))
         .w_full()
         .children(
             axis_label_set(start_ms, span_ms, ladder.major_step_ms, |time| {
@@ -759,9 +713,9 @@ pub(crate) fn axis_labels(view: &TrackView, palette: Palette) -> AnyElement {
             .map(|label| {
                 let base = div()
                     .absolute()
-                    .top(px(3.))
+                    .top(px(4.))
                     .font_family(data_font_family())
-                    .text_size(px(10.))
+                    .text_size(px(11.))
                     .text_color(palette.faint)
                     .whitespace_nowrap();
                 match label.align {
@@ -773,7 +727,7 @@ pub(crate) fn axis_labels(view: &TrackView, palette: Palette) -> AnyElement {
                         .text_center()
                         .child(label.time),
                     LabelAlign::Right => {
-                        base.right(px(0.)).w(px(52.)).text_right().child(label.time)
+                        base.right(px(9.)).w(px(52.)).text_right().child(label.time)
                     }
                 }
             }),
@@ -954,31 +908,16 @@ mod tests {
     }
 
     #[test]
-    fn callout_flips_before_reaching_the_divider() {
-        assert!(!callout_flipped(0.0));
-        assert!(!callout_flipped(0.68));
-        assert!(callout_flipped(0.69));
-        assert!(callout_flipped(1.0));
-    }
-
-    #[test]
-    fn boundary_caption_keeps_clear_of_the_callout_and_edges() {
+    fn boundary_tag_stays_inside_the_track() {
         // Cursor far left: caption sits right of the 63% boundary line.
         let caption = boundary_caption(0.63, 0.13, &[]);
         assert!(caption.visible);
         assert!(caption.right_of_line);
         assert_eq!(caption.top, 0.0);
 
-        // Cursor overlapping the right-side tag: drop to the lower row right of
-        // the line.
-        let caption = boundary_caption(0.63, 0.60, &[]);
-        assert!(caption.visible);
-        assert_eq!(caption.top, 46.0);
-        assert!(caption.right_of_line);
-
         // Only the last few percent leave no room for a right-side tag: it
         // flips to the left of the line, still on the top row.
-        let caption = boundary_caption(0.97, 0.3, &[]);
+        let caption = boundary_caption(0.97, 0.30, &[]);
         assert!(caption.visible);
         assert!(!caption.right_of_line);
         assert_eq!(caption.top, 0.0);

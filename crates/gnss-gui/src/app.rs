@@ -7680,7 +7680,6 @@ impl GnsscopeApp {
             visible_start,
             visible_span,
             cursor_percent,
-            epoch_number,
             processed,
             events: events
                 .iter()

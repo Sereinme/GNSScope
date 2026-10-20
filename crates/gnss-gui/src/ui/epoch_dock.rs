@@ -167,17 +167,16 @@ fn jump_popover(input: Option<AnyElement>, palette: Palette) -> AnyElement {
 /// The four lane labels, drawn in register with the track's lanes so each
 /// mark's row is named.
 fn lane_rail(palette: Palette) -> AnyElement {
-    let (ruler, pitch, lanes) = timeline::lane_rail_geometry();
     div()
         .relative()
         .w(px(LANE_RAIL_WIDTH))
         .flex_shrink_0()
-        .children((0..lanes).map(|index| {
+        .children((0..timeline::lane_rows()).map(|index| {
             div()
                 .absolute()
                 .left_0()
                 .right(px(8.))
-                .top(px(ruler + pitch * index as f32 + 2.0))
+                .top(px(timeline::lane_top(index) + 1.0))
                 .text_size(px(9.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(palette.faint)
@@ -374,6 +373,9 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
         localize,
     } = view;
     let envelope = minimap_envelope.as_deref();
+    // The playhead timecode is a header readout: it is always visible and can
+    // never occlude the rail or a lane, which the in-track chip did.
+    let cursor_readout = timeline::format_decis(track.cursor_time_ms());
     div()
         .flex_shrink_0()
         .h(px(metrics::TIMELINE_HEIGHT))
@@ -421,7 +423,25 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
                                 .text_color(palette.faint)
                                 .child(subtitle),
                         )
-                        .child(timeline::signal_sparkline(envelope, palette)),
+                        .child(timeline::signal_sparkline(envelope, palette))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .flex()
+                                .items_baseline()
+                                .gap(px(6.))
+                                .pl(px(4.))
+                                .font_family(data_font_family())
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(palette.text)
+                                        .child(cursor_readout),
+                                )
+                                .child(div().text_size(px(11.)).text_color(palette.faint).child(
+                                    format!("{} {}", localize("历元", "Epoch"), epoch_number),
+                                )),
+                        ),
                 )
                 .child(div().flex_shrink_0().child(timeline::legend(palette))),
         )
@@ -444,20 +464,6 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
                         .child(
                             div()
                                 .flex()
-                                .flex_shrink_0()
-                                .child(div().w(px(LANE_RAIL_WIDTH)).flex_shrink_0())
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .border_b_1()
-                                        .border_color(palette.border)
-                                        .child(timeline::axis_labels(&track, palette)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
                                 .flex_1()
                                 .min_h_0()
                                 .child(lane_rail(palette))
@@ -465,7 +471,7 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
                                     div()
                                         .flex_1()
                                         .min_w_0()
-                                        .child(timeline::track(&track, seek, localize, palette)),
+                                        .child(timeline::track(&track, seek, palette)),
                                 ),
                         ),
                 )

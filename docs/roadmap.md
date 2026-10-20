@@ -232,6 +232,16 @@ the lanes, and the whole bar dropped from 148px to 124px so the plots gain the d
 See `.scratch/ui-visual-refactor/design-pass-evidence.md` §10. Gates: formatting, strict
 Clippy, 360 passed / 0 failed / 8 ignored.
 
+**Timeline mirrored around its axis (2026-10-20):** the band now reads as an instrument
+line — acquisition and tracking lanes above, a 20px two-rule time rail in the centre with the
+time labels set between its rules, navigation and loss lanes below, and the 2px record-extent
+bar on the bottom edge. Event caps face away from the axis, the playhead's square cap sits on
+the rail, and the timecode became a header readout so nothing occludes the track. The
+in-track callout, `callout_flipped`, the `CALLOUT_*` constants, and `TrackView.epoch_number`
+were deleted with it, and the bar dropped from 148px to 116px. See
+`.scratch/ui-visual-refactor/design-pass-evidence.md` §11. Gates: formatting, strict Clippy,
+359 passed / 0 failed / 8 ignored (one test removed with the callout).
+
 **Phase 4 deletion safety correction:** history reveal/delete actions now live in
 right-click menus, not selected-row inline controls. Delete requests a native
 Cancel-first confirmation bound to the original UUID; changing selection/order
