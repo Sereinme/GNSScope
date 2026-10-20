@@ -159,6 +159,57 @@ replacement), readable Runs row backgrounds, and matching theme geometry;
 captures are indexed in `docs/ui-phase4-validation.md`. Native right-click
 menu/confirmation interaction remains grouped with the Phase 4 mouse gates.
 
+**Interface-wide design pass (2026-10-19):** the application shell, plots, and document
+pages were rebuilt against the concept image plus the `raycast`/`linear.app` DESIGN.md
+references (adoption table and change list in
+`.scratch/ui-visual-refactor/design-pass-evidence.md`). Tokens moved to a cool graphite
+ladder with a neutral solid primary action, hairline elevation, and an ordered six-step
+sky-plot elevation ramp; `ButtonKind::{Tab, Toggle}` were added so tabs and persistent
+toggles stop reading as filled chips; a gpui-component defect that washed out every
+custom-variant button fill was fixed by setting the resting fill explicitly. Sky labels
+now hug their markers (canvas-clamped, no leader lines), the ENU trajectory uses the
+data-series blue, the C/N0 axis sits under the last lane, the overview grid uses two
+explicit rows so panes never collide with the fixed timeline, the run-configuration rail
+scrolls beneath a pinned header, and Run Library / Interface Settings became flat dense
+lists instead of cards and chips. New headless capture harness
+`examples/capture_surfaces.rs` writes ten surfaces plus the 1568/1440/1100/800 ×
+theme × language matrix to `artifacts/ui-design-pass/`. Gates: `cargo fmt --all --check`,
+strict workspace Clippy, and `cargo test --workspace` green with real datasets present
+(gnss-core 146, gnss-gui lib 187 + 2 ignored). Resolution then moved to the
+`apple` DESIGN.md for precision-only principles: separators became text-ink alpha
+hairlines, the system keeps exactly one shadow (the command palette), every pane header
+and table shares one 12px inset, PVT and channel measurements right-align with their
+headers, the dark ladder desaturated toward neutral graphite and the light canvas adopted
+Apple's parchment `#f5f5f7`. Still open: the draft form's two-column field grid, the
+receiver-settings drawer's card composition, native mouse acceptance, and roadmap
+Phases 7–9.
+
+**Floating-chassis redesign (2026-10-20):** after two precision passes proved too
+incremental, the shell was rebuilt on a floating panel chassis: a deeper canvas with 8px
+gutters, 12px panel radius, and a two-level shadow language (soft for panels, strong for
+the command palette). This explicitly supersedes the earlier flat-chassis constraints
+(structure radius 0-4px, no shadows outside overlays); the arbitration table and rationale
+are recorded in `.scratch/ui-visual-refactor/design-pass-evidence.md` §6. The workbench
+header collapsed to a single identity line plus a 22px underline tab row, dock rows became
+inset selection pills with quiet section labels, the three document pages moved into a
+shared floating panel, and the draft form became a 232px wrapping field grid. Two defects
+were fixed: gpui-component painted its own selection chrome over GNSScope's tokenised
+tabs, and a temporarily shortened timeline (140px) broke the playhead hit test (caught by
+the issue-20 regression). Gates: formatting, strict Clippy, and
+`cargo test --workspace` 360 passed / 0 failed / 8 ignored with real datasets present;
+36 evidence captures refreshed under `artifacts/ui-design-pass/`.
+
+**Detail, colour, radius and interaction pass (2026-10-20):** the last pass replaced the
+per-component radii with a four-step ladder (control 4 / nested surface 8 / panel 12 / pill),
+switched hover and press from fixed greys to ink-alpha overlays that work on every surface
+tier, adopted Carbon's field grammar (filled input, 2px accent underline on focus), gave
+buttons a layout-stable inset 2px focus ring, added a 1px lit inner edge to panels, made
+scrollbars a faint ink pill on a transparent track, and strengthened the plots themselves: a
+flat 14% area under each C/N0 lane (closed correctly at data gaps, never a gradient) and a
+full-strength tail over the last fifth of the ENU track. See
+`.scratch/ui-visual-refactor/design-pass-evidence.md` §7 for the adoption table. Gates:
+formatting, strict Clippy, and `cargo test --workspace` 360 passed / 0 failed / 8 ignored.
+
 **Phase 4 deletion safety correction:** history reveal/delete actions now live in
 right-click menus, not selected-row inline controls. Delete requests a native
 Cancel-first confirmation bound to the original UUID; changing selection/order
