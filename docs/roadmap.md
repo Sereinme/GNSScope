@@ -254,6 +254,15 @@ machinery were deleted rather than left dormant. See
 `.scratch/ui-visual-refactor/design-pass-evidence.md` §12. Gates: formatting, strict Clippy,
 357 passed / 0 failed / 8 ignored.
 
+**Timeline measurement and ruler scrubbing (2026-10-21):** the profile now plots the MEAN
+C/N0 of the tracked channels per epoch instead of the peak — a peak stays high while every
+other satellite drops out, which hides exactly the moment worth finding — and the header
+subtitle states the measure (`C/N0 均值` / `C/N0 mean`). The time labels moved inside the band
+under the baseline so the seek layer covers body and ruler alike: dragging the scale now
+seeks, with `timeline_ruler_row_seeks_like_the_body` as its regression. See
+`.scratch/ui-visual-refactor/design-pass-evidence.md` §13. Gates: formatting, strict Clippy,
+358 passed / 0 failed / 8 ignored.
+
 **Phase 4 deletion safety correction:** history reveal/delete actions now live in
 right-click menus, not selected-row inline controls. Delete requests a native
 Cancel-first confirmation bound to the original UUID; changing selection/order

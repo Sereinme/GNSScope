@@ -435,12 +435,7 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
                         .pr(px(12.))
                         .pb(px(6.))
                         .pl(px(10.))
-                        .child(timeline::track(&track, profile, seek, palette))
-                        .child(timeline::axis_labels(
-                            &track,
-                            palette,
-                            metrics::TIMELINE_LABELS_HEIGHT,
-                        )),
+                        .child(timeline::track(&track, profile, seek, palette)),
                 )
                 .child(div().w(px(1.)).h_full().flex_shrink_0().bg(palette.border))
                 .child(cluster(

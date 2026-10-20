@@ -62,7 +62,7 @@ pub(crate) mod metrics {
     // (height recovery / timeline / runs / plots packages land next).
     pub(crate) const TIMELINE_HEIGHT: f32 = 126.0;
     pub(crate) const TIMELINE_HEADER_HEIGHT: f32 = 28.0;
-    pub(crate) const TIMELINE_TRACK_HEIGHT: f32 = 68.0;
+    pub(crate) const TIMELINE_TRACK_HEIGHT: f32 = 86.0;
     pub(crate) const TIMELINE_LABELS_HEIGHT: f32 = 18.0;
     pub(crate) const TIMELINE_TRANSPORT_WIDTH: f32 = 144.0;
     pub(crate) const RUN_ROW_HEIGHT: f32 = 50.0;

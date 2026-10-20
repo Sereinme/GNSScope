@@ -23,6 +23,8 @@ const CAP_SIZE: f32 = 6.0;
 /// Ridge geometry: bars stand on `BASELINE_TOP` and may use the whole field
 /// above it; the ruler occupies the strip below.
 const BASELINE_TOP: f32 = 62.0;
+/// Height of the time-label row under the baseline, inside the band.
+const RULER_LABELS_HEIGHT: f32 = 16.0;
 /// Upper bound on tick marks drawn in one frame.
 const TICK_CAP: usize = 480;
 /// Maximum event stems drawn inside the visible window.
@@ -589,7 +591,19 @@ pub(crate) fn track(
                         .child(triangle(palette.accent, true)),
                 ),
         )
-        // 7. Transparent seek slider spanning the whole band.
+        // 6b. Ruler labels live inside the band, under the baseline, so the
+        //     seek layer below covers them too.
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(BASELINE_TOP + 8.0))
+                .h(px(RULER_LABELS_HEIGHT))
+                .child(axis_labels(view, palette, RULER_LABELS_HEIGHT)),
+        )
+        // 7. Transparent seek slider spanning body and ruler alike: dragging the
+        //    scale is the primary gesture, so the whole band seeks.
         .child(
             div()
                 .absolute()

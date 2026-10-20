@@ -7650,27 +7650,36 @@ impl GnsscopeApp {
             InterfaceLanguage::SimplifiedChinese => ("接收机时间", "事件"),
             InterfaceLanguage::English => ("Receiver time", "Events"),
         };
+        let cn0_label = match self.interface_language {
+            InterfaceLanguage::SimplifiedChinese => "均值",
+            InterfaceLanguage::English => "mean",
+        };
         let subtitle = format!(
-            "{time_label} {receiver_seconds} s · PVT {pvt_hz} Hz · {event_label} {}",
+            "{time_label} {receiver_seconds} s · PVT {pvt_hz} Hz · C/N0 {cn0_label} · {event_label} {}",
             events.len()
         );
-        // Signal profile for the timeline body: per-epoch peak C/N0 across the
-        // selected run's channels, bucketed to the band width. Epochs without
-        // channel data stay `None` so the profile keeps an honest gap.
-        let peak_per_epoch = self
+        // Signal profile for the timeline body: the MEAN C/N0 of the tracked
+        // channels at each epoch. A mean is the honest "how healthy was the
+        // constellation here" reading — a peak would stay high while every
+        // other satellite dropped out, which is exactly the moment worth
+        // finding. Epochs with no tracked channel stay `None` (a gap).
+        let mean_per_epoch = self
             .display_epoch_channels()
             .iter()
             .map(|channels| {
-                let peak = channels
-                    .iter()
-                    .map(|channel| channel.cn0_db_hz)
-                    .filter(|cn0| cn0.is_finite() && *cn0 > 0.0)
-                    .fold(0.0_f64, f64::max);
-                (peak > 0.0).then_some(peak as f32)
+                let mut sum = 0.0_f64;
+                let mut count = 0_u32;
+                for channel in channels.iter().filter(|channel| channel.tracking_locked) {
+                    if channel.cn0_db_hz.is_finite() && channel.cn0_db_hz > 0.0 {
+                        sum += channel.cn0_db_hz;
+                        count += 1;
+                    }
+                }
+                (count > 0).then_some((sum / f64::from(count)) as f32)
             })
             .collect::<Vec<_>>();
         let profile = crate::plots::timeline::profile_series(
-            &peak_per_epoch,
+            &mean_per_epoch,
             epoch_period_ms.max(1),
             timeline_duration_ms,
             crate::plots::timeline::PROFILE_BUCKETS,
@@ -9766,6 +9775,58 @@ mod timeline_interaction_tests {
     /// The playhead cap and its callout are the visible grab handle of the
     /// timeline: a press near the top of the track must seek like a press on
     /// the baseline, not fall through a thin interaction strip.
+    #[gpui_kit::test]
+    fn timeline_ruler_row_seeks_like_the_body(cx: &mut gpui_kit::TestAppContext) {
+        // The time labels live inside the band now: a press on the ruler must
+        // move the cursor exactly like a press on the profile body, because
+        // dragging the scale is the primary gesture.
+        cx.update(gpui_kit::component::init);
+        let library = RunLibrary::open(":memory:").unwrap();
+        let run = library
+            .create_run(&GuiProcessingSettings::default())
+            .unwrap();
+        library
+            .update_progress(run.id, RunStatus::Completed, 1, 1, 0, "fixture")
+            .unwrap();
+        let (app, visual) = cx.add_window_view(move |window, cx| {
+            GnsscopeApp::with_library(window, cx, Some(library), false)
+        });
+        visual.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.selected_run_id = Some(run.id);
+                let (epochs, channels) = preview_epoch_history();
+                app.historical_epochs = epochs;
+                app.historical_channels = channels;
+                app.selected_epoch = Some(0);
+                cx.notify();
+            });
+        });
+        visual.run_until_parked();
+        let (bounds, count) = visual.update(|_, cx| {
+            let app = app.read(cx);
+            (app.timeline.read(cx).bounds(), app.display_epochs().len())
+        });
+        // 8px above the band's bottom edge is the label row.
+        let y = bounds.top() + bounds.size.height - px(8.);
+        let press = point(bounds.left() + bounds.size.width * 0.5, y);
+        visual.simulate_mouse_down(
+            press,
+            gpui_kit::MouseButton::Left,
+            gpui_kit::Modifiers::default(),
+        );
+        visual.simulate_mouse_up(
+            press,
+            gpui_kit::MouseButton::Left,
+            gpui_kit::Modifiers::default(),
+        );
+        let clicked = visual.update(|_, cx| app.read(cx).selected_epoch);
+        assert_eq!(
+            clicked,
+            epoch_index_for_percent(count, 50.0),
+            "pressing the ruler row must select that point of the record"
+        );
+    }
+
     #[gpui_kit::test]
     fn timeline_seek_grabs_the_playhead_region(cx: &mut gpui_kit::TestAppContext) {
         cx.update(gpui_kit::component::init);
