@@ -40,9 +40,13 @@ fn has_cjk(text: &str) -> bool {
 
 /// Renders the title bar. `command_input` is the real command `InputState`
 /// element (issue 17 item 1), hosted inside [`command_field_with`]'s chrome.
+/// `run_selector`, when provided (Workspace page), replaces the plain
+/// context label + name with the app-built selector field (spec §3.1:
+/// ~240px bordered field, middle-ellipsized data-font filename, ▾).
 pub(crate) fn render(
     selected_name: SharedString,
     page_context: &'static str,
+    run_selector: Option<AnyElement>,
     compact: bool,
     command_input: AnyElement,
     settings_control: AnyElement,
@@ -51,7 +55,7 @@ pub(crate) fn render(
     let zh = has_cjk(page_context);
     TitleBar::new()
         .h(px(metrics::TITLE_BAR_HEIGHT))
-        .bg(palette.sidebar)
+        .bg(palette.canvas)
         .border_color(palette.border)
         .text_color(palette.text)
         .child(
@@ -64,31 +68,41 @@ pub(crate) fn render(
                 .gap(px(10.))
                 .px(px(4.))
                 .child(
+                    // Typographic wordmark with a single accent hairline: a
+                    // small instrument stripe rather than a decorative icon
+                    // tile, which read as a second logo (design pass).
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(8.))
+                        .gap(px(9.))
                         .flex_shrink_0()
+                        // Mark: two concentric rings (a signal/epoch glyph)
+                        // drawn from hairlines — geometric, quiet, and
+                        // unmistakably not a second logo tile.
                         .child(
                             div()
-                                .size(px(24.))
+                                .relative()
+                                .size(px(13.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_color(palette.accent)
-                                .child(IconName::Map),
+                                .rounded_full()
+                                .border_1()
+                                .border_color(palette.accent)
+                                .child(div().size(px(3.)).rounded_full().bg(palette.accent)),
                         )
                         .child(
                             div()
-                                .text_size(px(15.))
+                                .text_size(px(13.5))
                                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                 .text_color(palette.text)
                                 .child("GNSScope"),
                         ),
                 )
                 .child(div().h(px(18.)).w(px(1.)).bg(palette.border))
-                .child(
-                    div()
+                .child(match run_selector {
+                    Some(selector) => selector,
+                    None => div()
                         .flex()
                         .items_baseline()
                         .gap(px(7.))
@@ -104,14 +118,17 @@ pub(crate) fn render(
                             div()
                                 .max_w(px(420.))
                                 .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
+                                // Single-line selector name: nowrap keeps the
+                                // fixed-height slot from clipping a wrapped
+                                // second line mid-glyph.
+                                .truncate()
                                 .text_size(px(11.))
                                 .font_family(data_font_family())
                                 .text_color(palette.text)
                                 .child(selected_name),
-                        ),
-                )
+                        )
+                        .into_any_element(),
+                })
                 .child(div().flex_1())
                 // Command field is centered between two flexible spacers and
                 // hidden in the compact layout (title-bar chrome budget). The

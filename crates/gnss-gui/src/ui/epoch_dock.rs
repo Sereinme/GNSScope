@@ -18,7 +18,9 @@
 
 use crate::plots::timeline::{self, TrackView};
 use crate::ui::Localize;
-use crate::visual_system::{data_font_family, metrics, ControlSize, GnssButton, Palette};
+use crate::visual_system::{
+    data_font_family, metrics, ButtonKind, ControlSize, GnssButton, Palette,
+};
 use gpui_kit::component::IconName;
 use gpui_kit::prelude::*;
 use gpui_kit::{div, px, AnyElement, FontWeight};
@@ -208,12 +210,19 @@ fn cluster(
         // Row 2: 4-way stepping grid, 4 equal cells with 4px gaps (4x33px at
         // the reference width), icons centered.
         .child(
+            // A segmented transport group: one hairline box divided into four
+            // equal cells, matching the zoom row below it so the right cluster
+            // reads as two aligned instrument rows.
             div()
                 .h(px(CLUSTER_CONTROL_HEIGHT))
                 .flex_shrink_0()
                 .grid()
                 .grid_cols(4)
-                .gap(px(4.))
+                .gap(px(2.))
+                .px(px(2.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(palette.border)
                 .child(step_button(
                     "epoch-first",
                     IconName::ArrowLeft,
@@ -258,7 +267,11 @@ fn cluster(
                 .h(px(CLUSTER_CONTROL_HEIGHT))
                 .flex_shrink_0()
                 .flex()
-                .gap(px(4.))
+                .gap(px(2.))
+                .px(px(2.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(palette.border)
                 .child(
                     GnssButton::new("timeline-zoom-out", "\u{2212}", palette)
                         .size(ControlSize::Compact)
@@ -297,6 +310,7 @@ fn cluster(
                     localize("跟随实时", "Follow live"),
                     palette,
                 )
+                .kind(ButtonKind::Toggle)
                 .size(ControlSize::Compact)
                 .w_full()
                 .h(px(CLUSTER_CONTROL_HEIGHT))
@@ -330,15 +344,13 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
     div()
         .flex_shrink_0()
         .h(px(metrics::TIMELINE_HEIGHT))
-        .mx(px(4.))
-        .rounded_tl(px(4.))
-        .rounded_tr(px(4.))
+        .rounded(px(crate::visual_system::radius_panel()))
         .overflow_hidden()
         .bg(palette.surface)
-        .border_t_1()
-        .border_l_1()
-        .border_r_1()
+        .border_1()
         .border_color(palette.border)
+        .shadow(crate::visual_system::panel_shadow(palette))
+        .child(crate::visual_system::panel_sheen(palette))
         .flex()
         .flex_col()
         // Header 28 (incl. 1px bottom line): pane title + real summary
@@ -363,17 +375,19 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
                         .gap(px(6.))
                         .child(
                             div()
+                                .min_w_0()
+                                .truncate()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(px(13.))
                                 .text_color(palette.muted)
-                                .whitespace_nowrap()
                                 .child(title),
                         )
                         .child(
                             div()
+                                .min_w_0()
+                                .truncate()
                                 .text_size(px(11.))
                                 .text_color(palette.faint)
-                                .whitespace_nowrap()
                                 .child(subtitle),
                         ),
                 )

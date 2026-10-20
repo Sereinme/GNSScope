@@ -10,8 +10,10 @@ pub(crate) enum ConfigurationEntry {
 }
 pub(crate) struct ConfigurationView {
     pub(crate) title: &'static str,
-    pub(crate) snapshot: String,
-    pub(crate) notice: &'static str,
+    /// Quiet caption next to the title (spec §3.9: "运行配置 只读快照").
+    pub(crate) subtitle: &'static str,
+    /// Plain bottom note (no bordered box), e.g. the immutability reminder.
+    pub(crate) footer: Option<&'static str>,
     pub(crate) entries: Vec<ConfigurationEntry>,
 }
 pub(crate) fn render(
@@ -24,14 +26,19 @@ pub(crate) fn render(
         .min_w(px(metrics::CONFIGURATION_RAIL_MIN_WIDTH))
         .h_full()
         .flex_shrink_0()
-        .overflow_y_scrollbar()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
         .bg(palette.surface)
-        .border_l_1()
+        .border_1()
         .border_color(palette.border)
+        .rounded(px(crate::visual_system::radius_panel()))
+        .shadow(crate::visual_system::panel_shadow(palette))
+        .child(crate::visual_system::panel_sheen(palette))
         .child(
             div()
-                .h(px(54.))
-                .px(px(14.))
+                .h(px(38.))
+                .px(px(12.))
                 .flex()
                 .items_center()
                 .justify_between()
@@ -39,40 +46,34 @@ pub(crate) fn render(
                 .border_color(palette.border)
                 .child(
                     div()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(8.))
                         .child(
                             div()
-                                .text_size(px(12.))
+                                .text_size(px(13.))
                                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                 .text_color(palette.text)
                                 .child(view.title),
                         )
                         .child(
                             div()
-                                .mt(px(3.))
-                                .font_family(data_font_family())
                                 .text_size(px(11.))
                                 .text_color(palette.muted)
-                                .child(view.snapshot),
+                                .child(view.subtitle),
                         ),
                 )
                 .child(close_action),
         )
+        // The header stays put; only the snapshot entries scroll, so the rail
+        // identity never scrolls out of view in a tall configuration.
         .child(
             div()
-                .px(px(14.))
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .px(px(12.))
                 .pb(px(16.))
-                .child(
-                    div()
-                        .mt(px(10.))
-                        .px(px(8.))
-                        .py(px(6.))
-                        .bg(palette.surface_alt)
-                        .border_1()
-                        .border_color(palette.border)
-                        .text_size(px(11.))
-                        .text_color(palette.muted)
-                        .child(view.notice),
-                )
                 .children(view.entries.into_iter().map(|entry| match entry {
                     ConfigurationEntry::Section(label) => {
                         inspector_section(label, palette).into_any_element()
@@ -80,6 +81,16 @@ pub(crate) fn render(
                     ConfigurationEntry::Row(label, value) => {
                         inspector_row(label, value, palette).into_any_element()
                     }
+                }))
+                .children(view.footer.map(|footer| {
+                    div()
+                        .mt(px(12.))
+                        .pt(px(8.))
+                        .border_t_1()
+                        .border_color(palette.border)
+                        .text_size(px(11.))
+                        .text_color(palette.muted)
+                        .child(footer)
                 })),
         )
         .into_any_element()
@@ -117,8 +128,10 @@ pub(crate) fn inspector_row(
             div()
                 .flex_1()
                 .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
+                // Single-line value slot (middle-ellipsis + tooltip above
+                // carries the full value); nowrap stops the 28px row from
+                // clipping a wrapped second line mid-glyph.
+                .truncate()
                 .text_right()
                 .text_size(px(11.))
                 .font_family(data_font_family())

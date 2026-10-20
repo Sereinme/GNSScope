@@ -31,8 +31,12 @@ pub(crate) fn render(
         .h_full()
         .flex_shrink_0()
         .bg(palette.sidebar)
-        .border_r_1()
+        .border_1()
         .border_color(palette.border)
+        .rounded(px(crate::visual_system::radius_panel()))
+        .overflow_hidden()
+        .shadow(crate::visual_system::panel_shadow(palette))
+        .child(crate::visual_system::panel_sheen(palette))
         .flex()
         .flex_col()
         .child(
@@ -95,21 +99,21 @@ pub(crate) fn render(
         )
         .into_any_element()
 }
-/// 24px section header (spec §3.2): `surface_alt` band, pane-title 13/600
-/// in text-secondary, data-11 count in text-tertiary, no divider.
+/// 24px section header: a quiet 11px label with its count, inset like the
+/// rows. No band — the inset selection pills already separate the groups, and
+/// a full-bleed band fought the rounded dock (2026-10-20 chassis).
 fn section_header(label: &'static str, count: usize, palette: Palette) -> impl IntoElement {
     div()
         .h(px(metrics::RUN_SECTION_HEADER_HEIGHT))
-        .px(px(12.))
+        .px(px(14.))
         .flex()
         .items_center()
         .justify_between()
-        .bg(palette.surface_alt)
         .child(
             div()
-                .text_size(px(13.))
+                .text_size(px(11.))
                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .text_color(palette.muted)
+                .text_color(palette.faint)
                 .child(label),
         )
         .child(

@@ -99,7 +99,10 @@ pub(crate) fn command_palette(
         .rounded(px(OVERLAY_RADIUS))
         .bg(palette.surface_raised)
         .border_1()
-        .border_color(palette.border)
+        .border_color(palette.border_strong)
+        // The stronger floating shadow belongs to the one layer that truly
+        // floats above everything; panels use the softer shared shadow.
+        .shadow(crate::visual_system::floating_shadow(palette))
         .text_color(palette.text)
         .font_family(interface_font_family())
         .child(search_row(view, palette))
@@ -237,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_shell_surface_raised_radius_8_no_shadow() {
+    fn overlay_shell_surface_raised_radius_8_single_soft_shadow() {
         let palette = palette();
         let view = view(Some(0));
         let mut overlay = command_palette(&view, palette, no_op_select());
@@ -248,7 +251,12 @@ mod tests {
         );
         assert_eq!(OVERLAY_RADIUS, 8.0);
         assert_eq!(style.background, Some(palette.surface_raised.into()));
-        assert!(style.box_shadow.as_ref().is_none_or(Vec::is_empty));
+        // The palette is the only floating layer in the app, so it owns the
+        // single soft shadow; panes, rows and controls stay flat.
+        let shadows = style.box_shadow.clone().unwrap_or_default();
+        assert_eq!(shadows.len(), 1, "exactly one shadow in the system");
+        assert!(shadows[0].blur_radius > px(16.));
+        assert!(!shadows[0].inset);
         assert!(view.filtered().len() == 2);
     }
 

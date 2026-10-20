@@ -1,6 +1,7 @@
 use crate::visual_system::{interface_font_family, Palette};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::prelude::*;
-use gpui_kit::{div, AnyElement};
+use gpui_kit::{div, px, AnyElement};
 
 const COMPACT_BREAKPOINT: f32 = 1_180.0;
 const DRAWER_REPLACES_WORKSPACE_BREAKPOINT: f32 = 900.0;
@@ -58,7 +59,7 @@ pub(crate) fn shell_root(
 ) -> AnyElement {
     div()
         .size_full()
-        .bg(palette.background)
+        .bg(palette.canvas)
         .text_color(palette.text)
         .font_family(interface_font_family())
         .flex()
@@ -69,11 +70,38 @@ pub(crate) fn shell_root(
         .into_any_element()
 }
 
+/// A document surface (New Analysis, Run Library, Interface Settings): one
+/// floating panel holding a scrollable page, so documents share the workbench's
+/// rounded/shadowed chassis instead of painting straight on the canvas.
+pub(crate) fn document_panel(content: AnyElement, palette: Palette) -> AnyElement {
+    use gpui_kit::Styled as _;
+    div()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .bg(palette.surface)
+        .border_1()
+        .border_color(palette.border)
+        .rounded(px(crate::visual_system::radius_panel()))
+        .overflow_hidden()
+        .shadow(crate::visual_system::panel_shadow(palette))
+        .child(crate::visual_system::panel_sheen(palette))
+        .child(div().size_full().overflow_y_scrollbar().child(content))
+        .into_any_element()
+}
+
+/// The window body: floating regions separated by a single gutter, inset from
+/// the window canvas so each region reads as a raised surface rather than a
+/// tile in a wireframe (2026-10-20 floating chassis).
 pub(crate) fn shell_body(runs_dock: Option<AnyElement>, content: Option<AnyElement>) -> AnyElement {
+    let gutter = crate::visual_system::metrics::SHELL_GUTTER;
     div()
         .flex_1()
         .min_h_0()
         .flex()
+        .gap(px(gutter))
+        .px(px(gutter))
+        .pb(px(gutter))
         .children(runs_dock)
         .children(content)
         .into_any_element()
@@ -88,11 +116,13 @@ pub(crate) fn workspace_shell(
     side_region: Option<AnyElement>,
     timeline: Option<AnyElement>,
 ) -> AnyElement {
+    let gutter = crate::visual_system::metrics::SHELL_GUTTER;
     div()
         .flex_1()
         .min_w_0()
         .min_h_0()
         .flex()
+        .gap(px(gutter))
         .child(
             div()
                 .flex_1()
@@ -100,6 +130,7 @@ pub(crate) fn workspace_shell(
                 .min_h_0()
                 .flex()
                 .flex_col()
+                .gap(px(gutter))
                 .children(workspace)
                 .children(timeline),
         )

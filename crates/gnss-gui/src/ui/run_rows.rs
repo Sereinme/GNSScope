@@ -126,19 +126,23 @@ fn on_action(
 /// Shared row chrome: 50px box, 12px content inset (2px reserved left edge
 /// and 10px padding), selection surface, hover surface, keyboard highlight
 /// and a tooltip carrying the full untruncated filename, the full creation
-/// timestamp (`created_long`) and — when the app resolved it — the full
-/// source path (spec §3.2 "全名与路径", issue 17 item 5).
+/// timestamp (`created_long`), the complete metadata readout and — when the
+/// app resolved it — the full source path (spec §3.2 "全名与路径", issue 17
+/// item 5).
 ///
 /// The keyboard highlight (spec §2.8) is a 2px inner stroke drawn by
 /// promoting the border to all four sides while shrinking the padding by
 /// the same amount, so focused rows keep identical content geometry.
-fn row_tooltip(run: &RunRowView) -> String {
-    match &run.source_path {
-        Some(path) if !path.is_empty() => {
-            format!("{}\n{}\n{}", run.filename, run.created_long, path)
-        }
-        _ => format!("{}\n{}", run.filename, run.created_long),
+fn row_tooltip(run: &RunRowView, localize: Localize) -> String {
+    let mut lines = vec![
+        run.filename.clone(),
+        run.created_long.clone(),
+        detail_readout(run, localize),
+    ];
+    if let Some(path) = run.source_path.as_ref().filter(|path| !path.is_empty()) {
+        lines.push(path.clone());
     }
+    lines.join("\n")
 }
 
 fn row_shell(
@@ -146,13 +150,16 @@ fn row_shell(
     run: &RunRowView,
     edge: bool,
     focusable: bool,
+    localize: Localize,
     palette: Palette,
 ) -> Stateful<Div> {
     let selected = run.selected;
-    let tooltip_text = row_tooltip(run);
+    let tooltip_text = row_tooltip(run, localize);
     div()
         .id(id)
         .h(px(metrics::RUN_ROW_HEIGHT))
+        .mx(px(6.))
+        .rounded(px(crate::visual_system::radius_surface()))
         .cursor_pointer()
         .border_l_2()
         .border_color(if edge {
@@ -160,16 +167,19 @@ fn row_shell(
         } else {
             palette.sidebar.opacity(0.0)
         })
-        .pl(px(10.))
-        .pr(px(12.))
+        .pl(px(9.))
+        .pr(px(10.))
         .py(px(4.))
+        // A selection pill inset from the dock edges reads as a chosen row;
+        // a full-bleed wash reads as a filled table cell (2026-10-20 chassis).
         .bg(if selected {
             palette.accent_wash
         } else {
-            palette.sidebar
+            palette.sidebar.opacity(0.0)
         })
         .when(!selected, |this| {
             this.hover(|style| style.bg(palette.hover))
+                .active(|style| style.bg(palette.active))
         })
         .when(focusable, |this| {
             this.tab_index(0).focus(move |style| {
@@ -202,8 +212,10 @@ fn name_line(run: &RunRowView, state: StripState, max_chars: usize, palette: Pal
             div()
                 .flex_1()
                 .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
+                // Single-line slot: without the explicit nowrap the name
+                // wraps and the fixed 18px row hard-clips the second line
+                // mid-glyph (the stuck/half-rendered text in the dock).
+                .truncate()
                 .text_size(px(12.))
                 .font_family(data_font_family())
                 .text_color(palette.text)
@@ -222,13 +234,21 @@ fn name_line(run: &RunRowView, state: StripState, max_chars: usize, palette: Pal
 /// The 4px strip sits between the two lines with a 2px gap on each side
 /// (18 + 8 + 16 = 42px of content inside the 50px row).
 fn strip_line(run: &RunRowView, state: StripState, palette: Palette) -> Div {
+    // 3px breathing room above and below, and the strip stops short of the
+    // row edges so it reads as a measure attached to the name rather than a
+    // full-bleed rule under it.
     div()
-        .my(px(2.))
+        .my(px(3.))
+        .pr(px(2.))
         .child(progress_strip(state, run.progress, palette))
 }
 
 /// Line 2 (16px): bare status word (11/500, semantic color) at the left,
-/// start time centered, elapsed readout right; all faint data 11px.
+/// the start time right after it, and the elapsed readout pinned right; all
+/// faint data 11px. Status and start keep their full width (`flex_shrink_0`)
+/// so the start time can never be crushed into a clipped fragment; the
+/// readout takes the remaining space and degrades to an ellipsis, with the
+/// complete readout on the tooltip (spec §3.2).
 /// Status wording is the non-color second cue that pairs with the strip
 /// geometry (spec §3.2, §7.5: never a filled chip).
 fn status_line(
@@ -254,9 +274,7 @@ fn status_line(
         )
         .child(
             div()
-                .flex_1()
-                .min_w_0()
-                .text_center()
+                .flex_shrink_0()
                 .font_family(data_font_family())
                 .text_size(px(11.))
                 .text_color(palette.faint)
@@ -264,7 +282,13 @@ fn status_line(
         )
         .child(
             div()
-                .flex_shrink_0()
+                .flex_1()
+                .min_w_0()
+                // Right-aligned single-line slot: if the readout cannot fit
+                // it ends with an ellipsis instead of crushing the start
+                // time; the tooltip carries the complete readout.
+                .truncate()
+                .text_right()
                 .font_family(data_font_family())
                 .text_size(px(11.))
                 .text_color(palette.faint)
@@ -272,12 +296,19 @@ fn status_line(
         )
 }
 
-/// Right-hand readout: elapsed time plus the real counters — PVT epoch
-/// count (CONTEXT.md canonical term 历元), sample count and source file
-/// size (issue 17 item 5 / ticket 14 follow-up 1) — in the Chinese
-/// key/value register (gap 10). Missing fields simply drop their segment;
-/// values are never fabricated.
-fn elapsed_readout(run: &RunRowView, localize: Localize) -> String {
+/// Right-hand readout on the row itself: the elapsed duration only. The
+/// counters — PVT epoch count (CONTEXT.md 历元), sample count and source file
+/// size — belong to [`detail_readout`] and ride in the hover tooltip, because
+/// the 316px dock cannot show them on the row without truncating mid-value
+/// (spec §3.2 fixes line 2 to status · start · elapsed).
+fn elapsed_readout(run: &RunRowView) -> String {
+    run.elapsed.clone()
+}
+
+/// Full counter readout used by the tooltip: elapsed, PVT epochs, samples and
+/// source size in the Chinese key/value register (gap 10). Missing fields drop
+/// their segment; values are never fabricated.
+fn detail_readout(run: &RunRowView, localize: Localize) -> String {
     let mut segments = vec![run.elapsed.clone()];
     if run.pvt_epoch_count > 0 {
         segments.push(format!(
@@ -342,6 +373,7 @@ fn active_row_element(
         &run,
         true,
         true,
+        localize,
         palette,
     )
     .on_mouse_down(gpui_kit::MouseButton::Left, |_, window, _| {
@@ -354,7 +386,7 @@ fn active_row_element(
         run.status,
         run.status_color,
         &run.created_short,
-        &elapsed_readout(&run, localize),
+        &elapsed_readout(&run),
         palette,
     ))
 }
@@ -379,7 +411,7 @@ fn queue_row_element(
     let selected = run.selected;
     // Queued rows are their own state: 排队 status word in attention amber,
     // an amber-tinted empty track and `--:--:--` placeholders (§2.7).
-    let tooltip_text = row_tooltip(&run);
+    let tooltip_text = row_tooltip(&run, localize);
     let content = div()
         .flex_1()
         .min_w_0()
@@ -458,7 +490,7 @@ fn queue_row_element(
                         localize("取消排队", "Remove from queue"),
                         palette,
                     )
-                    .kind(ButtonKind::Destructive)
+                    .kind(ButtonKind::QuietDestructive)
                     .size(ControlSize::Compact)
                     .on_click(on_action(&actions, RunAction::Cancel(id))),
                 ),
@@ -489,6 +521,7 @@ fn history_row_element(
         run,
         run.selected,
         true,
+        localize,
         palette,
     )
     .on_mouse_down(gpui_kit::MouseButton::Left, |_, window, _| {
@@ -501,7 +534,7 @@ fn history_row_element(
         run.status,
         run.status_color,
         &run.created_short,
-        &elapsed_readout(run, localize),
+        &elapsed_readout(run),
         palette,
     ))
 }
@@ -645,7 +678,9 @@ mod tests {
         );
         let style = row.style();
         assert_eq!(style.border_color, Some(palette.accent));
-        assert_eq!(background_color(style), Some(palette.sidebar));
+        // Unselected rows are transparent so the dock panel shows through and
+        // the inset selection pill is the only painted row surface.
+        assert_eq!(background_color(style), Some(palette.sidebar.opacity(0.0)));
         assert_eq!(row_height(style), Some(px(metrics::RUN_ROW_HEIGHT)));
     }
 
@@ -704,7 +739,7 @@ mod tests {
         let run = view("已完成", false, false);
         // Real fields render as key/value segments (issue 17 item 5).
         assert_eq!(
-            elapsed_readout(&run, localize_zh),
+            detail_readout(&run, localize_zh),
             "00:10:05 · 历元 1248 · 采样 4,000,000 · 16.0 MB"
         );
 
@@ -713,12 +748,12 @@ mod tests {
         sparse.samples_total = None;
         sparse.size_bytes = None;
         sparse.pvt_epoch_count = 0;
-        assert_eq!(elapsed_readout(&sparse, localize_zh), "00:10:05");
+        assert_eq!(detail_readout(&sparse, localize_zh), "00:10:05");
 
         // English labels localize.
         let english = |_, en: &'static str| en;
         assert_eq!(
-            elapsed_readout(&run, english),
+            detail_readout(&run, english),
             "00:10:05 · Epochs 1248 · Samples 4,000,000 · 16.0 MB"
         );
     }
@@ -736,12 +771,16 @@ mod tests {
     }
 
     #[test]
-    fn tooltip_carries_full_filename_and_path() {
-        // Without a resolved path the tooltip keeps name + timestamp.
+    fn tooltip_carries_full_filename_readout_and_path() {
+        // Without a resolved path the tooltip keeps name + timestamp + the
+        // complete metadata readout (which the fixed 16px line may ellipsize).
         let mut run = view("源不可用", false, false);
         assert_eq!(
-            row_tooltip(&run),
-            format!("{}\n{}", run.filename, run.created_long)
+            row_tooltip(&run, localize_zh),
+            format!(
+                "{}\n{}\n{}",
+                run.filename, run.created_long, "00:10:05 · 历元 1248 · 采样 4,000,000 · 16.0 MB"
+            )
         );
 
         // With a path it gains the full source path line (spec §3.2).
@@ -749,18 +788,21 @@ mod tests {
             "/Users/demo/data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN_4Msps_Run09.iqrun".to_string(),
         );
         assert_eq!(
-            row_tooltip(&run),
+            row_tooltip(&run, localize_zh),
             format!(
-                "{}\n{}\n/Users/demo/data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN_4Msps_Run09.iqrun",
+                "{}\n{}\n00:10:05 · 历元 1248 · 采样 4,000,000 · 16.0 MB\n/Users/demo/data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN_4Msps_Run09.iqrun",
                 run.filename, run.created_long
             )
         );
 
-        // An empty path string degrades to the two-line tooltip.
+        // An empty path string degrades to the three-line tooltip.
         run.source_path = Some(String::new());
         assert_eq!(
-            row_tooltip(&run),
-            format!("{}\n{}", run.filename, run.created_long)
+            row_tooltip(&run, localize_zh),
+            format!(
+                "{}\n{}\n00:10:05 · 历元 1248 · 采样 4,000,000 · 16.0 MB",
+                run.filename, run.created_long
+            )
         );
     }
 }

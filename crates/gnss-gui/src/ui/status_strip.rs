@@ -115,17 +115,21 @@ type Item = (&'static str, String, Hsla);
 
 /// Renders the strip at the existing app call site. Telemetry comes from the
 /// cached live sampler; tests call [`compose_with_sampler`] with an injected
-/// sampler instead.
+/// sampler instead. `compact` (narrow window) drops the telemetry segment
+/// and the trailing message entirely — degrading whole segments beats
+/// mid-glyph clipping them against each other.
 pub(crate) fn render(
     palette: Palette,
     toggle: AnyElement,
     items: impl IntoIterator<Item = Item>,
     message: String,
+    compact: bool,
 ) -> impl IntoElement {
     let plan = compose_with_sampler(
         items.into_iter().collect(),
         message,
         palette,
+        compact,
         live_telemetry,
     );
     strip_shell(palette, toggle, plan)
@@ -136,18 +140,20 @@ pub(crate) fn compose_with_sampler<F>(
     items: Vec<Item>,
     message: String,
     palette: Palette,
+    compact: bool,
     sampler: F,
 ) -> StripPlan
 where
     F: FnOnce() -> Option<TelemetrySample>,
 {
-    compose(items, message, palette, sampler())
+    compose(items, message, palette, compact, sampler())
 }
 
 fn compose(
     items: Vec<Item>,
     message: String,
     palette: Palette,
+    compact: bool,
     sample: Option<TelemetrySample>,
 ) -> StripPlan {
     let zh = items
@@ -159,8 +165,14 @@ fn compose(
     let first = iter.next();
     let left = left_segments(first, zh, palette);
     let center = center_segments(iter.collect(), zh, palette);
-    let right = right_segments(sample, zh, palette);
-    let message = (!message.trim().is_empty()).then_some(message);
+    // Narrow windows drop the telemetry segment and the trailing message
+    // rather than letting them collide mid-glyph with the center segment.
+    let right = if compact {
+        Vec::new()
+    } else {
+        right_segments(sample, zh, palette)
+    };
+    let message = (!compact && !message.trim().is_empty()).then_some(message);
 
     StripPlan {
         left,
@@ -424,7 +436,11 @@ fn live_telemetry() -> Option<TelemetrySample> {
 
 fn span_element(span: &Span) -> Div {
     let element = div()
+        // Narrow windows shrink a flexible segment's spans instead of
+        // hard-clipping them mid-glyph at the segment boundary.
+        .min_w_0()
         .whitespace_nowrap()
+        .text_ellipsis()
         .text_size(px(span.size))
         .text_color(span.color);
     match span.font {
@@ -456,9 +472,9 @@ fn strip_shell(palette: Palette, toggle: AnyElement, plan: StripPlan) -> Div {
     div()
         .h(px(metrics::STATUS_BAR_HEIGHT))
         .flex_shrink_0()
-        .bg(palette.sidebar)
-        .border_t_1()
-        .border_color(palette.border)
+        // The strip sits on the canvas below the floating panels, so it needs
+        // no rule of its own; the panel gutters already separate it.
+        .bg(palette.canvas)
         .flex()
         .items_center()
         .text_color(palette.text)
@@ -553,7 +569,10 @@ mod tests {
     #[test]
     fn left_segment_follows_active_run_contract() {
         let palette = palette();
-        let plan = compose_with_sampler(active_items(palette), String::new(), palette, || None);
+        let plan =
+            compose_with_sampler(active_items(palette), String::new(), palette, false, || {
+                None
+            });
         assert_eq!(
             plan_texts(&plan.left),
             vec!["活动解算任务", "·", "处理中", "63%"]
@@ -590,6 +609,7 @@ mod tests {
             vec![("活动运行", "Idle".to_string(), palette.muted)],
             String::new(),
             palette,
+            false,
             || None,
         );
         assert_eq!(plan_texts(&idle.left), vec!["无活动解算任务"]);
@@ -606,18 +626,22 @@ mod tests {
             vec![("Active run", "Running".to_string(), palette.muted)],
             String::new(),
             palette,
+            false,
             || None,
         );
         assert_eq!(plan_texts(&idle_en.left), vec!["No active run"]);
         // No items at all: em dash, never fabricated activity.
-        let empty = compose_with_sampler(Vec::new(), String::new(), palette, || None);
+        let empty = compose_with_sampler(Vec::new(), String::new(), palette, false, || None);
         assert_eq!(plan_texts(&empty.left), vec!["—"]);
     }
 
     #[test]
     fn center_segment_maps_keys_to_canonical_labels_with_rules() {
         let palette = palette();
-        let plan = compose_with_sampler(active_items(palette), String::new(), palette, || None);
+        let plan =
+            compose_with_sampler(active_items(palette), String::new(), palette, false, || {
+                None
+            });
         let texts = plan_texts(&plan.center);
         assert_eq!(
             texts,
@@ -677,6 +701,7 @@ mod tests {
             ],
             String::new(),
             palette,
+            false,
             || None,
         );
         let texts = plan_texts(&plan.center);
@@ -704,7 +729,10 @@ mod tests {
     fn right_segment_reads_unavailable_when_sampler_unavailable() {
         let palette = palette();
         // Injected sampler returning None → a single "不可用" segment.
-        let plan = compose_with_sampler(active_items(palette), String::new(), palette, || None);
+        let plan =
+            compose_with_sampler(active_items(palette), String::new(), palette, false, || {
+                None
+            });
         assert_eq!(plan_texts(&plan.right), vec!["不可用"]);
         match &plan.right[0] {
             Seg::Text(span) => {
@@ -719,6 +747,7 @@ mod tests {
             vec![("Active run", "Running".to_string(), palette.healthy)],
             String::new(),
             palette,
+            false,
             || None,
         );
         assert_eq!(plan_texts(&plan_en.right), vec!["Unavailable"]);
@@ -732,9 +761,10 @@ mod tests {
             disk: Some(32.0),
             memory: Some(41.2),
         };
-        let plan = compose_with_sampler(active_items(palette), String::new(), palette, || {
-            Some(sample.clone())
-        });
+        let plan =
+            compose_with_sampler(active_items(palette), String::new(), palette, false, || {
+                Some(sample.clone())
+            });
         assert_eq!(
             plan_texts(&plan.right),
             vec!["CPU 18%", "·", "磁盘 32%", "·", "内存 41%"]
@@ -763,9 +793,10 @@ mod tests {
             disk: Some(32.0),
             memory: Some(41.2),
         };
-        let plan = compose_with_sampler(active_items(palette), String::new(), palette, || {
-            Some(partial)
-        });
+        let plan =
+            compose_with_sampler(active_items(palette), String::new(), palette, false, || {
+                Some(partial)
+            });
         assert_eq!(
             plan_texts(&plan.right),
             vec!["CPU 不可用", "·", "磁盘 32%", "·", "内存 41%"]
@@ -779,21 +810,65 @@ mod tests {
             active_items(palette),
             "源 IQ 文件已移动或删除".to_string(),
             palette,
+            false,
             || None,
         );
         assert_eq!(
             with_message.message.as_deref(),
             Some("源 IQ 文件已移动或删除")
         );
-        let blank =
-            compose_with_sampler(active_items(palette), "   ".to_string(), palette, || None);
+        let blank = compose_with_sampler(
+            active_items(palette),
+            "   ".to_string(),
+            palette,
+            false,
+            || None,
+        );
         assert_eq!(blank.message, None);
     }
 
     #[test]
-    fn strip_shell_is_28px_with_top_border_and_no_shadow() {
+    fn compact_drops_telemetry_and_message_instead_of_colliding() {
+        // Narrow windows must degrade whole segments: at 800px the telemetry
+        // and trailing message used to collide mid-glyph with the center
+        // segment ("解类型 3D Fix63%"). Compact drops both entirely.
         let palette = palette();
-        let plan = compose_with_sampler(active_items(palette), String::new(), palette, || None);
+        let sample = TelemetrySample {
+            cpu: Some(18.4),
+            disk: Some(32.0),
+            memory: Some(41.2),
+        };
+        let wide = compose_with_sampler(
+            active_items(palette),
+            "确定性预览".to_string(),
+            palette,
+            false,
+            || Some(sample.clone()),
+        );
+        assert!(!wide.right.is_empty());
+        assert_eq!(wide.message.as_deref(), Some("确定性预览"));
+
+        let compact = compose_with_sampler(
+            active_items(palette),
+            "确定性预览".to_string(),
+            palette,
+            true,
+            || Some(sample),
+        );
+        assert!(compact.right.is_empty());
+        assert_eq!(compact.message, None);
+        // Left and center survive intact.
+        assert_eq!(compact.left, wide.left);
+        assert_eq!(compact.center, wide.center);
+    }
+
+    #[test]
+    fn strip_shell_is_28px_flat_on_the_canvas() {
+        let palette = palette();
+        let plan =
+            compose_with_sampler(active_items(palette), String::new(), palette, false, || {
+                None
+            });
         let toggle = div().into_any_element();
         let mut shell = strip_shell(palette, toggle, plan);
         let style = shell.style();
@@ -804,11 +879,8 @@ mod tests {
             other => panic!("unexpected strip height {other:?}"),
         }
         assert_eq!(metrics::STATUS_BAR_HEIGHT, 28.0);
-        // 1px top border; no box shadows (spec §7).
-        assert_eq!(
-            style.border_widths.top,
-            Some(gpui_kit::AbsoluteLength::Pixels(px(1.)))
-        );
+        // Flat on the canvas: no rule of its own and no box shadows.
+        assert_eq!(style.border_widths.top, None);
         assert!(style.box_shadow.as_ref().is_none_or(Vec::is_empty));
     }
 
