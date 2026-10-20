@@ -29,12 +29,14 @@ use gpui_kit::{div, px, AnyElement, FontWeight};
 /// follow. Sum 99 + 4x3 gaps + 8px bottom clearance = well 119.
 const CLUSTER_COUNTER_HEIGHT: f32 = 15.0;
 const CLUSTER_CONTROL_HEIGHT: f32 = 22.0;
-const CLUSTER_MINIMAP_HEIGHT: f32 = 18.0;
 const CLUSTER_ROW_GAP: f32 = 3.0;
 /// Precise-jump popover covers counter + gap + stepping grid (15+3+22).
 const JUMP_POPOVER_HEIGHT: f32 = 40.0;
 /// Zoom -/+ cell width (36/36/1fr across the 144px cluster).
 const ZOOM_BUTTON_WIDTH: f32 = 36.0;
+/// Width of the lane-label rail to the left of the track, so ACQ/TRK/NAV/LOSS
+/// line up with the lanes they name.
+const LANE_RAIL_WIDTH: f32 = 34.0;
 
 #[derive(Clone, Copy)]
 pub(crate) enum EpochAction {
@@ -162,9 +164,30 @@ fn jump_popover(input: Option<AnyElement>, palette: Palette) -> AnyElement {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The four lane labels, drawn in register with the track's lanes so each
+/// mark's row is named.
+fn lane_rail(palette: Palette) -> AnyElement {
+    let (ruler, pitch, lanes) = timeline::lane_rail_geometry();
+    div()
+        .relative()
+        .w(px(LANE_RAIL_WIDTH))
+        .flex_shrink_0()
+        .children((0..lanes).map(|index| {
+            div()
+                .absolute()
+                .left_0()
+                .right(px(8.))
+                .top(px(ruler + pitch * index as f32 + 2.0))
+                .text_size(px(9.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(palette.faint)
+                .text_right()
+                .child(timeline::lane_label(index))
+        }))
+        .into_any_element()
+}
+
 fn cluster(
-    track: &TrackView,
-    envelope: Option<&[Option<f32>]>,
     epoch_number: usize,
     controls: &EpochControls,
     jump_editing: bool,
@@ -308,14 +331,7 @@ fn cluster(
                 )
                 .child(zoom_reset_chip(controls.zoom, actions, palette)),
         )
-        // Row 4: real amplitude minimap (or an honest 不可用 hatch).
-        .child(
-            div()
-                .h(px(CLUSTER_MINIMAP_HEIGHT))
-                .flex_shrink_0()
-                .child(timeline::minimap(track, envelope, localize, palette)),
-        )
-        // Row 5: follow-live toggle. Active cue is not color-only: the redo
+        // Row 4: follow-live toggle. Active cue is not color-only: the redo
         // icon is present exactly while following.
         .child(
             div().h(px(CLUSTER_CONTROL_HEIGHT)).flex_shrink_0().child(
@@ -404,7 +420,8 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
                                 .text_size(px(11.))
                                 .text_color(palette.faint)
                                 .child(subtitle),
-                        ),
+                        )
+                        .child(timeline::signal_sparkline(envelope, palette)),
                 )
                 .child(div().flex_shrink_0().child(timeline::legend(palette))),
         )
@@ -420,17 +437,40 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .pt(px(8.))
+                        .pt(px(6.))
                         .pr(px(12.))
-                        .pb(px(8.))
+                        .pb(px(6.))
                         .pl(px(10.))
-                        .child(timeline::track(&track, seek, localize, palette))
-                        .child(timeline::axis_labels(&track, palette)),
+                        .child(
+                            div()
+                                .flex()
+                                .flex_shrink_0()
+                                .child(div().w(px(LANE_RAIL_WIDTH)).flex_shrink_0())
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .border_b_1()
+                                        .border_color(palette.border)
+                                        .child(timeline::axis_labels(&track, palette)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_1()
+                                .min_h_0()
+                                .child(lane_rail(palette))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(timeline::track(&track, seek, localize, palette)),
+                                ),
+                        ),
                 )
                 .child(div().w(px(1.)).h_full().flex_shrink_0().bg(palette.border))
                 .child(cluster(
-                    &track,
-                    envelope,
                     epoch_number,
                     &controls,
                     jump_editing,

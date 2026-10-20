@@ -222,6 +222,16 @@ rose to 12px. Structure carries no shadow; only genuinely floating layers do. Se
 Clippy, and `cargo test --workspace` 360 passed / 0 failed / 8 ignored, 36 captures
 refreshed.
 
+**Timeline restructure (2026-10-20):** two rounds of recolouring could not fix the bar
+because its problem was structural — 85px of band holding nine hairlines. The band now has a
+ruler at the top (time labels with ticks hanging from it), four 13px event lanes
+(ACQ/TRK/NAV/LOSS) in a 34px labelled rail, hairline lane rules, a 2px record-extent bar on
+the bottom edge, and a playhead whose callout sits at the top of the lanes. The signal
+envelope survives as a 44x14 readout in the header rather than as a competing chart behind
+the lanes, and the whole bar dropped from 148px to 124px so the plots gain the difference.
+See `.scratch/ui-visual-refactor/design-pass-evidence.md` §10. Gates: formatting, strict
+Clippy, 360 passed / 0 failed / 8 ignored.
+
 **Phase 4 deletion safety correction:** history reveal/delete actions now live in
 right-click menus, not selected-row inline controls. Delete requests a native
 Cancel-first confirmation bound to the original UUID; changing selection/order

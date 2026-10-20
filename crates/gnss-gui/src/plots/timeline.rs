@@ -15,13 +15,20 @@ use crate::ui::Localize;
 use crate::visual_system::{data_font_family, metrics, Palette};
 use crate::{GuiDiagnosticEvent, GuiDiagnosticEventKind};
 use gpui_kit::prelude::*;
-use gpui_kit::{canvas, div, point, px, quad, size, AnyElement, Bounds, PathBuilder, SharedString};
+use gpui_kit::{canvas, div, point, px, AnyElement, Bounds, PathBuilder, SharedString};
 
-/// Vertical layer contract of the 85px track (spec §3.10 / issue 13).
-const STEM_TOP: f32 = 27.0;
-const STEM_HEIGHT: f32 = BASELINE_TOP - STEM_TOP;
-const CAP_RING: f32 = 8.0;
-const BASELINE_TOP: f32 = 73.0;
+/// Vertical contract of the 85px track. A 16px ruler sits on top, then four
+/// 13px event lanes (ACQ / TRK / NAV / LOSS), then the 5px extent strip. Every
+/// event has a lane, so the band never reads as an empty ruler with hairline
+/// marks floating in it.
+/// Ticks live in the first 4px of the band; the lanes start below them. The
+/// time labels are the row directly above (rendered by `axis_labels`), so the
+/// ruler reads as one line across label, tick, lane.
+const RULER_HEIGHT: f32 = 4.0;
+const LANE_PITCH: f32 = 13.0;
+const LANE_COUNT: usize = 4;
+const BASELINE_TOP: f32 = RULER_HEIGHT + LANE_PITCH * LANE_COUNT as f32;
+const CAP_RING: f32 = 7.0;
 const PROGRESS_HEIGHT: f32 = 2.0;
 const CALLOUT_HEIGHT: f32 = 15.0;
 const CALLOUT_GAP: f32 = 10.0;
@@ -431,6 +438,27 @@ fn event_window(view: &TrackView) -> Vec<(f32, EventKind)> {
 
 /// Cap shape drawn at the top of an event stem (6px cap in an 8px surface
 /// ring, matching `.cap--*` in theme.css; LOSS uses a glyph triangle).
+/// Each event kind owns one lane, top to bottom, in legend order.
+fn lane_of(kind: EventKind) -> usize {
+    match kind {
+        EventKind::Acquisition => 0,
+        EventKind::Tracking => 1,
+        EventKind::Navigation => 2,
+        EventKind::Loss => 3,
+    }
+}
+
+/// Short lane label used in the left rail.
+pub(crate) fn lane_label(index: usize) -> &'static str {
+    ["ACQ", "TRK", "NAV", "LOSS"][index.min(LANE_COUNT - 1)]
+}
+
+/// Geometry the epoch dock needs to draw the left lane rail in register with
+/// the track: the ruler height and the lane pitch.
+pub(crate) const fn lane_rail_geometry() -> (f32, f32, usize) {
+    (RULER_HEIGHT, LANE_PITCH, LANE_COUNT)
+}
+
 fn cap(kind: EventKind, palette: Palette) -> AnyElement {
     let color = kind.color(palette);
     let ring = |round: bool| {
@@ -476,9 +504,9 @@ fn tick_element(level: TickLevel, percent: f32, palette: Palette) -> impl IntoEl
     // ticks are a touch taller so a labelled time is findable without the
     // ruler becoming a picket fence.
     let (top, height) = match level {
-        TickLevel::Minor => (BASELINE_TOP - 3.0, 3.0),
-        TickLevel::Mid => (BASELINE_TOP - 5.0, 5.0),
-        TickLevel::Major => (BASELINE_TOP - 8.0, 8.0),
+        TickLevel::Minor => (0.0, 3.0),
+        TickLevel::Mid => (0.0, 5.0),
+        TickLevel::Major => (0.0, 7.0),
     };
     let color = palette
         .border_strong
@@ -520,59 +548,75 @@ pub(crate) fn track(
         .relative()
         .h(px(metrics::TIMELINE_TRACK_HEIGHT))
         .w_full()
-        // The track is drawn directly on the panel: no nested bands, no
-        // filled blocks. Three objects only — stems off the axis, a 2px
-        // processed bar riding the axis, and the playhead.
+        // Paint order: lane field, ruler, tick ladder, event marks, extent
+        // strip, boundary rule, playhead. Everything lives on the panel; the
+        // structure comes from the ruler and the four lanes, not from filled
+        // bands.
         //
-        // 1. Baseline: one hairline the stems actually stand on.
+        // 1. Lane field: four 13px rows with a hairline under the ruler. A
+        //    faint signal area sits behind them so the band carries real
+        //    amplitude without becoming a separate chart.
         .child(
             div()
                 .absolute()
                 .left_0()
                 .right_0()
-                .top(px(BASELINE_TOP))
-                .h(px(1.))
-                .bg(palette.plot_axis.opacity(0.55)),
+                .top(px(RULER_HEIGHT))
+                .h(px(LANE_PITCH * LANE_COUNT as f32))
+                .bg(palette.surface_alt.opacity(0.45))
+                .border_t_1()
+                .border_b_1()
+                .border_color(palette.border)
+                .children((1..LANE_COUNT).map(|lane| {
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(px(LANE_PITCH * lane as f32))
+                        .h(px(1.))
+                        .bg(palette.border.opacity(0.55))
+                })),
         )
-        // 2. Ticks: 4px stubs above the baseline, muted so they never compete
-        //    with the stems.
+        // 3. Tick ladder under the ruler.
         .children(
             ticks(ladder, start_ms, span_ms)
                 .into_iter()
                 .map(|(percent, level)| tick_element(level, percent, palette)),
         )
-        // 3. Stems: 1px rule from the baseline upward to the cap.
+        // 4. Event marks: each event is a 1px flag with its cap at the top of
+        //    its own lane, so ACQ / TRK / NAV / LOSS never overlap.
         .children(
             stems
                 .into_iter()
                 .enumerate()
                 .map(|(index, (percent, kind))| {
+                    let lane = lane_of(kind) as f32;
                     div()
                         .id(SharedString::from(format!("timeline-stem-{index}")))
                         .absolute()
                         .left(gpui_kit::relative(percent))
-                        .top(px(STEM_TOP))
+                        .top(px(RULER_HEIGHT + lane * LANE_PITCH + 1.0))
                         .w(px(1.))
-                        .h(px(STEM_HEIGHT))
-                        .bg(kind.color(palette))
+                        .h(px(LANE_PITCH - 3.0))
+                        .bg(kind.color(palette).opacity(0.75))
                         .child(
                             div()
                                 .absolute()
                                 .left_0()
                                 .ml(px(-(CAP_RING - 1.0) / 2.0))
-                                .top(px(-4.))
+                                .top(px(-1.))
                                 .child(cap(kind, palette)),
                         )
                 }),
         )
-        // 4. Processed progress rides the baseline as a 2px bar: the record's
-        //    real extent is a quantity, so it is a bar, not a filled block.
+        // 5. Record extent: a 2px bar on the bottom edge of the band, which is
+        //    where a loaded range belongs.
         .child(
             div()
                 .absolute()
                 .left_0()
                 .right_0()
-                .top(px(BASELINE_TOP + 6.0))
+                .bottom_0()
                 .h(px(PROGRESS_HEIGHT))
                 .bg(palette.surface_alt)
                 .child(
@@ -585,53 +629,53 @@ pub(crate) fn track(
                         .bg(palette.accent),
                 ),
         )
-        // 5. Boundary: one hairline where the processed bar ends, with a bare
-        //    percentage tick at the top — no caption sentence in the track.
+        // 6. Boundary: one hairline through the lanes with a bare percentage
+        //    tag in the ruler.
         .children(show_boundary.then(|| {
             div()
                 .absolute()
                 .left(gpui_kit::relative(processed))
-                .top_0()
-                .h(px(BASELINE_TOP))
+                .top(px(RULER_HEIGHT))
+                .h(px(LANE_PITCH * LANE_COUNT as f32))
                 .w(px(1.))
                 .bg(palette.border_strong)
                 .when(boundary.visible, |this| {
                     this.child(
                         div()
                             .absolute()
-                            .top(px(boundary.top))
+                            .top(px(LANE_PITCH * LANE_COUNT as f32 - 13.0))
                             .font_family(data_font_family())
                             .text_size(px(10.))
                             .text_color(palette.faint)
                             .whitespace_nowrap()
-                            .when(boundary.right_of_line, |text| text.left(px(5.)))
-                            .when(!boundary.right_of_line, |text| text.right(px(5.)))
+                            .when(boundary.right_of_line, |text| text.left(px(4.)))
+                            .when(!boundary.right_of_line, |text| text.right(px(4.)))
                             .child(format!("{:.0}%", processed * 100.0)),
                     )
                 })
         }))
-        // 6. Playhead: 1.5px accent line with a 7px square cap sitting on the
-        //    baseline, plus the compact two-part callout.
+        // 7. Playhead: 1.5px accent line through every lane, a 7px square cap
+        //    on the ruler edge, and the compact callout.
         .child(
             div()
                 .absolute()
                 .left(gpui_kit::relative(view.cursor_percent))
                 .ml(px(-0.75))
                 .top_0()
-                .h(px(BASELINE_TOP + 4.0))
+                .h(px(BASELINE_TOP + PROGRESS_HEIGHT + 1.0))
                 .w(px(1.5))
                 .bg(palette.accent)
                 .child(
                     div()
                         .absolute()
-                        .top(px(BASELINE_TOP - 2.0))
-                        .left(px(-3.25))
+                        .top(px(-2.))
+                        .left(px(-2.75))
                         .size(px(7.))
                         .bg(palette.accent),
                 )
                 .child(callout(view, cursor_time, localize, palette)),
         )
-        // 7. Transparent seek slider spanning the track (shared cursor).
+        // 8. Transparent seek slider spanning the track (shared cursor).
         .child(
             div()
                 .absolute()
@@ -656,7 +700,7 @@ fn callout(
     let flipped = callout_flipped(view.cursor_percent);
     let chip = div()
         .absolute()
-        .top(px(0.))
+        .top(px(RULER_HEIGHT + 2.0))
         .when(flipped, |this| this.right(px(CALLOUT_GAP)))
         .when(!flipped, |this| this.left(px(CALLOUT_GAP)))
         .h(px(CALLOUT_HEIGHT))
@@ -765,145 +809,78 @@ pub(crate) fn legend(palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// Right-cluster minimap (144x18): real amplitude envelope when the selected
-/// run carries per-epoch C/N0, otherwise an honest 不可用 hatch. The accent
-/// viewport frame is inset 2px and follows the visible window.
-pub(crate) fn minimap(
-    view: &TrackView,
-    envelope: Option<&[Option<f32>]>,
-    localize: Localize,
-    palette: Palette,
-) -> AnyElement {
-    let width = metrics::TIMELINE_TRANSPORT_WIDTH;
-    let height = 18.0;
-    let envelope = envelope.map(<[Option<f32>]>::to_vec);
-    let frame_start = view.visible_start;
-    let frame_span = view.visible_span;
-    let hatch = envelope.is_none();
-    let draw_envelope = envelope.clone();
+/// Header signal sparkline: the selected run's real per-epoch peak C/N0 as a
+/// 44x14 area with a 1px edge. It is a readout, not a control — the lanes below
+/// carry the events, and this tells you at a glance whether the signal was
+/// steady across the record. No data means no sparkline.
+pub(crate) fn signal_sparkline(envelope: Option<&[Option<f32>]>, palette: Palette) -> AnyElement {
+    let box_width = 44.0;
+    let box_height = 14.0;
+    let values = envelope.map(<[Option<f32>]>::to_vec);
+    let tint = palette.chart_series[0].opacity(0.18);
+    let edge = palette.chart_series[0].opacity(0.7);
     div()
-        .relative()
-        .w(px(width))
-        .h(px(height))
-        .bg(palette.surface_alt)
-        // The canvas is a leaf element: without an explicit size gpui lays it
-        // out as 144x0 in this column and the paint closure early-returns, so
-        // pin it to the minimap box (144x18) instead of relying on stretch.
+        .w(px(box_width))
+        .h(px(box_height))
+        .flex_shrink_0()
         .child(
             canvas(
                 move |_, _, _| {},
                 move |bounds: Bounds<gpui_kit::Pixels>, _, window, _| {
-                    paint_minimap(
-                        bounds,
-                        draw_envelope.as_deref(),
-                        frame_start,
-                        frame_span,
-                        hatch,
-                        palette,
-                        window,
-                    );
+                    let Some(values) = values.as_deref() else {
+                        return;
+                    };
+                    let w = f32::from(bounds.size.width);
+                    let h = f32::from(bounds.size.height);
+                    if w <= 2.0 || h <= 2.0 || values.iter().all(Option::is_none) {
+                        return;
+                    }
+                    let n = values.len().max(2);
+                    let lo = values.iter().flatten().cloned().fold(f32::MAX, f32::min);
+                    let hi = values.iter().flatten().cloned().fold(f32::MIN, f32::max);
+                    let origin = bounds.origin;
+                    let mut fill = PathBuilder::fill();
+                    let mut stroke = PathBuilder::stroke(px(1.0));
+                    let mut run: Vec<(f32, f32)> = Vec::new();
+                    let flush = |run: &mut Vec<(f32, f32)>,
+                                 fill: &mut PathBuilder,
+                                 stroke: &mut PathBuilder| {
+                        if run.is_empty() {
+                            return;
+                        }
+                        fill.move_to(point(origin.x + px(run[0].0), origin.y + px(h)));
+                        for (x, y) in run.iter() {
+                            fill.line_to(point(origin.x + px(*x), origin.y + px(*y)));
+                        }
+                        let last = run[run.len() - 1];
+                        fill.line_to(point(origin.x + px(last.0), origin.y + px(h)));
+                        fill.close();
+                        stroke.move_to(point(origin.x + px(run[0].0), origin.y + px(run[0].1)));
+                        for (x, y) in run.iter().skip(1) {
+                            stroke.line_to(point(origin.x + px(*x), origin.y + px(*y)));
+                        }
+                        run.clear();
+                    };
+                    for (index, value) in values.iter().enumerate() {
+                        let Some(value) = value else {
+                            flush(&mut run, &mut fill, &mut stroke);
+                            continue;
+                        };
+                        let x = ((index as f32 + 0.5) / n as f32) * w;
+                        run.push((x, envelope_y(*value, lo, hi, h)));
+                    }
+                    flush(&mut run, &mut fill, &mut stroke);
+                    if let Ok(path) = fill.build() {
+                        window.paint_path(path, tint);
+                    }
+                    if let Ok(path) = stroke.build() {
+                        window.paint_path(path, edge);
+                    }
                 },
             )
-            .w(px(width))
-            .h(px(height)),
+            .size_full(),
         )
-        .when(hatch, |this| {
-            this.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .top(px(3.))
-                    .text_size(px(10.))
-                    .text_center()
-                    .text_color(palette.faint)
-                    .child(localize("不可用", "Unavailable")),
-            )
-        })
         .into_any_element()
-}
-
-fn paint_minimap(
-    bounds: Bounds<gpui_kit::Pixels>,
-    envelope: Option<&[Option<f32>]>,
-    frame_start: f32,
-    frame_span: f32,
-    hatch: bool,
-    palette: Palette,
-    window: &mut gpui_kit::Window,
-) {
-    let w = f32::from(bounds.size.width);
-    let h = f32::from(bounds.size.height);
-    if w <= 2.0 || h <= 2.0 {
-        return;
-    }
-    if hatch {
-        // Diagonal unavailable hatch; no synthetic waveform is ever drawn.
-        let step = 7.0;
-        let mut x = step;
-        while x < w {
-            let x_end = x - (h - 2.0);
-            if x_end > 1.0 {
-                if let Ok(path) = {
-                    let mut builder = PathBuilder::stroke(px(1.0));
-                    builder.move_to(point(bounds.origin.x + px(x), bounds.origin.y + px(1.0)));
-                    builder.line_to(point(
-                        bounds.origin.x + px(x_end),
-                        bounds.origin.y + px(h - 1.0),
-                    ));
-                    builder.build()
-                } {
-                    window.paint_path(path, palette.border_strong.opacity(0.7));
-                }
-            }
-            x += step;
-        }
-    }
-    if let Some(envelope) = envelope {
-        let n = envelope.len().max(2);
-        let lo = envelope.iter().flatten().cloned().fold(f32::MAX, f32::min);
-        let hi = envelope.iter().flatten().cloned().fold(f32::MIN, f32::max);
-        let mut builder = PathBuilder::stroke(px(1.0));
-        let mut pen_down = false;
-        for (index, value) in envelope.iter().enumerate() {
-            let Some(value) = value else {
-                pen_down = false;
-                continue;
-            };
-            let x = px(((index as f32 + 0.5) / n as f32) * w);
-            let y = px(envelope_y(*value, lo, hi, h));
-            if pen_down {
-                builder.line_to(point(bounds.origin.x + x, bounds.origin.y + y));
-            } else {
-                builder.move_to(point(bounds.origin.x + x, bounds.origin.y + y));
-                pen_down = true;
-            }
-        }
-        if let Ok(path) = builder.build() {
-            window.paint_path(path, palette.faint);
-        }
-    }
-    // Viewport frame, inset 2px so it never touches the minimap edge. At 1x
-    // zoom the frame covers the whole map and therefore encodes nothing, so
-    // it drops to a neutral rule instead of painting an accent outline.
-    let frame_x = 2.0 + frame_start * (w - 4.0);
-    let frame_w = ((frame_span * (w - 4.0)).max(2.0)).min(w - 4.0 - (frame_x - 2.0).max(0.0));
-    let frame_color = if frame_span >= 0.97 {
-        palette.border_strong
-    } else {
-        palette.accent
-    };
-    window.paint_quad(quad(
-        Bounds {
-            origin: point(bounds.origin.x + px(frame_x), bounds.origin.y + px(2.0)),
-            size: size(px(frame_w.max(2.0)), px(h - 4.0)),
-        },
-        0.0,
-        gpui_kit::transparent_black(),
-        px(1.0),
-        frame_color,
-        Default::default(),
-    ));
 }
 
 #[cfg(test)]
