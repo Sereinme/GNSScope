@@ -242,6 +242,18 @@ were deleted with it, and the bar dropped from 148px to 116px. See
 `.scratch/ui-visual-refactor/design-pass-evidence.md` §11. Gates: formatting, strict Clippy,
 359 passed / 0 failed / 8 ignored (one test removed with the callout).
 
+**Timeline rebuilt as a signal profile (2026-10-20):** four styling rounds failed for the
+same reason — at a 20:1 aspect ratio every vertical layering (lanes, dual axis, row rules)
+collapses into thin stripes. The band is now a single filled profile of per-bucket peak C/N0
+(neutral grey area with a 1px crest, auto-mapped to the run's own min..max for legibility),
+punctuated by full-strength event flags, standing on a hairline baseline with a 4px tick ruler
+and 11px time labels underneath. The playhead is a wash band, a 1.5px line, and a triangular
+handle on the baseline; the timecode lives in the header. The bar-equivalent "coverage ridge",
+the mirrored lane stack, the envelope backdrop, and the whole callout/boundary-caption
+machinery were deleted rather than left dormant. See
+`.scratch/ui-visual-refactor/design-pass-evidence.md` §12. Gates: formatting, strict Clippy,
+357 passed / 0 failed / 8 ignored.
+
 **Phase 4 deletion safety correction:** history reveal/delete actions now live in
 right-click menus, not selected-row inline controls. Delete requests a native
 Cancel-first confirmation bound to the original UUID; changing selection/order

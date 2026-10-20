@@ -7654,9 +7654,9 @@ impl GnsscopeApp {
             "{time_label} {receiver_seconds} s · PVT {pvt_hz} Hz · {event_label} {}",
             events.len()
         );
-        // Real amplitude envelope for the minimap: per-epoch peak C/N0 across
-        // the selected run's channels. Empty channels stay `None` so the
-        // minimap draws the 不可用 hatch instead of a synthetic waveform.
+        // Signal profile for the timeline body: per-epoch peak C/N0 across the
+        // selected run's channels, bucketed to the band width. Epochs without
+        // channel data stay `None` so the profile keeps an honest gap.
         let peak_per_epoch = self
             .display_epoch_channels()
             .iter()
@@ -7669,11 +7669,11 @@ impl GnsscopeApp {
                 (peak > 0.0).then_some(peak as f32)
             })
             .collect::<Vec<_>>();
-        let minimap_envelope = crate::plots::timeline::envelope_series(
+        let profile = crate::plots::timeline::profile_series(
             &peak_per_epoch,
             epoch_period_ms.max(1),
             timeline_duration_ms,
-            crate::plots::timeline::ENVELOPE_BUCKETS,
+            crate::plots::timeline::PROFILE_BUCKETS,
         );
         let track = crate::plots::timeline::TrackView {
             duration_ms: timeline_duration_ms,
@@ -7754,7 +7754,7 @@ impl GnsscopeApp {
                 subtitle,
                 epoch_number,
                 track,
-                minimap_envelope,
+                profile,
                 jump_editing: self.epoch_jump_editing,
                 jump_input,
                 seek: slider.into_any_element(),
@@ -9797,7 +9797,9 @@ mod timeline_interaction_tests {
         // The playhead is near the top of the painted 85px track. Derive
         // its position from the track center, not the slider's hitbox height:
         // the old styled slider exposed only a 6px strip in the middle.
-        let y = bounds.center().y - px(metrics::TIMELINE_TRACK_HEIGHT / 2.0) + px(3.);
+        // Click near the top of the real slider box: the whole band, including
+        // the ridge and the playhead handle, must seek.
+        let y = bounds.origin.y + px(3.);
         let at = |fraction| point(bounds.left() + bounds.size.width * fraction, y);
         let press = at(0.5);
         visual.simulate_mouse_down(

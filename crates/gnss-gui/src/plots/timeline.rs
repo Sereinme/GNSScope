@@ -1,54 +1,34 @@
-//! Epoch timeline drawing for the confirmed instrument (design-refresh spec §3.10).
+//! Epoch timeline.
 //!
-//! This module owns the frozen 85px track layer contract, the three-level tick
-//! ladder, event cap shapes, the playhead callout flip, boundary-caption
-//! placement, and the right-cluster minimap drawing. It renders display-only
-//! data supplied by `app.rs`; interaction callbacks and state ownership stay
-//! in the application.
+//! The band is one object: a **signal profile** of per-bucket peak C/N0 drawn
+//! as bars with brighter crests, event notches cut through it, a hairline
+//! baseline with a tick ruler under it, and a playhead with a triangular
+//! handle on the baseline. At a ~20:1 aspect ratio this is the only shape that
+//! carries real information without turning into stripes: the body varies, the
+//! markers punctuate it, and the ruler anchors the scale.
 //!
-//! Pixel-clearance rules are evaluated against `NARROW_TRACK_REF`, the
-//! narrowest track width observed across the acceptance window matrix
-//! (1568/1440/1100/800), so clearance decisions stay conservative on wider
-//! windows instead of clipping.
+//! It renders display-only data supplied by `app.rs`; interaction callbacks and
+//! state ownership stay in the application.
 
 use crate::visual_system::{data_font_family, metrics, Palette};
 use crate::{GuiDiagnosticEvent, GuiDiagnosticEventKind};
 use gpui_kit::prelude::*;
 use gpui_kit::{canvas, div, point, px, AnyElement, Bounds, PathBuilder, SharedString};
 
-/// Vertical contract of the 85px track. A 16px ruler sits on top, then four
-/// 13px event lanes (ACQ / TRK / NAV / LOSS), then the 5px extent strip. Every
-/// event has a lane, so the band never reads as an empty ruler with hairline
-/// marks floating in it.
-/// Ticks live in the first 4px of the band; the lanes start below them. The
-/// time labels are the row directly above (rendered by `axis_labels`), so the
-/// ruler reads as one line across label, tick, lane.
-const LANE_PITCH: f32 = 13.0;
-/// Lanes above the rail (drawn top-down) and below it.
-const LANES_ABOVE: usize = 2;
-const LANES_BELOW: usize = 2;
-const LANE_COUNT: usize = LANES_ABOVE + LANES_BELOW;
-const RAIL_TOP: f32 = LANE_PITCH * LANES_ABOVE as f32;
-const RAIL_HEIGHT: f32 = 20.0;
-const RAIL_BOTTOM: f32 = RAIL_TOP + RAIL_HEIGHT;
-/// Bottom of the lane stack; the extent bar sits under it.
-const BASELINE_TOP: f32 = RAIL_BOTTOM + LANE_PITCH * LANES_BELOW as f32;
-const CAP_RING: f32 = 7.0;
-const PROGRESS_HEIGHT: f32 = 2.0;
-/// Conservative rendered width of "处理边界 63%" at 11px.
-/// The boundary tag is now a bare percentage; estimate its width for the
-/// collision test against the playhead callout.
-const CAPTION_WIDTH_EST: f32 = 34.0;
-/// Narrowest track width in the acceptance matrix (1100x800 layout).
-const NARROW_TRACK_REF: f32 = 585.0;
-/// Right padding of the track area; captions may borrow it before the divider.
-const TRACK_RIGHT_PAD: f32 = 12.0;
+/// The band is one object: a coverage ridge rising from a bottom baseline,
+/// event notches cut into it, and a ruler under the baseline. There are no
+/// lanes and no second axis line — at a 20:1 aspect ratio any further
+/// horizontal striping collapses into noise.
+const CAP_SIZE: f32 = 6.0;
+/// Ridge geometry: bars stand on `BASELINE_TOP` and may use the whole field
+/// above it; the ruler occupies the strip below.
+const BASELINE_TOP: f32 = 62.0;
 /// Upper bound on tick marks drawn in one frame.
 const TICK_CAP: usize = 480;
 /// Maximum event stems drawn inside the visible window.
 const STEM_CAP: usize = 64;
 /// Minimap envelope resolution (buckets across the record).
-pub(crate) const ENVELOPE_BUCKETS: usize = 48;
+pub(crate) const PROFILE_BUCKETS: usize = 120;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EventKind {
@@ -263,98 +243,40 @@ pub(crate) fn axis_label_set(
     labels
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct BoundaryCaption {
-    /// `true` = caption right of the line, `false` = left of the line.
-    pub(crate) right_of_line: bool,
-    /// Caption top inside the 85px track (0 = callout row, 46 = lane interior).
-    pub(crate) top: f32,
-    pub(crate) visible: bool,
-}
-
-/// Place the boundary caption so it keeps >= 4px from the playhead callout
-/// and never crosses the track edge. Falls back to the stem-free lane
-/// interior right of the processed edge, then hides (the boundary line and
-/// progress cap remain) when no placement is clear.
-pub(crate) fn boundary_caption(_boundary: f32, _cursor: f32, _stems: &[f32]) -> BoundaryCaption {
-    // The tag is now a three-character percentage with no in-track callout to
-    // avoid: put it right of its rule unless the record ends inside the tag's
-    // own width.
-    let boundary_px = _boundary * NARROW_TRACK_REF;
-    let right_room = NARROW_TRACK_REF - boundary_px + TRACK_RIGHT_PAD;
-    if right_room >= CAPTION_WIDTH_EST {
-        BoundaryCaption {
-            right_of_line: true,
-            top: 0.0,
-            visible: true,
-        }
-    } else if boundary_px >= CAPTION_WIDTH_EST {
-        BoundaryCaption {
-            right_of_line: false,
-            top: 0.0,
-            visible: true,
-        }
-    } else {
-        BoundaryCaption {
-            right_of_line: true,
-            top: 0.0,
-            visible: false,
-        }
-    }
-}
-
-/// Downsample the per-epoch peak C/N0 series onto `buckets` columns scaled to
+/// Downsample the per-epoch tracked-satellite series onto `buckets` columns.
 /// the record duration. Returns `None` when no real amplitude exists; empty
 /// columns stay `None` so the renderer breaks the polyline instead of
 /// fabricating zeros.
-pub(crate) fn envelope_series(
-    epoch_cn0: &[Option<f32>],
+pub(crate) fn profile_series(
+    peak_per_epoch: &[Option<f32>],
     period_ms: u64,
     duration_ms: u64,
     buckets: usize,
 ) -> Option<Vec<Option<f32>>> {
-    if epoch_cn0.is_empty() || duration_ms == 0 || buckets == 0 {
-        return None;
-    }
-    let peak = epoch_cn0.iter().flatten().copied().fold(0.0_f32, f32::max);
-    if !peak.is_finite() || peak <= 0.0 {
+    if peak_per_epoch.is_empty() || duration_ms == 0 || buckets == 0 {
         return None;
     }
     let period_ms = period_ms.max(1);
-    let values = (0..buckets)
-        .map(|bucket| {
-            // Bucket center time, so columns align with the record timeline.
-            let time_ms = ((bucket as u64 * 2 + 1) * duration_ms) / (buckets as u64 * 2);
-            let index = (time_ms / period_ms) as usize;
-            epoch_cn0
-                .get(index)
-                .and_then(|value| *value)
-                .map(|value| (value / peak).clamp(0.0, 1.0))
-        })
-        .collect::<Vec<_>>();
-    values.iter().any(Option::is_some).then_some(values)
-}
-
-/// Vertical placement of one real envelope sample inside the minimap box.
-///
-/// Sparkline convention: the polyline auto-scales to the observed min..max
-/// band of the real per-epoch values. This is an affine display transform of
-/// the observed range only — no value is altered, interpolated or
-/// synthesized — and it keeps a nearly constant but real series visible
-/// instead of collapsing it onto the viewport frame. A degenerate range
-/// renders as a flat centered line.
-pub(crate) fn envelope_y(value: f32, lo: f32, hi: f32, height: f32) -> f32 {
-    /// Vertical inset so the polyline stays inside the accent viewport frame
-    /// (frame inset 2px + 1px border + 1px breathing room).
-    const BAND_INSET: f32 = 4.0;
-    let range = hi - lo;
-    if !range.is_finite() || range <= f32::EPSILON || !value.is_finite() {
-        return height / 2.0;
+    let mut values: Vec<Option<f32>> = Vec::with_capacity(buckets);
+    for bucket in 0..buckets {
+        // Take the MAX across the bucket's epoch span: a bucket is "covered" if
+        // any epoch inside it had satellites tracked, which is what lets a
+        // sparse but healthy record still show a continuous ridge.
+        let from = (bucket as u64 * duration_ms) / buckets as u64;
+        let to = ((bucket as u64 + 1) * duration_ms) / buckets as u64;
+        let first = (from / period_ms) as usize;
+        let last = ((to.max(from + 1) - 1) / period_ms) as usize;
+        let mut value: Option<f32> = None;
+        for index in first..=last.min(peak_per_epoch.len().saturating_sub(1)) {
+            if let Some(peak) = peak_per_epoch.get(index).and_then(|v| *v) {
+                if peak.is_finite() {
+                    value = Some(value.map_or(peak, |current| current.max(peak)));
+                }
+            }
+        }
+        values.push(value);
     }
-    let norm = ((value - lo) / range).clamp(0.0, 1.0);
-    let bottom = height - BAND_INSET;
-    let top = BAND_INSET;
-    bottom - norm * (bottom - top)
+    values.iter().any(Option::is_some).then_some(values)
 }
 
 /// "00:02:04.8" decisecond timestamp for the playhead callout.
@@ -394,95 +316,81 @@ fn event_window(view: &TrackView) -> Vec<(f32, EventKind)> {
 
 /// Cap shape drawn at the top of an event stem (6px cap in an 8px surface
 /// ring, matching `.cap--*` in theme.css; LOSS uses a glyph triangle).
-/// Each event kind owns one row: acquisition and tracking above the rail,
-/// navigation and loss below it.
-fn lane_of(kind: EventKind) -> usize {
-    match kind {
-        EventKind::Acquisition => 0,
-        EventKind::Tracking => 1,
-        EventKind::Navigation => 2,
-        EventKind::Loss => 3,
-    }
-}
-
-/// The row's top edge in track coordinates.
-pub(crate) fn lane_top(index: usize) -> f32 {
-    if index < LANES_ABOVE {
-        LANE_PITCH * index as f32
-    } else {
-        RAIL_BOTTOM + LANE_PITCH * (index - LANES_ABOVE) as f32
-    }
-}
-
-/// Whether the row hangs below the rail (its cap faces down, away from it).
-pub(crate) fn lane_below(index: usize) -> bool {
-    index >= LANES_ABOVE
-}
-
-/// Short lane label used in the left rail.
-pub(crate) fn lane_label(index: usize) -> &'static str {
-    ["ACQ", "TRK", "NAV", "LOSS"][index.min(LANE_COUNT - 1)]
-}
-
-/// Geometry the epoch dock needs to place the left lane labels: each row's
-/// top edge is looked up through `lane_top`, so the labels sit in register with
-/// the mirrored lane stack.
-pub(crate) const fn lane_rows() -> usize {
-    LANE_COUNT
+/// A 8x5 triangle drawn as three stacked rules (widest at the base): the only
+/// shape the available border API can render crisply at this size.
+fn triangle(color: gpui_kit::Hsla, pointing_up: bool) -> AnyElement {
+    let widths = [3.0, 5.0, 7.0];
+    let rows: Vec<_> = widths
+        .iter()
+        .enumerate()
+        .map(|(index, width)| {
+            let width = if pointing_up {
+                widths[widths.len() - 1 - index]
+            } else {
+                *width
+            };
+            div().h(px(1.6)).w(px(width)).bg(color).rounded(px(0.6))
+        })
+        .collect();
+    div()
+        .w(px(7.))
+        .flex()
+        .flex_col()
+        .items_center()
+        .children(rows)
+        .into_any_element()
 }
 
 fn cap(kind: EventKind, palette: Palette) -> AnyElement {
     let color = kind.color(palette);
     let ring = |round: bool| {
         div()
-            .size(px(CAP_RING))
+            .size(px(CAP_SIZE))
             .when(round, |this| this.rounded_full())
-            .bg(palette.surface)
+            .bg(palette.surface_alt)
             .flex()
             .items_center()
             .justify_center()
     };
     match kind {
         EventKind::Acquisition => ring(false)
-            .child(div().size(px(6.)).bg(color))
+            .child(div().size(px(4.)).bg(color))
             .into_any_element(),
         EventKind::Tracking => ring(true)
-            .child(div().size(px(6.)).rounded_full().bg(color))
+            .child(div().size(px(4.)).rounded_full().bg(color))
             .into_any_element(),
         EventKind::Navigation => ring(true)
             .child(
                 div()
-                    .size(px(6.))
+                    .size(px(4.))
                     .rounded_full()
                     .border_1()
                     .border_color(color)
                     .bg(palette.surface_alt),
             )
             .into_any_element(),
-        EventKind::Loss => div()
-            .size(px(CAP_RING))
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(px(9.))
-            .text_color(color)
-            .child("▲")
-            .into_any_element(),
+        EventKind::Loss => {
+            // A glyph triangle reads as an alarm even at 6px.
+            div()
+                .size(px(CAP_SIZE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(triangle(color, false))
+                .into_any_element()
+        }
     }
 }
 
-fn tick_element(level: TickLevel, percent: f32, palette: Palette) -> impl IntoElement {
-    // Two levels, one tone: minor ticks are hairlines under the stems, major
-    // ticks are a touch taller so a labelled time is findable without the
-    // ruler becoming a picket fence.
+fn tick_element(level: TickLevel, percent: f32, palette: Palette, top: f32) -> impl IntoElement {
     let (top, height) = match level {
-        TickLevel::Minor => (RAIL_TOP, 4.0),
-        TickLevel::Mid => (RAIL_TOP, 7.0),
-        TickLevel::Major => (RAIL_TOP, RAIL_HEIGHT),
+        TickLevel::Minor => (top, 3.0),
+        TickLevel::Mid => (top, 4.0),
+        TickLevel::Major => (top, 5.0),
     };
     let color = palette
         .border_strong
-        .opacity(if level == TickLevel::Major { 0.9 } else { 0.55 });
+        .opacity(if level == TickLevel::Major { 0.9 } else { 0.5 });
     div()
         .absolute()
         .left(gpui_kit::relative(percent))
@@ -492,151 +400,145 @@ fn tick_element(level: TickLevel, percent: f32, palette: Palette) -> impl IntoEl
         .bg(color)
 }
 
-/// The 85px track, drawn as three objects on the panel itself: event stems
-/// standing on a hairline baseline, a 2px processed bar riding that baseline,
-/// and the playhead. The transparent seek slider from the app is the only
-/// interactive layer.
-pub(crate) fn track(view: &TrackView, seek: AnyElement, palette: Palette) -> AnyElement {
-    let processed = view.processed.clamp(0.0, 1.0);
-    // The boundary marker only exists while the record has both processed and
-    // unprocessed regions; completed runs show a full processed block only.
-    let show_boundary = (0.005..0.995).contains(&processed);
-    let stems = event_window(view);
+/// The coverage ridge: one bar per displayed bucket, height = tracked-satellite
+/// count on a fixed 0..=12 domain. Real counts only; a bucket with no channel
+/// data keeps a gap, and a run with no coverage draws no ridge at all.
+fn signal_profile(profile: Option<&[Option<f32>]>, palette: Palette) -> Option<AnyElement> {
+    let values = profile?.to_vec();
+    if values.iter().all(Option::is_none) {
+        return None;
+    }
+    let top = 8.0;
+    let height = BASELINE_TOP - top;
+    let lo = values.iter().flatten().cloned().fold(f32::MAX, f32::min);
+    let hi = values.iter().flatten().cloned().fold(f32::MIN, f32::max);
+    let span = (hi - lo).max(0.5);
+    // One area + one 1px crest. Neutral by design: hue is reserved for events.
+    let fill = palette.muted.opacity(0.22);
+    let crest = palette.muted.opacity(0.75);
+    Some(
+        canvas(
+            move |_, _, _| {},
+            move |bounds: Bounds<gpui_kit::Pixels>, _, window, _| {
+                let w = f32::from(bounds.size.width);
+                let h = f32::from(bounds.size.height);
+                if w <= 2.0 || h <= 2.0 {
+                    return;
+                }
+                let n = values.len().max(2);
+                let origin = bounds.origin;
+                let mut area = PathBuilder::fill();
+                let mut line = PathBuilder::stroke(px(1.0));
+                let mut run: Vec<(f32, f32)> = Vec::new();
+                let flush =
+                    |run: &mut Vec<(f32, f32)>, area: &mut PathBuilder, line: &mut PathBuilder| {
+                        if run.is_empty() {
+                            return;
+                        }
+                        area.move_to(point(origin.x + px(run[0].0), origin.y + px(h)));
+                        for (x, y) in run.iter() {
+                            area.line_to(point(origin.x + px(*x), origin.y + px(*y)));
+                        }
+                        let last = run[run.len() - 1];
+                        area.line_to(point(origin.x + px(last.0), origin.y + px(h)));
+                        area.close();
+                        line.move_to(point(origin.x + px(run[0].0), origin.y + px(run[0].1)));
+                        for (x, y) in run.iter().skip(1) {
+                            line.line_to(point(origin.x + px(*x), origin.y + px(*y)));
+                        }
+                        run.clear();
+                    };
+                for (index, value) in values.iter().enumerate() {
+                    let Some(value) = value else {
+                        flush(&mut run, &mut area, &mut line);
+                        continue;
+                    };
+                    let x = ((index as f32 + 0.5) / n as f32) * w;
+                    // 12..88% of the field keeps the shape off both edges.
+                    let ratio = ((*value - lo) / span).clamp(0.0, 1.0);
+                    let y = h - h * (0.12 + 0.76 * ratio);
+                    run.push((x, y));
+                }
+                flush(&mut run, &mut area, &mut line);
+                if let Ok(path) = area.build() {
+                    window.paint_path(path, fill);
+                }
+                if let Ok(path) = line.build() {
+                    window.paint_path(path, crest);
+                }
+            },
+        )
+        .absolute()
+        .left_0()
+        .right_0()
+        .top(px(top))
+        .h(px(height))
+        .into_any_element(),
+    )
+}
+
+/// The timeline band: a coverage ridge standing on a baseline, event notches
+/// cut through it, the processing boundary where the ridge ends, and a playhead
+/// with a ruler handle.
+pub(crate) fn track(
+    view: &TrackView,
+    profile: Option<&[Option<f32>]>,
+    seek: AnyElement,
+    palette: Palette,
+) -> AnyElement {
     let (start_ms, span_ms) = view.window_ms();
     let ladder = tick_ladder(span_ms);
-    let stem_percents = stems
-        .iter()
-        .map(|(percent, _)| *percent)
-        .collect::<Vec<_>>();
-    let boundary = boundary_caption(processed, view.cursor_percent, &stem_percents);
+    let stems = event_window(view);
+    let processed = view.processed.clamp(0.0, 1.0);
+    let show_boundary = (0.005..0.995).contains(&processed);
 
     div()
         .relative()
         .h(px(metrics::TIMELINE_TRACK_HEIGHT))
         .w_full()
-        // Mirrored instrument band. Two event lanes sit above a two-line time
-        // rail and two below it, so the axis is the centre of the element
-        // instead of a border, and every mark hangs toward the side it belongs
-        // to.
-        //
-        // 1. Row rules: one hairline between each pair of rows.
-        .children([LANE_PITCH, RAIL_BOTTOM + LANE_PITCH].into_iter().map(|y| {
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(px(y))
-                .h(px(1.))
-                .bg(palette.border.opacity(0.5))
-        }))
-        // 2. The rail: two 1px rules 14px apart. `border_strong` on both keeps
-        //    it readable as one element and lets the labels sit between them.
-        .child(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(px(RAIL_TOP))
-                .h(px(RAIL_HEIGHT))
-                .bg(palette.surface_alt)
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .top_0()
-                        .h(px(1.))
-                        .bg(palette.plot_axis),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        .h(px(1.))
-                        .bg(palette.plot_axis),
-                ),
-        )
-        // 3. Time labels ride inside the rail.
-        .child(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(px(RAIL_TOP))
-                .h(px(RAIL_HEIGHT))
-                .child(axis_labels(view, palette, RAIL_HEIGHT)),
-        )
-        // 4. Tick ladder: short stubs hanging from the rail's top rule.
-        .children(
-            ticks(ladder, start_ms, span_ms)
-                .into_iter()
-                .map(|(percent, level)| tick_element(level, percent, palette)),
-        )
-        // 5. Event marks. Above rows hang down to the rail's top rule with the
-        //    cap at the row's outer edge; below rows mirror that.
-        .children(
-            stems
-                .into_iter()
-                .enumerate()
-                .map(|(index, (percent, kind))| {
-                    let lane = lane_of(kind);
-                    let row_top = lane_top(lane);
-                    let below = lane_below(lane);
-                    let cap_top = if below {
-                        row_top + LANE_PITCH - CAP_RING - 1.0
-                    } else {
-                        row_top + 1.0
-                    };
-                    let stem_top = if below {
-                        RAIL_BOTTOM
-                    } else {
-                        cap_top + CAP_RING
-                    };
-                    let stem_height = if below {
-                        cap_top - RAIL_BOTTOM
-                    } else {
-                        RAIL_TOP - (cap_top + CAP_RING)
-                    };
-                    div()
-                        .id(SharedString::from(format!("timeline-stem-{index}")))
-                        .absolute()
-                        .left(gpui_kit::relative(percent))
-                        .top(px(stem_top))
-                        .w(px(1.))
-                        .h(px(stem_height.max(1.0)))
-                        .bg(kind.color(palette).opacity(0.75))
-                        .child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .ml(px(-(CAP_RING - 1.0) / 2.0))
-                                .top(px(cap_top - stem_top))
-                                .child(cap(kind, palette)),
-                        )
-                }),
-        )
-        // 6. Record extent on the bottom edge of the band.
+        // 1. Coverage ridge.
+        .children(signal_profile(profile, palette))
+        // 2. Baseline: the one line everything stands on.
         .child(
             div()
                 .absolute()
                 .left_0()
                 .right_0()
                 .top(px(BASELINE_TOP))
-                .h(px(PROGRESS_HEIGHT))
-                .bg(palette.surface_alt)
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(gpui_kit::relative(processed))
-                        .bg(palette.accent),
-                ),
+                .h(px(1.))
+                .bg(palette.plot_axis),
         )
-        // 7. Boundary: one hairline through both halves, percentage at its foot.
+        // 3. Ruler ticks sit just below the baseline, inside the track so they
+        //    line up with the bars exactly.
+        .children(
+            ticks(ladder, start_ms, span_ms)
+                .into_iter()
+                .map(|(percent, level)| tick_element(level, percent, palette, BASELINE_TOP + 1.0)),
+        )
+        // 4. Event notches: a 1px rule through the body with the cap on top.
+        .children(
+            stems
+                .into_iter()
+                .enumerate()
+                .map(|(index, (percent, kind))| {
+                    div()
+                        .id(SharedString::from(format!("timeline-stem-{index}")))
+                        .absolute()
+                        .left(gpui_kit::relative(percent))
+                        .top(px(0.))
+                        .w(px(1.))
+                        .h(px(BASELINE_TOP))
+                        .bg(kind.color(palette).opacity(0.92))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(-(CAP_SIZE - 1.0) / 2.0))
+                                .top_0()
+                                .child(cap(kind, palette)),
+                        )
+                }),
+        )
+        // 5. Processing boundary: where the ridge stops.
         .children(show_boundary.then(|| {
             div()
                 .absolute()
@@ -645,42 +547,49 @@ pub(crate) fn track(view: &TrackView, seek: AnyElement, palette: Palette) -> Any
                 .h(px(BASELINE_TOP))
                 .w(px(1.))
                 .bg(palette.border_strong)
-                .when(boundary.visible, |this| {
-                    this.child(
-                        div()
-                            .absolute()
-                            .top(px(BASELINE_TOP - 14.0))
-                            .font_family(data_font_family())
-                            .text_size(px(10.))
-                            .text_color(palette.faint)
-                            .whitespace_nowrap()
-                            .when(boundary.right_of_line, |text| text.left(px(4.)))
-                            .when(!boundary.right_of_line, |text| text.right(px(4.)))
-                            .child(format!("{:.0}%", processed * 100.0)),
-                    )
-                })
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(4.))
+                        .left(px(5.))
+                        .px(px(3.))
+                        .bg(palette.surface)
+                        .font_family(data_font_family())
+                        .text_size(px(10.))
+                        .text_color(palette.muted)
+                        .whitespace_nowrap()
+                        .child(format!("{:.0}%", processed * 100.0)),
+                )
         }))
-        // 7b. Playhead: 1.5px accent line through the whole band, a 7px cap on
-        //     the rail, callout riding the rail.
+        // 6. Playhead: a 9px accent wash, the 1.5px cursor, and a triangle
+        //    handle on the baseline.
         .child(
             div()
                 .absolute()
                 .left(gpui_kit::relative(view.cursor_percent))
-                .ml(px(-0.75))
+                .ml(px(-4.5))
                 .top_0()
-                .h(px(BASELINE_TOP + PROGRESS_HEIGHT + 1.0))
-                .w(px(1.5))
-                .bg(palette.accent)
+                .h(px(BASELINE_TOP))
+                .w(px(9.))
+                .bg(palette.accent.opacity(0.10))
                 .child(
                     div()
                         .absolute()
-                        .top(px(RAIL_TOP + RAIL_HEIGHT / 2.0 - 3.5))
-                        .left(px(-2.75))
-                        .size(px(7.))
+                        .left(px(4.))
+                        .top_0()
+                        .h(px(BASELINE_TOP))
+                        .w(px(1.5))
                         .bg(palette.accent),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(0.5))
+                        .top(px(BASELINE_TOP - 5.0))
+                        .child(triangle(palette.accent, true)),
                 ),
         )
-        // 8. Transparent seek slider spanning the track (shared cursor).
+        // 7. Transparent seek slider spanning the whole band.
         .child(
             div()
                 .absolute()
@@ -688,54 +597,14 @@ pub(crate) fn track(view: &TrackView, seek: AnyElement, palette: Palette) -> Any
                 .right_0()
                 .top_0()
                 .bottom_0()
-                .flex()
-                .items_center()
                 .cursor_ew_resize()
                 .child(seek),
         )
         .into_any_element()
 }
 
-/// Axis label row (18px) beneath the track. The end label is right-aligned to
-/// the track edge, leaving the 12px right gutter clear of the divider.
-pub(crate) fn axis_labels(view: &TrackView, palette: Palette, height: f32) -> AnyElement {
-    let (start_ms, span_ms) = view.window_ms();
-    let ladder = tick_ladder(span_ms);
-    div()
-        .relative()
-        .h(px(height))
-        .w_full()
-        .children(
-            axis_label_set(start_ms, span_ms, ladder.major_step_ms, |time| {
-                crate::app::format_timeline_time(time)
-            })
-            .into_iter()
-            .map(|label| {
-                let base = div()
-                    .absolute()
-                    .top(px(4.))
-                    .font_family(data_font_family())
-                    .text_size(px(11.))
-                    .text_color(palette.faint)
-                    .whitespace_nowrap();
-                match label.align {
-                    LabelAlign::Left => base.left(px(0.)).child(label.time),
-                    LabelAlign::Center => base
-                        .left(gpui_kit::relative(label.percent))
-                        .ml(px(-26.))
-                        .w(px(52.))
-                        .text_center()
-                        .child(label.time),
-                    LabelAlign::Right => {
-                        base.right(px(9.)).w(px(52.)).text_right().child(label.time)
-                    }
-                }
-            }),
-        )
-        .into_any_element()
-}
-
-/// Header event legend: cap shape is the legend; labels are fixed keys.
+/// Legend: one cap glyph plus its category word per event kind, in the same
+/// shapes the track draws.
 pub(crate) fn legend(palette: Palette) -> AnyElement {
     div()
         .flex()
@@ -753,9 +622,9 @@ pub(crate) fn legend(palette: Palette) -> AnyElement {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(4.))
+                    .gap(px(5.))
                     .text_size(px(11.))
-                    .text_color(palette.faint)
+                    .text_color(palette.muted)
                     .child(cap(kind, palette))
                     .child(kind.category())
             }),
@@ -763,76 +632,41 @@ pub(crate) fn legend(palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// Header signal sparkline: the selected run's real per-epoch peak C/N0 as a
-/// 44x14 area with a 1px edge. It is a readout, not a control — the lanes below
-/// carry the events, and this tells you at a glance whether the signal was
-/// steady across the record. No data means no sparkline.
-pub(crate) fn signal_sparkline(envelope: Option<&[Option<f32>]>, palette: Palette) -> AnyElement {
-    let box_width = 44.0;
-    let box_height = 14.0;
-    let values = envelope.map(<[Option<f32>]>::to_vec);
-    let tint = palette.chart_series[0].opacity(0.18);
-    let edge = palette.chart_series[0].opacity(0.7);
+/// Ruler labels under the band: `00:02:00`-style times every major tick, with
+/// the ends pinned to the track edges.
+pub(crate) fn axis_labels(view: &TrackView, palette: Palette, height: f32) -> AnyElement {
+    let (start_ms, span_ms) = view.window_ms();
+    let ladder = tick_ladder(span_ms);
     div()
-        .w(px(box_width))
-        .h(px(box_height))
-        .flex_shrink_0()
-        .child(
-            canvas(
-                move |_, _, _| {},
-                move |bounds: Bounds<gpui_kit::Pixels>, _, window, _| {
-                    let Some(values) = values.as_deref() else {
-                        return;
-                    };
-                    let w = f32::from(bounds.size.width);
-                    let h = f32::from(bounds.size.height);
-                    if w <= 2.0 || h <= 2.0 || values.iter().all(Option::is_none) {
-                        return;
+        .relative()
+        .h(px(height))
+        .w_full()
+        .children(
+            axis_label_set(start_ms, span_ms, ladder.major_step_ms, |time| {
+                crate::app::format_timeline_time(time)
+            })
+            .into_iter()
+            .map(|label| {
+                let base = div()
+                    .absolute()
+                    .top(px(3.))
+                    .font_family(data_font_family())
+                    .text_size(px(11.))
+                    .text_color(palette.muted)
+                    .whitespace_nowrap();
+                match label.align {
+                    LabelAlign::Left => base.left(px(0.)).child(label.time),
+                    LabelAlign::Center => base
+                        .left(gpui_kit::relative(label.percent))
+                        .ml(px(-26.))
+                        .w(px(52.))
+                        .text_center()
+                        .child(label.time),
+                    LabelAlign::Right => {
+                        base.right(px(9.)).w(px(52.)).text_right().child(label.time)
                     }
-                    let n = values.len().max(2);
-                    let lo = values.iter().flatten().cloned().fold(f32::MAX, f32::min);
-                    let hi = values.iter().flatten().cloned().fold(f32::MIN, f32::max);
-                    let origin = bounds.origin;
-                    let mut fill = PathBuilder::fill();
-                    let mut stroke = PathBuilder::stroke(px(1.0));
-                    let mut run: Vec<(f32, f32)> = Vec::new();
-                    let flush = |run: &mut Vec<(f32, f32)>,
-                                 fill: &mut PathBuilder,
-                                 stroke: &mut PathBuilder| {
-                        if run.is_empty() {
-                            return;
-                        }
-                        fill.move_to(point(origin.x + px(run[0].0), origin.y + px(h)));
-                        for (x, y) in run.iter() {
-                            fill.line_to(point(origin.x + px(*x), origin.y + px(*y)));
-                        }
-                        let last = run[run.len() - 1];
-                        fill.line_to(point(origin.x + px(last.0), origin.y + px(h)));
-                        fill.close();
-                        stroke.move_to(point(origin.x + px(run[0].0), origin.y + px(run[0].1)));
-                        for (x, y) in run.iter().skip(1) {
-                            stroke.line_to(point(origin.x + px(*x), origin.y + px(*y)));
-                        }
-                        run.clear();
-                    };
-                    for (index, value) in values.iter().enumerate() {
-                        let Some(value) = value else {
-                            flush(&mut run, &mut fill, &mut stroke);
-                            continue;
-                        };
-                        let x = ((index as f32 + 0.5) / n as f32) * w;
-                        run.push((x, envelope_y(*value, lo, hi, h)));
-                    }
-                    flush(&mut run, &mut fill, &mut stroke);
-                    if let Ok(path) = fill.build() {
-                        window.paint_path(path, tint);
-                    }
-                    if let Ok(path) = stroke.build() {
-                        window.paint_path(path, edge);
-                    }
-                },
-            )
-            .size_full(),
+                }
+            }),
         )
         .into_any_element()
 }
@@ -908,52 +742,15 @@ mod tests {
     }
 
     #[test]
-    fn boundary_tag_stays_inside_the_track() {
-        // Cursor far left: caption sits right of the 63% boundary line.
-        let caption = boundary_caption(0.63, 0.13, &[]);
-        assert!(caption.visible);
-        assert!(caption.right_of_line);
-        assert_eq!(caption.top, 0.0);
-
-        // Only the last few percent leave no room for a right-side tag: it
-        // flips to the left of the line, still on the top row.
-        let caption = boundary_caption(0.97, 0.30, &[]);
-        assert!(caption.visible);
-        assert!(!caption.right_of_line);
-        assert_eq!(caption.top, 0.0);
-    }
-
-    #[test]
-    fn envelope_y_auto_scales_the_real_band_and_flattens_degenerate_ranges() {
-        // Min/max samples pin the band edges (18px box, 4px inset).
-        assert_eq!(envelope_y(10.0, 10.0, 20.0, 18.0), 14.0);
-        assert_eq!(envelope_y(20.0, 10.0, 20.0, 18.0), 4.0);
-        assert_eq!(envelope_y(15.0, 10.0, 20.0, 18.0), 9.0);
-        // A nearly constant real series stays visible instead of collapsing
-        // onto the viewport frame, and a degenerate range centers a flat line.
-        assert_eq!(envelope_y(0.994, 0.952, 0.994, 18.0), 4.0);
-        assert_eq!(envelope_y(0.952, 0.952, 0.994, 18.0), 14.0);
-        assert_eq!(envelope_y(42.0, 42.0, 42.0, 18.0), 9.0);
-        assert_eq!(envelope_y(f32::NAN, 0.0, 1.0, 18.0), 9.0);
-    }
-
-    #[test]
-    fn envelope_requires_real_amplitude_and_keeps_gaps_empty() {
-        assert!(envelope_series(&[], 100, 1_000, 4).is_none());
-        assert!(envelope_series(&[Some(0.0), None], 100, 1_000, 4).is_none());
-        let series = envelope_series(&[Some(30.0), Some(40.0), None, Some(20.0)], 100, 400, 4)
-            .expect("real amplitude yields a series");
-        assert_eq!(series.len(), 4);
-        assert_eq!(series[0], Some(0.75));
-        assert_eq!(series[1], Some(1.0));
-        assert_eq!(
-            series[2], None,
-            "the epoch without channel data stays an empty column"
-        );
-        assert_eq!(series[3], Some(0.5));
-        // A bucket past the epoch range stays empty rather than zero-filled.
-        let series = envelope_series(&[Some(40.0)], 100, 400, 4).unwrap();
-        assert_eq!(series[3], None);
+    fn profile_series_takes_the_bucket_peak_and_keeps_gaps() {
+        let per_epoch = [Some(30.0), Some(41.0), None, None, Some(38.0), None];
+        let series = profile_series(&per_epoch, 100, 600, 3).expect("real amplitude");
+        assert_eq!(series.len(), 3);
+        assert_eq!(series[0], Some(41.0), "bucket peak, not the first sample");
+        assert_eq!(series[1], None, "an epoch without channel data is a gap");
+        assert_eq!(series[2], Some(38.0));
+        assert!(profile_series(&[None, None], 100, 200, 2).is_none());
+        assert!(profile_series(&[], 100, 200, 2).is_none());
     }
 
     #[test]

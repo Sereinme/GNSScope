@@ -34,9 +34,6 @@ const CLUSTER_ROW_GAP: f32 = 3.0;
 const JUMP_POPOVER_HEIGHT: f32 = 40.0;
 /// Zoom -/+ cell width (36/36/1fr across the 144px cluster).
 const ZOOM_BUTTON_WIDTH: f32 = 36.0;
-/// Width of the lane-label rail to the left of the track, so ACQ/TRK/NAV/LOSS
-/// line up with the lanes they name.
-const LANE_RAIL_WIDTH: f32 = 34.0;
 
 #[derive(Clone, Copy)]
 pub(crate) enum EpochAction {
@@ -74,7 +71,7 @@ pub(crate) struct EpochView {
     /// The epoch total lives in [`EpochControls::epoch_count`].
     pub(crate) epoch_number: usize,
     pub(crate) track: TrackView,
-    pub(crate) minimap_envelope: Option<Vec<Option<f32>>>,
+    pub(crate) profile: Option<Vec<Option<f32>>>,
     pub(crate) jump_editing: bool,
     pub(crate) jump_input: Option<AnyElement>,
     pub(crate) seek: AnyElement,
@@ -164,28 +161,6 @@ fn jump_popover(input: Option<AnyElement>, palette: Palette) -> AnyElement {
 }
 
 #[allow(clippy::too_many_arguments)]
-/// The four lane labels, drawn in register with the track's lanes so each
-/// mark's row is named.
-fn lane_rail(palette: Palette) -> AnyElement {
-    div()
-        .relative()
-        .w(px(LANE_RAIL_WIDTH))
-        .flex_shrink_0()
-        .children((0..timeline::lane_rows()).map(|index| {
-            div()
-                .absolute()
-                .left_0()
-                .right(px(8.))
-                .top(px(timeline::lane_top(index) + 1.0))
-                .text_size(px(9.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(palette.faint)
-                .text_right()
-                .child(timeline::lane_label(index))
-        }))
-        .into_any_element()
-}
-
 fn cluster(
     epoch_number: usize,
     controls: &EpochControls,
@@ -364,7 +339,7 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
         subtitle,
         epoch_number,
         track,
-        minimap_envelope,
+        profile,
         jump_editing,
         jump_input,
         seek,
@@ -372,7 +347,7 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
         actions,
         localize,
     } = view;
-    let envelope = minimap_envelope.as_deref();
+    let profile = profile.as_deref();
     // The playhead timecode is a header readout: it is always visible and can
     // never occlude the rail or a lane, which the in-track chip did.
     let cursor_readout = timeline::format_decis(track.cursor_time_ms());
@@ -423,7 +398,6 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
                                 .text_color(palette.faint)
                                 .child(subtitle),
                         )
-                        .child(timeline::signal_sparkline(envelope, palette))
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -461,19 +435,12 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
                         .pr(px(12.))
                         .pb(px(6.))
                         .pl(px(10.))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_1()
-                                .min_h_0()
-                                .child(lane_rail(palette))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(timeline::track(&track, seek, palette)),
-                                ),
-                        ),
+                        .child(timeline::track(&track, profile, seek, palette))
+                        .child(timeline::axis_labels(
+                            &track,
+                            palette,
+                            metrics::TIMELINE_LABELS_HEIGHT,
+                        )),
                 )
                 .child(div().w(px(1.)).h_full().flex_shrink_0().bg(palette.border))
                 .child(cluster(
