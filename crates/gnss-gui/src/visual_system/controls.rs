@@ -205,17 +205,17 @@ fn button_visual(kind: ButtonKind, state: ControlState, palette: Palette) -> Con
     }
 
     let (background, foreground, border) = match kind {
-        // The primary action is a neutral solid, not a saturated accent fill:
-        // the interface stays an instrument and cyan keeps its selection
-        // meaning (spec §2.5 `solid`/`on_solid`).
+        // Carbon's primary action is the one saturated blue in the interface:
+        // a solid square that says "this is the thing to press". Interaction
+        // still owns blue everywhere else, but a page's main action earns it.
         ButtonKind::Primary => (
             match state {
-                ControlState::Hovered => palette.solid_hover,
-                ControlState::Pressed => palette.solid_pressed,
-                _ => palette.solid,
+                ControlState::Hovered => palette.accent_hover,
+                ControlState::Pressed => palette.accent_pressed,
+                _ => palette.accent,
             },
-            palette.on_solid,
-            palette.solid,
+            palette.on_accent,
+            palette.accent,
         ),
         ButtonKind::Tab => (
             palette.surface.opacity(0.0),

@@ -33,8 +33,6 @@ pub(crate) fn render(
         .border_1()
         .border_color(palette.border)
         .rounded(px(crate::visual_system::radius_panel()))
-        .shadow(crate::visual_system::panel_shadow(palette))
-        .child(crate::visual_system::panel_sheen(palette))
         .child(
             div()
                 .h(px(38.))

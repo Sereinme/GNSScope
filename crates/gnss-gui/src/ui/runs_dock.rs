@@ -35,8 +35,6 @@ pub(crate) fn render(
         .border_color(palette.border)
         .rounded(px(crate::visual_system::radius_panel()))
         .overflow_hidden()
-        .shadow(crate::visual_system::panel_shadow(palette))
-        .child(crate::visual_system::panel_sheen(palette))
         .flex()
         .flex_col()
         .child(
@@ -76,7 +74,7 @@ pub(crate) fn render(
                     div()
                         .px(px(12.))
                         .py(px(10.))
-                        .text_size(px(11.))
+                        .text_size(px(12.))
                         .text_color(palette.muted)
                         .child(text)
                         .into_any_element()
@@ -93,7 +91,7 @@ pub(crate) fn render(
                 .border_color(palette.border)
                 .flex()
                 .items_center()
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .text_color(palette.faint)
                 .child(view.footer),
         )
@@ -109,16 +107,19 @@ fn section_header(label: &'static str, count: usize, palette: Palette) -> impl I
         .flex()
         .items_center()
         .justify_between()
+        .bg(palette.surface_alt)
+        .border_b_1()
+        .border_color(palette.border)
         .child(
             div()
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .text_color(palette.faint)
+                .text_color(palette.muted)
                 .child(label),
         )
         .child(
             div()
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .font_family(data_font_family())
                 .text_color(palette.faint)
                 .child(count.to_string()),

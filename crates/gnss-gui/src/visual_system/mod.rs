@@ -18,7 +18,6 @@ pub(crate) use controls::{
     BadgeKind, ButtonKind, ControlSize, ControlState, GnssButton, GnssMenuItem, GnssRow,
     GnssSwitch,
 };
-use gpui_kit::AnyElement;
 pub(crate) use primitives::{data_font_family, interface_font_family, metrics};
 pub(crate) use semantic::Palette;
 
@@ -28,43 +27,15 @@ pub(crate) fn radius_panel() -> f32 {
     primitives::radius::PANEL
 }
 
-/// Nested-surface radius (plot wells, sub-cards, row pills).
-pub(crate) fn radius_surface() -> f32 {
-    primitives::radius::SURFACE
-}
-
-/// The lit 1px top edge inside a floating panel. A single hairline of ink at
-/// low alpha reads as a light source and keeps dark panels from looking flat.
-pub(crate) fn panel_sheen(palette: Palette) -> AnyElement {
-    use gpui_kit::prelude::*;
-    gpui_kit::div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .right_0()
-        .h(gpui_kit::px(1.))
-        .bg(palette.panel_sheen)
-        .into_any_element()
-}
-
-/// One soft panel shadow shared by every floating region.
-pub(crate) fn panel_shadow(palette: Palette) -> Vec<gpui_kit::BoxShadow> {
-    vec![gpui_kit::BoxShadow {
-        color: palette.shadow,
-        offset: gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(3.)),
-        blur_radius: gpui_kit::px(12.),
-        spread_radius: gpui_kit::px(-3.),
-        inset: false,
-    }]
-}
-
-/// The stronger shadow reserved for overlays that float above everything.
+/// The one elevation in the system: a floating overlay that genuinely covers
+/// content (the command palette, menus, dialogs). Carbon documents an elevated
+/// token for exactly this and nothing else.
 pub(crate) fn floating_shadow(palette: Palette) -> Vec<gpui_kit::BoxShadow> {
     vec![gpui_kit::BoxShadow {
         color: palette.shadow_strong,
-        offset: gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(14.)),
-        blur_radius: gpui_kit::px(36.),
-        spread_radius: gpui_kit::px(-8.),
+        offset: gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(6.)),
+        blur_radius: gpui_kit::px(18.),
+        spread_radius: gpui_kit::px(0.),
         inset: false,
     }]
 }
@@ -118,11 +89,21 @@ mod tests {
         let light = Palette::light();
         let dark = Palette::dark();
 
-        assert!(relative_luminance(light.background) < relative_luminance(light.surface));
-        assert!(relative_luminance(light.sidebar) < relative_luminance(light.surface));
-        assert!(relative_luminance(dark.background) < relative_luminance(dark.surface));
-        assert!(relative_luminance(dark.surface) < relative_luminance(dark.surface_raised));
-        assert!(relative_luminance(dark.surface_raised) <= relative_luminance(dark.surface_dialog));
+        // Carbon's field and panel are the same tone — regions are separated
+        // by hairlines, not by a surface step — so the ladder asserts the
+        // nested steps only: alt is one step away from the field, raised is at
+        // or above alt, and the dialog never sits below raised.
+        assert_eq!(
+            relative_luminance(light.background),
+            relative_luminance(light.surface)
+        );
+        assert_eq!(
+            relative_luminance(dark.background),
+            relative_luminance(dark.surface)
+        );
+        assert!(relative_luminance(light.surface_alt) < relative_luminance(light.surface));
+        assert!(relative_luminance(dark.surface) < relative_luminance(dark.surface_alt));
+        assert!(relative_luminance(dark.surface_alt) <= relative_luminance(dark.surface_raised));
 
         for (name, palette) in [("light", light), ("dark", dark)] {
             assert!(

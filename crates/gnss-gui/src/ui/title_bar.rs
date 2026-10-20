@@ -17,7 +17,7 @@ use gpui_kit::{div, px, AnyElement, Div, SharedString, Stateful};
 // issue 16).
 pub(crate) const CMD_FIELD_WIDTH: f32 = 360.0;
 pub(crate) const CMD_FIELD_HEIGHT: f32 = 26.0;
-pub(crate) const CMD_FIELD_RADIUS: f32 = 6.0;
+pub(crate) const CMD_FIELD_RADIUS: f32 = 0.0;
 /// Magnifier icon center inset from the field's left edge (mockup: icon
 /// centered at 13px inside the 26px field).
 const CMD_ICON_INSET: f32 = 13.0;
@@ -55,9 +55,12 @@ pub(crate) fn render(
     let zh = has_cjk(page_context);
     TitleBar::new()
         .h(px(metrics::TITLE_BAR_HEIGHT))
-        .bg(palette.canvas)
-        .border_color(palette.border)
-        .text_color(palette.text)
+        // Carbon UI shell: the header is an inverse bar, not another canvas
+        // strip. It is the one place in the app where light text sits on a
+        // dark field even in the light theme.
+        .bg(palette.header)
+        .border_color(palette.header_hairline)
+        .text_color(palette.header_text)
         .child(
             div()
                 .h_full()
@@ -82,24 +85,23 @@ pub(crate) fn render(
                         .child(
                             div()
                                 .relative()
-                                .size(px(13.))
+                                .size(px(12.))
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .rounded_full()
                                 .border_1()
                                 .border_color(palette.accent)
-                                .child(div().size(px(3.)).rounded_full().bg(palette.accent)),
+                                .child(div().size(px(4.)).bg(palette.accent)),
                         )
                         .child(
                             div()
-                                .text_size(px(13.5))
+                                .text_size(px(14.))
                                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                .text_color(palette.text)
+                                .text_color(palette.header_text)
                                 .child("GNSScope"),
                         ),
                 )
-                .child(div().h(px(18.)).w(px(1.)).bg(palette.border))
+                .child(div().h(px(20.)).w(px(1.)).bg(palette.header_hairline))
                 .child(match run_selector {
                     Some(selector) => selector,
                     None => div()
@@ -110,8 +112,8 @@ pub(crate) fn render(
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .text_size(px(10.))
-                                .text_color(palette.muted)
+                                .text_size(px(12.))
+                                .text_color(palette.header_muted)
                                 .child(page_context),
                         )
                         .child(
@@ -122,9 +124,9 @@ pub(crate) fn render(
                                 // fixed-height slot from clipping a wrapped
                                 // second line mid-glyph.
                                 .truncate()
-                                .text_size(px(11.))
+                                .text_size(px(12.))
                                 .font_family(data_font_family())
-                                .text_color(palette.text)
+                                .text_color(palette.header_text)
                                 .child(selected_name),
                         )
                         .into_any_element(),
@@ -158,22 +160,22 @@ pub(crate) fn command_field_with(
         .h(px(CMD_FIELD_HEIGHT))
         .flex_shrink_0()
         .rounded(px(CMD_FIELD_RADIUS))
-        .bg(palette.surface_alt)
+        .bg(palette.header_field)
         .border_1()
-        .border_color(palette.border)
+        .border_color(palette.header_hairline)
         .flex()
         .items_center()
         .pl(px(CMD_ICON_LEFT))
         .pr(px(CMD_HINT_RIGHT_INSET))
-        .text_color(palette.text)
+        .text_color(palette.header_text)
         .font_family(interface_font_family())
-        .hover(move |style| style.border_color(palette.border_strong))
+        .hover(move |style| style.border_color(palette.header_muted))
         .tab_index(0)
         .focus(move |style| style.border_2().border_color(palette.focus_ring))
         .child(
             Icon::new(IconName::Search)
                 .size(px(CMD_ICON_SIZE))
-                .text_color(palette.muted),
+                .text_color(palette.header_muted),
         )
         // The interactive input fills the remaining width; the static
         // placeholder is only the decoration-only fallback (tests / previews).
@@ -236,10 +238,10 @@ mod tests {
 
     #[test]
     fn command_field_geometry_matches_spec() {
-        // §3.1: 360×26, radius 6. Capsule guards: height < 28 and radius < 14.
+        // §3.1 geometry under the Carbon chassis: 360×26, square corners.
         assert_eq!(CMD_FIELD_WIDTH, 360.0);
         assert_eq!(CMD_FIELD_HEIGHT, 26.0);
-        assert_eq!(CMD_FIELD_RADIUS, 6.0);
+        assert_eq!(CMD_FIELD_RADIUS, 0.0);
         // Capsule guards (spec §7): height < 28 and radius < 14.
         const { assert!(CMD_FIELD_HEIGHT < 28.0) };
         const { assert!(CMD_FIELD_RADIUS < 14.0) };
@@ -249,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn command_field_chrome_surface_alt_border_no_shadow() {
+    fn command_field_chrome_header_field_border_no_shadow() {
         let palette = palette();
         let style = style_of(command_field(true, palette));
         match style.size.height {
@@ -264,7 +266,7 @@ mod tests {
             ))) => assert_eq!(width, px(CMD_FIELD_WIDTH)),
             other => panic!("unexpected field width {other:?}"),
         }
-        // 1px border on all sides, radius 6, surface_alt fill, no shadow.
+        // 1px border on all sides, square, header field fill, no shadow.
         for side in [
             style.border_widths.top,
             style.border_widths.right,
@@ -277,7 +279,7 @@ mod tests {
             style.corner_radii.top_left,
             Some(gpui_kit::AbsoluteLength::Pixels(px(CMD_FIELD_RADIUS)))
         );
-        assert_eq!(style.background, Some(palette.surface_alt.into()));
+        assert_eq!(style.background, Some(palette.header_field.into()));
         assert!(style.box_shadow.as_ref().is_none_or(Vec::is_empty));
     }
 

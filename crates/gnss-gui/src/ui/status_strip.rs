@@ -472,9 +472,11 @@ fn strip_shell(palette: Palette, toggle: AnyElement, plan: StripPlan) -> Div {
     div()
         .h(px(metrics::STATUS_BAR_HEIGHT))
         .flex_shrink_0()
-        // The strip sits on the canvas below the floating panels, so it needs
-        // no rule of its own; the panel gutters already separate it.
-        .bg(palette.canvas)
+        // A Carbon status band: one tone step up from the field, closed by a
+        // hairline so the shell reads as header / body / footer.
+        .bg(palette.surface_alt)
+        .border_t_1()
+        .border_color(palette.border)
         .flex()
         .items_center()
         .text_color(palette.text)
@@ -863,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_shell_is_28px_flat_on_the_canvas() {
+    fn strip_shell_is_32px_band_closed_by_a_hairline() {
         let palette = palette();
         let plan =
             compose_with_sampler(active_items(palette), String::new(), palette, false, || {
@@ -878,9 +880,13 @@ mod tests {
             ))) => assert_eq!(height, px(metrics::STATUS_BAR_HEIGHT)),
             other => panic!("unexpected strip height {other:?}"),
         }
-        assert_eq!(metrics::STATUS_BAR_HEIGHT, 28.0);
-        // Flat on the canvas: no rule of its own and no box shadows.
-        assert_eq!(style.border_widths.top, None);
+        assert_eq!(metrics::STATUS_BAR_HEIGHT, 32.0);
+        // A Carbon footer band: one tone step up, closed by a top hairline.
+        assert_eq!(
+            style.border_widths.top,
+            Some(gpui_kit::AbsoluteLength::Pixels(px(1.)))
+        );
+        assert_eq!(style.background, Some(palette.surface_alt.into()));
         assert!(style.box_shadow.as_ref().is_none_or(Vec::is_empty));
     }
 

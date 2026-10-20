@@ -84,8 +84,6 @@ pub(crate) fn document_panel(content: AnyElement, palette: Palette) -> AnyElemen
         .border_color(palette.border)
         .rounded(px(crate::visual_system::radius_panel()))
         .overflow_hidden()
-        .shadow(crate::visual_system::panel_shadow(palette))
-        .child(crate::visual_system::panel_sheen(palette))
         .child(div().size_full().overflow_y_scrollbar().child(content))
         .into_any_element()
 }
@@ -93,15 +91,20 @@ pub(crate) fn document_panel(content: AnyElement, palette: Palette) -> AnyElemen
 /// The window body: floating regions separated by a single gutter, inset from
 /// the window canvas so each region reads as a raised surface rather than a
 /// tile in a wireframe (2026-10-20 floating chassis).
-pub(crate) fn shell_body(runs_dock: Option<AnyElement>, content: Option<AnyElement>) -> AnyElement {
-    let gutter = crate::visual_system::metrics::SHELL_GUTTER;
+pub(crate) fn shell_body(
+    palette: Palette,
+    runs_dock: Option<AnyElement>,
+    content: Option<AnyElement>,
+) -> AnyElement {
+    // Carbon has no gutter: regions butt together and a 1px hairline is the
+    // only separator. The gap *is* the rule — its fill is the border tone, so
+    // the seam stays exactly one device pixel at any scale.
     div()
         .flex_1()
         .min_h_0()
         .flex()
-        .gap(px(gutter))
-        .px(px(gutter))
-        .pb(px(gutter))
+        .gap(px(1.))
+        .bg(palette.border)
         .children(runs_dock)
         .children(content)
         .into_any_element()
@@ -112,17 +115,18 @@ pub(crate) fn shell_body(runs_dock: Option<AnyElement>, content: Option<AnyEleme
 /// run-configuration rail or a drawer — is a full-height column the timeline never
 /// truncates.
 pub(crate) fn workspace_shell(
+    palette: Palette,
     workspace: Option<AnyElement>,
     side_region: Option<AnyElement>,
     timeline: Option<AnyElement>,
 ) -> AnyElement {
-    let gutter = crate::visual_system::metrics::SHELL_GUTTER;
     div()
         .flex_1()
         .min_w_0()
         .min_h_0()
         .flex()
-        .gap(px(gutter))
+        .bg(palette.border)
+        .gap(px(1.))
         .child(
             div()
                 .flex_1()
@@ -130,7 +134,7 @@ pub(crate) fn workspace_shell(
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .gap(px(gutter))
+                .gap(px(1.))
                 .children(workspace)
                 .children(timeline),
         )

@@ -428,7 +428,7 @@ fn header_row(palette: Palette) -> impl IntoElement {
         .bg(palette.surface_alt)
         .border_b_1()
         .border_color(palette.border)
-        .text_size(px(11.))
+        .text_size(px(12.))
         .font_family(interface_font_family())
         .text_color(palette.muted)
         .children(
@@ -451,7 +451,7 @@ fn row_element(row: &PvtTableRow, is_last: bool, palette: Palette) -> AnyElement
         .child(
             column_div(0)
                 .px(px(12.))
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .font_family(interface_font_family())
                 .text_color(palette.muted)
                 .child(row.key),
@@ -483,14 +483,14 @@ fn row_element(row: &PvtTableRow, is_last: bool, palette: Palette) -> AnyElement
         .child(
             column_div(3)
                 .pr(px(6.))
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .font_family(interface_font_family())
                 .text_color(palette.faint)
                 .child(row.unit.unwrap_or(UNAVAILABLE)),
         )
         .child(
             column_div(4)
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .font_family(interface_font_family())
                 .text_color(row.status.color(palette))
                 .child(row.status.label()),

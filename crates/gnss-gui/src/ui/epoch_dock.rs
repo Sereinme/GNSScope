@@ -349,8 +349,6 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
         .bg(palette.surface)
         .border_1()
         .border_color(palette.border)
-        .shadow(crate::visual_system::panel_shadow(palette))
-        .child(crate::visual_system::panel_sheen(palette))
         .flex()
         .flex_col()
         // Header 28 (incl. 1px bottom line): pane title + real summary

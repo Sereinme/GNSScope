@@ -158,22 +158,22 @@ fn row_shell(
     div()
         .id(id)
         .h(px(metrics::RUN_ROW_HEIGHT))
-        .mx(px(6.))
-        .rounded(px(crate::visual_system::radius_surface()))
+        // Carbon side-nav geometry: the row runs edge to edge and the
+        // selection is a 3px accent bar on the left, not a floating pill.
         .cursor_pointer()
-        .border_l_2()
+        .border_l_3()
         .border_color(if edge {
             palette.accent
         } else {
             palette.sidebar.opacity(0.0)
         })
-        .pl(px(9.))
-        .pr(px(10.))
+        .pl(px(12.))
+        .pr(px(12.))
         .py(px(4.))
         // A selection pill inset from the dock edges reads as a chosen row;
         // a full-bleed wash reads as a filled table cell (2026-10-20 chassis).
         .bg(if selected {
-            palette.accent_wash
+            palette.surface_alt
         } else {
             palette.sidebar.opacity(0.0)
         })
@@ -267,7 +267,7 @@ fn status_line(
         .child(
             div()
                 .flex_shrink_0()
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .font_weight(gpui_kit::FontWeight::MEDIUM)
                 .text_color(status_color)
                 .child(status),
@@ -276,7 +276,7 @@ fn status_line(
             div()
                 .flex_shrink_0()
                 .font_family(data_font_family())
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .text_color(palette.faint)
                 .child(start.to_string()),
         )
@@ -290,7 +290,7 @@ fn status_line(
                 .truncate()
                 .text_right()
                 .font_family(data_font_family())
-                .text_size(px(11.))
+                .text_size(px(12.))
                 .text_color(palette.faint)
                 .child(end.to_string()),
         )
@@ -657,13 +657,13 @@ mod tests {
     }
 
     #[test]
-    fn selected_history_row_uses_accent_wash_surface_and_accent_edge() {
+    fn selected_history_row_uses_a_surface_step_and_accent_edge() {
         let palette = Palette::light();
         let actions = test_actions();
         let mut row =
             history_row_element(&view("失败", true, false), &actions, localize_zh, palette);
         let style = row.style();
-        assert_eq!(background_color(style), Some(palette.accent_wash));
+        assert_eq!(background_color(style), Some(palette.surface_alt));
         assert_eq!(style.border_color, Some(palette.accent));
     }
 

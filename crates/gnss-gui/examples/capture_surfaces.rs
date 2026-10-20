@@ -202,8 +202,12 @@ fn capture(
     // The backing scale follows the host display (2x on a default Retina mode,
     // ~1.91 in a scaled mode) and integer rounding differs per axis, so accept
     // a small scale mismatch rather than pinning one exact factor.
+    // The host may additionally clamp the window to the display's work area,
+    // which shrinks only the height, so the two axis scales can disagree by a
+    // few percent. Require a real backing scale and a height within 15% of the
+    // request instead of pinning both axes to one factor.
     assert!(
-        scale_x >= 1.0 && (scale_x - scale_y).abs() < 0.03,
+        scale_x >= 1.0 && scale_y >= scale_x * 0.85,
         "unexpected capture dimensions {captured_width}x{captured_height} for {width}x{height}"
     );
     assert!(

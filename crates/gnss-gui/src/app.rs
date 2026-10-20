@@ -6092,8 +6092,6 @@ impl GnsscopeApp {
             .border_color(palette.border)
             .rounded(px(crate::visual_system::radius_panel()))
             .overflow_hidden()
-            .shadow(crate::visual_system::panel_shadow(palette))
-            .child(crate::visual_system::panel_sheen(palette))
             .child(
                 div()
                     .h(px(metrics::WORKSPACE_CONTEXT_HEIGHT))
@@ -8021,13 +8019,17 @@ impl Render for GnsscopeApp {
                 };
                 let timeline = (self.timeline_visible && !workspace_empty)
                     .then(|| self.render_timeline_bar(palette, cx).into_any_element());
-                workspace_shell(workspace, side_region, timeline)
+                workspace_shell(palette, workspace, side_region, timeline)
             }
         };
         let runs_dock = shell_layout
             .show_runs_dock
             .then(|| self.render_runs_dock(palette, shell_layout.runs_dock_replaces_content, cx));
-        let body = shell_body(runs_dock, shell_layout.show_content.then_some(page_content));
+        let body = shell_body(
+            palette,
+            runs_dock,
+            shell_layout.show_content.then_some(page_content),
+        );
         let root = shell_root(
             palette,
             self.render_title_bar(palette, compact, cx)

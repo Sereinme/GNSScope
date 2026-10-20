@@ -186,8 +186,6 @@ pub(crate) fn render(
         .border_color(palette.border)
         .rounded(px(super::super::visual_system::radius_panel()))
         .overflow_hidden()
-        .shadow(super::super::visual_system::panel_shadow(palette))
-        .child(super::super::visual_system::panel_sheen(palette))
         .child(
             div()
                 .h(px(metrics::PLOT_PANE_HEADER_HEIGHT_V3))
@@ -196,6 +194,8 @@ pub(crate) fn render(
                 .items_center()
                 .justify_between()
                 .bg(palette.surface_alt)
+                .border_b_1()
+                .border_color(palette.border)
                 .child(
                     div()
                         .flex()

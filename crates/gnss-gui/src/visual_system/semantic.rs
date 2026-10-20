@@ -24,6 +24,13 @@ pub(crate) struct Palette {
     pub(crate) active: Hsla,
     /// Lit inner edge for floating panels (dark: white sheen, light: none).
     pub(crate) panel_sheen: Hsla,
+    /// The UI-shell header: an inverse bar in the light theme, one tone step
+    /// above the field in the dark theme, always with its own text ramp.
+    pub(crate) header: Hsla,
+    pub(crate) header_text: Hsla,
+    pub(crate) header_muted: Hsla,
+    pub(crate) header_field: Hsla,
+    pub(crate) header_hairline: Hsla,
     pub(crate) disabled: Hsla,
     pub(crate) border: Hsla,
     /// A fainter rule than `border`: table body separators, lane dividers and
@@ -87,6 +94,11 @@ impl Palette {
             hover: color(light::TEXT).opacity(opacity::STATE_HOVER),
             active: color(light::TEXT).opacity(opacity::STATE_PRESSED),
             panel_sheen: color(light::TEXT).opacity(opacity::PANEL_SHEEN * 0.6),
+            header: color(0x161616),
+            header_text: color(0xf4f4f4),
+            header_muted: color(0xa8a8a8),
+            header_field: color(0x262626),
+            header_hairline: color(0x393939),
             disabled: color(light::DISABLED),
             border: color(light::TEXT).opacity(0.12),
             border_subtle: color(light::TEXT).opacity(0.07),
@@ -141,6 +153,11 @@ impl Palette {
             hover: color(dark::TEXT).opacity(opacity::STATE_HOVER),
             active: color(dark::TEXT).opacity(opacity::STATE_PRESSED),
             panel_sheen: color(dark::TEXT).opacity(opacity::PANEL_SHEEN),
+            header: color(dark::SURFACE_ALT),
+            header_text: color(dark::TEXT),
+            header_muted: color(dark::FAINT),
+            header_field: color(0x161616),
+            header_hairline: color(0x393939),
             disabled: color(dark::DISABLED),
             border: color(dark::TEXT).opacity(0.10),
             border_subtle: color(dark::TEXT).opacity(0.06),

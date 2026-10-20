@@ -39,7 +39,7 @@ pub(crate) fn data_font_family() -> &'static str {
 /// Shared shell geometry derived from the concept workbench.
 #[allow(dead_code)]
 pub(crate) mod metrics {
-    pub(crate) const TITLE_BAR_HEIGHT: f32 = 40.0;
+    pub(crate) const TITLE_BAR_HEIGHT: f32 = 48.0;
     /// Gutter between floating panels and the window canvas.
     pub(crate) const SHELL_GUTTER: f32 = 8.0;
     pub(crate) const PLOT_PANE_HEADER_HEIGHT_V3: f32 = 30.0;
@@ -55,7 +55,7 @@ pub(crate) mod metrics {
     pub(crate) const WORKSPACE_HEADER_HEIGHT: f32 = 64.0;
     pub(crate) const WORKSPACE_CONTEXT_HEIGHT: f32 = 42.0;
     pub(crate) const WORKSPACE_TABS_HEIGHT: f32 = 22.0;
-    pub(crate) const STATUS_BAR_HEIGHT: f32 = 28.0;
+    pub(crate) const STATUS_BAR_HEIGHT: f32 = 32.0;
     pub(crate) const CONTROL_RADIUS: f32 = super::radius::CONTROL;
 
     // Design-refresh metrics (spec §2.9); not yet consumed by consumers
@@ -135,20 +135,19 @@ pub(super) mod typography {
 
 #[allow(dead_code)]
 pub(super) mod radius {
-    // A four-step ladder, not a per-component invention (Carbon's rule: the
-    // system owns a small set of radii and every surface picks one of them).
-    /// Floating panel corner radius (panes, docks, rail, timeline, pages).
-    pub(crate) const PANEL: f32 = 12.0;
+    // Carbon's radius scale: 0 for everything structural, 2px for tags, and a
+    // pill only for status dots. A square is the system's signature — corners
+    // are never rounded to look friendly, and depth is never implied by a
+    // radius. Every name stays so call sites keep one vocabulary.
+    pub(crate) const PANEL: f32 = 0.0;
     pub(crate) const PANE: f32 = PANEL;
-    /// Nested surface: plot wells, sub-cards, row selection pills.
-    pub(crate) const SURFACE: f32 = 8.0;
-    /// Interactive control: buttons, inputs, menu rows.
-    pub(crate) const CONTROL: f32 = 4.0;
-    pub(crate) const CONTROL_SOFT: f32 = 6.0;
-    /// Floating menu / dialog: one step above panels so it clearly detaches.
-    pub(crate) const RAISED: f32 = 8.0;
-    pub(crate) const DIALOG: f32 = 12.0;
-    /// Pill radius for segmented controls and status chips.
+    pub(crate) const SURFACE: f32 = 0.0;
+    pub(crate) const CONTROL: f32 = 0.0;
+    pub(crate) const CONTROL_SOFT: f32 = 0.0;
+    pub(crate) const RAISED: f32 = 0.0;
+    pub(crate) const DIALOG: f32 = 0.0;
+    /// Tags and status chips: Carbon's only non-zero radius besides the pill.
+    pub(crate) const TAG: f32 = 2.0;
     pub(crate) const PILL: f32 = 9999.0;
 }
 
@@ -182,81 +181,74 @@ pub(super) mod duration {
 }
 
 pub(super) mod light {
-    pub(crate) const BACKGROUND: u32 = 0xf5f5f7;
-    pub(crate) const SIDEBAR: u32 = 0xededf0;
+    // IBM Carbon "White" theme: white canvas, three grey steps that only ever
+    // move in 10-15 point increments, one decisive blue, and hairlines drawn
+    // in the same grey as surface-2. Nothing is tinted; depth comes from tone.
+    pub(crate) const BACKGROUND: u32 = 0xffffff;
+    pub(crate) const SIDEBAR: u32 = 0xf4f4f4;
     pub(crate) const SURFACE: u32 = 0xffffff;
-    pub(crate) const SURFACE_ALT: u32 = 0xf5f7f9;
-    pub(crate) const SURFACE_RAISED: u32 = 0xffffff;
+    pub(crate) const SURFACE_ALT: u32 = 0xf4f4f4;
+    pub(crate) const SURFACE_RAISED: u32 = 0xf4f4f4;
     pub(crate) const SURFACE_DIALOG: u32 = 0xffffff;
-    pub(crate) const DISABLED: u32 = 0xe7eaee;
-    pub(crate) const TEXT: u32 = 0x1f252c;
-    pub(crate) const MUTED: u32 = 0x515c68;
-    pub(crate) const FAINT: u32 = 0x616c78;
-    pub(crate) const TEXT_DISABLED: u32 = 0x8a939e;
-    pub(crate) const ACCENT: u32 = 0x137a94;
-    pub(crate) const ACCENT_HOVER: u32 = 0x0f6b83;
-    pub(crate) const ACCENT_PRESSED: u32 = 0x0c5c72;
-    pub(crate) const ACCENT_WASH: u32 = 0xddeff3;
-    pub(crate) const HEALTHY: u32 = 0x0f7a58;
-    pub(crate) const HEALTHY_WASH: u32 = 0xdff2e9;
-    pub(crate) const WARNING: u32 = 0x8f5300;
-    pub(crate) const WARNING_WASH: u32 = 0xf7ecd9;
-    pub(crate) const DANGER: u32 = 0xb13543;
-    pub(crate) const DANGER_WASH: u32 = 0xf7e5e7;
-    pub(crate) const UNAVAILABLE: u32 = 0x646e7a;
-    pub(crate) const UNAVAILABLE_WASH: u32 = 0xe9edf1;
-    /// Window canvas behind the floating panels: a step deeper than the
-    /// parchment page tone so panels visibly lift off it.
-    pub(crate) const CANVAS: u32 = 0xe6e8ec;
-    // Weakened for the 1px-solid grid policy (spec §2.9 / gap 19).
-    pub(crate) const PLOT_GRID: u32 = 0xe4e9ee;
-    pub(crate) const PLOT_AXIS: u32 = 0x6a7480;
-
-    // Sky-plot elevation bands, high (75-90) to low (0-15). A dark-to-light
-    // green ramp reads as an ordered scale on paper white (design pass).
+    pub(crate) const DISABLED: u32 = 0xf4f4f4;
+    pub(crate) const TEXT: u32 = 0x161616;
+    pub(crate) const MUTED: u32 = 0x525252;
+    pub(crate) const FAINT: u32 = 0x6f6f6f;
+    pub(crate) const TEXT_DISABLED: u32 = 0xa8a8a8;
+    pub(crate) const ACCENT: u32 = 0x0f62fe;
+    pub(crate) const ACCENT_HOVER: u32 = 0x0050e6;
+    pub(crate) const ACCENT_PRESSED: u32 = 0x002d9c;
+    pub(crate) const ACCENT_WASH: u32 = 0xedf5ff;
+    pub(crate) const HEALTHY: u32 = 0x198038;
+    pub(crate) const HEALTHY_WASH: u32 = 0xdefbe6;
+    pub(crate) const WARNING: u32 = 0x8e6a00;
+    pub(crate) const WARNING_WASH: u32 = 0xfcf4d2;
+    pub(crate) const DANGER: u32 = 0xda1e28;
+    pub(crate) const DANGER_WASH: u32 = 0xfff1f1;
+    pub(crate) const UNAVAILABLE: u32 = 0x6f6f6f;
+    pub(crate) const UNAVAILABLE_WASH: u32 = 0xe0e0e0;
+    /// The page is the canvas; regions separate by tone and hairline, never by
+    /// a gutter, so the canvas is the same white as a panel.
+    pub(crate) const CANVAS: u32 = 0xffffff;
+    pub(crate) const PLOT_GRID: u32 = 0xe8e8e8;
+    pub(crate) const PLOT_AXIS: u32 = 0x161616;
     pub(crate) const ELEVATION: [u32; 6] =
-        [0x0a6b4b, 0x11845e, 0x1e9a72, 0x39ae87, 0x5fc0a0, 0x8ad0b8];
+        [0x022b0f, 0x0e6027, 0x198038, 0x24a148, 0x42be65, 0x8ce4a9];
 }
 
 pub(super) mod dark {
-    // A near-neutral graphite ladder: cool enough to stay technical, but
-    // desaturated toward Apple's neutral tile greys so large panels read as
-    // calm surfaces rather than blue-black. Panes stay a step above the
-    // canvas so they read as panels instead of holes.
-    pub(crate) const BACKGROUND: u32 = 0x0a0d10;
-    pub(crate) const SIDEBAR: u32 = 0x0d1014;
-    pub(crate) const SURFACE: u32 = 0x11151a;
-    pub(crate) const SURFACE_ALT: u32 = 0x161b21;
-    pub(crate) const SURFACE_RAISED: u32 = 0x1b2027;
-    pub(crate) const SURFACE_DIALOG: u32 = 0x232931;
-    pub(crate) const DISABLED: u32 = 0x151a1f;
-    pub(crate) const TEXT: u32 = 0xe9eef3;
-    pub(crate) const MUTED: u32 = 0xa7b2bf;
-    pub(crate) const FAINT: u32 = 0x8492a0;
-    pub(crate) const TEXT_DISABLED: u32 = 0x5d6773;
-    pub(crate) const ACCENT: u32 = 0x5cc8dd;
-    pub(crate) const ACCENT_HOVER: u32 = 0x76d3e5;
-    pub(crate) const ACCENT_PRESSED: u32 = 0x43b6cc;
-    pub(crate) const ACCENT_WASH: u32 = 0x123037;
-    pub(crate) const HEALTHY: u32 = 0x67c996;
-    pub(crate) const HEALTHY_WASH: u32 = 0x112a20;
-    pub(crate) const WARNING: u32 = 0xdfb45f;
-    pub(crate) const WARNING_WASH: u32 = 0x2e2614;
-    pub(crate) const DANGER: u32 = 0xea7078;
-    pub(crate) const DANGER_WASH: u32 = 0x30191d;
-    pub(crate) const UNAVAILABLE: u32 = 0x8492a0;
-    // Progress-strip groove / timeline hairline groove (spec §2.7 --track).
-    pub(crate) const UNAVAILABLE_WASH: u32 = 0x222830;
-    /// Window canvas behind the floating panels.
-    pub(crate) const CANVAS: u32 = 0x050608;
-    // Weakened for the 1px-solid grid policy (spec §2.9 / gap 19).
-    pub(crate) const PLOT_GRID: u32 = 0x212730;
-    pub(crate) const PLOT_AXIS: u32 = 0x7e8b99;
-
-    // Sky-plot elevation bands, high (75-90) to low (0-15): a bright-to-dim
-    // green ramp so the six bands stay distinguishable on graphite.
+    // IBM Carbon "Gray-100" theme: a flat near-black field, grey steps at
+    // 161616 / 262626 / 393939, and blue-50 because blue-60 disappears on
+    // dark. Surfaces never glow; hairlines do the separating.
+    pub(crate) const BACKGROUND: u32 = 0x161616;
+    pub(crate) const SIDEBAR: u32 = 0x1c1c1c;
+    pub(crate) const SURFACE: u32 = 0x161616;
+    pub(crate) const SURFACE_ALT: u32 = 0x262626;
+    pub(crate) const SURFACE_RAISED: u32 = 0x262626;
+    pub(crate) const SURFACE_DIALOG: u32 = 0x262626;
+    pub(crate) const DISABLED: u32 = 0x262626;
+    pub(crate) const TEXT: u32 = 0xf4f4f4;
+    pub(crate) const MUTED: u32 = 0xc6c6c6;
+    pub(crate) const FAINT: u32 = 0xa8a8a8;
+    pub(crate) const TEXT_DISABLED: u32 = 0x6f6f6f;
+    pub(crate) const ACCENT: u32 = 0x4589ff;
+    pub(crate) const ACCENT_HOVER: u32 = 0x78a9ff;
+    pub(crate) const ACCENT_PRESSED: u32 = 0xa6c8ff;
+    pub(crate) const ACCENT_WASH: u32 = 0x0f2c55;
+    pub(crate) const HEALTHY: u32 = 0x42be65;
+    pub(crate) const HEALTHY_WASH: u32 = 0x0f2f1c;
+    pub(crate) const WARNING: u32 = 0xf1c21b;
+    pub(crate) const WARNING_WASH: u32 = 0x3d2f0b;
+    pub(crate) const DANGER: u32 = 0xff8389;
+    pub(crate) const DANGER_WASH: u32 = 0x3d1618;
+    pub(crate) const UNAVAILABLE: u32 = 0x8d8d8d;
+    pub(crate) const UNAVAILABLE_WASH: u32 = 0x393939;
+    /// Same field as a panel: separations are hairlines, not gaps.
+    pub(crate) const CANVAS: u32 = 0x161616;
+    pub(crate) const PLOT_GRID: u32 = 0x333333;
+    pub(crate) const PLOT_AXIS: u32 = 0x8d8d8d;
     pub(crate) const ELEVATION: [u32; 6] =
-        [0x8fe6bb, 0x76d6a6, 0x5cc190, 0x49a97b, 0x3d8f68, 0x357554];
+        [0xa7f0bd, 0x74e792, 0x42be65, 0x24a148, 0x198038, 0x0e6027];
 }
 
 pub(super) mod shared {

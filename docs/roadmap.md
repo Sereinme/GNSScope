@@ -210,6 +210,18 @@ full-strength tail over the last fifth of the ENU track. See
 `.scratch/ui-visual-refactor/design-pass-evidence.md` §7 for the adoption table. Gates:
 formatting, strict Clippy, and `cargo test --workspace` 360 passed / 0 failed / 8 ignored.
 
+**Carbon chassis rebuild (2026-10-20):** on the product owner's instruction to discard the
+existing concept work, the shell was rebuilt on IBM Carbon's language rather than tuned
+again. Corners are 0px everywhere (2px tags, pill status only), the 8px guttered floating
+cards became adjacent regions separated by a 1px hairline (the shell gap *is* the rule),
+the title bar became a 48px inverse UI-shell header, the accent moved from cyan to IBM
+Blue with a solid-blue primary action, selected rows use Carbon's 3px left bar on a
+surface step, pane and section headers are tone bands closed by a hairline, and data type
+rose to 12px. Structure carries no shadow; only genuinely floating layers do. See
+`.scratch/ui-visual-refactor/design-pass-evidence.md` §8. Gates: formatting, strict
+Clippy, and `cargo test --workspace` 360 passed / 0 failed / 8 ignored, 36 captures
+refreshed.
+
 **Phase 4 deletion safety correction:** history reveal/delete actions now live in
 right-click menus, not selected-row inline controls. Delete requests a native
 Cancel-first confirmation bound to the original UUID; changing selection/order
