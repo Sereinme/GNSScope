@@ -97,9 +97,11 @@ impl From<Palette> for ComponentTokens {
             slider_thumb: palette.accent,
             switch: palette.active,
             switch_thumb: palette.solid,
-            scrollbar: palette.background,
-            scrollbar_thumb: palette.border_strong,
-            scrollbar_thumb_hover: palette.muted,
+            // A transparent track and an ink-alpha pill thumb: the scrollbar
+            // should read as a faint grip, never as a painted rail.
+            scrollbar: palette.surface.opacity(0.0),
+            scrollbar_thumb: palette.text.opacity(0.18),
+            scrollbar_thumb_hover: palette.text.opacity(0.32),
             // Spec §2.7/§3.1/§2.5/§3.10/§3.11: groove = unavailable_wash,
             // command field = surface_alt, tab indicator = accent,
             // timeline hairline groove = unavailable_wash (--track), strip = sidebar.

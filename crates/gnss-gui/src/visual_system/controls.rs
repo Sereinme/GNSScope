@@ -111,7 +111,20 @@ pub(crate) enum ButtonKind {
     #[default]
     Secondary,
     Ghost,
+    /// Workbench tab: no chrome at rest, `text_secondary` label; the selected
+    /// tab takes `text_primary` and the caller paints the 2px accent
+    /// underline (spec §3.3). A tab must never read as a filled chip.
+    Tab,
+    /// Quiet on/off toggle (跟随实时, dock toggles): transparent body, and an
+    /// active state carried by accent text plus a 1px accent border — no
+    /// filled wash, so a persistent toggle never looks like a CTA.
+    Toggle,
     Destructive,
+    /// Quiet danger action: transparent body, danger foreground, danger-wash
+    /// hover. Used for inline cancel/remove icon buttons so destructive
+    /// affordances stay calm instead of rendering as solid red blocks
+    /// (spec §3.2/§7: no loud pill chrome in dense rows).
+    QuietDestructive,
 }
 
 #[derive(Clone, Copy)]
@@ -138,24 +151,78 @@ fn button_visual(kind: ButtonKind, state: ControlState, palette: Palette) -> Con
         };
     }
 
+    // A tab carries no chrome in either state; selection only raises the
+    // label and the caller's underline (handled below, before the shared
+    // selected branch).
+    if kind == ButtonKind::Tab {
+        return ControlVisual {
+            background: if state == ControlState::Hovered {
+                palette.hover
+            } else {
+                palette.surface.opacity(0.0)
+            },
+            foreground: if state == ControlState::Selected {
+                palette.text
+            } else if state == ControlState::Disabled {
+                palette.text_disabled
+            } else {
+                palette.muted
+            },
+            border: palette.surface.opacity(0.0),
+        };
+    }
+
+    if kind == ButtonKind::Toggle {
+        let active = state == ControlState::Selected;
+        return ControlVisual {
+            background: if state == ControlState::Hovered {
+                palette.hover
+            } else {
+                palette.surface.opacity(0.0)
+            },
+            foreground: if active {
+                palette.accent
+            } else {
+                palette.muted
+            },
+            border: if active {
+                palette.accent.opacity(0.55)
+            } else {
+                palette.border
+            },
+        };
+    }
+
     if state == ControlState::Selected {
+        // A selected toggle keeps the accent as a hairline identity cue rather
+        // than a filled cyan block: cyan is rationed to interaction/selection
+        // state, not to control chrome (spec §2.5 / gap 11).
         return ControlVisual {
             background: palette.accent_wash,
             foreground: palette.accent,
-            border: palette.accent,
+            border: palette.accent.opacity(0.45),
         };
     }
 
     let (background, foreground, border) = match kind {
+        // The primary action is a neutral solid, not a saturated accent fill:
+        // the interface stays an instrument and cyan keeps its selection
+        // meaning (spec §2.5 `solid`/`on_solid`).
         ButtonKind::Primary => (
             match state {
-                ControlState::Hovered => palette.accent_hover,
-                ControlState::Pressed => palette.accent_pressed,
-                _ => palette.accent,
+                ControlState::Hovered => palette.solid_hover,
+                ControlState::Pressed => palette.solid_pressed,
+                _ => palette.solid,
             },
-            palette.on_accent,
-            palette.accent,
+            palette.on_solid,
+            palette.solid,
         ),
+        ButtonKind::Tab => (
+            palette.surface.opacity(0.0),
+            palette.muted,
+            palette.surface.opacity(0.0),
+        ),
+        ButtonKind::Toggle => (palette.surface.opacity(0.0), palette.muted, palette.border),
         ButtonKind::Secondary => (
             match state {
                 ControlState::Hovered => palette.hover,
@@ -163,7 +230,11 @@ fn button_visual(kind: ButtonKind, state: ControlState, palette: Palette) -> Con
                 _ => palette.surface_alt,
             },
             palette.text,
-            palette.border_strong,
+            if state == ControlState::Hovered {
+                palette.border_strong
+            } else {
+                palette.border
+            },
         ),
         ButtonKind::Ghost => (
             match state {
@@ -186,6 +257,15 @@ fn button_visual(kind: ButtonKind, state: ControlState, palette: Palette) -> Con
             },
             palette.on_accent,
             palette.danger,
+        ),
+        ButtonKind::QuietDestructive => (
+            match state {
+                ControlState::Hovered => palette.danger_wash,
+                ControlState::Pressed => palette.danger_wash.blend(palette.danger.opacity(0.18)),
+                _ => palette.surface.opacity(0.0),
+            },
+            palette.danger,
+            palette.surface.opacity(0.0),
         ),
     };
 
@@ -210,6 +290,7 @@ pub(crate) struct GnssButton {
     style: StyleRefinement,
     label: Option<SharedString>,
     icon: Option<IconName>,
+    trailing_icon: Option<IconName>,
     tooltip: Option<SharedString>,
     kind: ButtonKind,
     size: ControlSize,
@@ -230,6 +311,7 @@ impl GnssButton {
             style: StyleRefinement::default(),
             label: Some(label.into()),
             icon: None,
+            trailing_icon: None,
             tooltip: None,
             kind: ButtonKind::Secondary,
             size: ControlSize::Default,
@@ -252,6 +334,7 @@ impl GnssButton {
             style: StyleRefinement::default(),
             label: None,
             icon: Some(icon),
+            trailing_icon: None,
             tooltip: Some(accessible_name),
             kind: ButtonKind::Ghost,
             size: ControlSize::Default,
@@ -263,6 +346,15 @@ impl GnssButton {
 
     pub(crate) fn icon(mut self, icon: IconName) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// Select-style trailing affordance (e.g. a chevron): the label becomes a
+    /// left-aligned, data-font value that truncates within the button width
+    /// while the trailing icon pins to the right edge (spec §3.1 selector
+    /// fields).
+    pub(crate) fn trailing_icon(mut self, icon: IconName) -> Self {
+        self.trailing_icon = Some(icon);
         self
     }
 
@@ -354,27 +446,66 @@ impl RenderOnce for GnssButton {
             .foreground(visual.foreground)
             .hover(hover_background)
             .active(active_background);
+        let select_style = self.trailing_icon.is_some();
         let content = div()
             .flex()
+            .w_full()
             .items_center()
-            .justify_center()
             .gap(px(6.0))
             .text_color(visual.foreground)
             .text_size(px(self.size.text_size()))
             .font_weight(gpui_kit::FontWeight::MEDIUM)
+            .when(select_style, |content| content.justify_between())
+            .when(!select_style, |content| content.justify_center())
             .children((state != ControlState::Busy).then_some(self.icon).flatten())
-            .children(self.label);
+            .children(self.label.map(|label| {
+                if select_style {
+                    // Select-style value slot: data font, left aligned,
+                    // truncated inside the field width (spec §3.1).
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(super::primitives::data_font_family())
+                        .child(label)
+                } else {
+                    div().child(label)
+                }
+            }))
+            .children(self.trailing_icon);
 
         let button = Button::new(self.id)
             .custom(variant)
-            .border_1()
-            .border_color(visual.border)
+            // `ButtonCustomVariant` derives its resting fill by mixing the
+            // custom color toward the theme's transparent, which washes the
+            // fill out entirely on a custom token; set the resting fill
+            // explicitly and keep the variant for hover/pressed.
+            .bg(visual.background)
+            // A tab owns only its underline; giving it the shared 1px frame
+            // would paint the caller's underline color on all four sides.
+            .when(self.kind != ButtonKind::Tab, |this| {
+                this.border_1().border_color(visual.border)
+            })
+            // Focus is an inset 2px accent ring: it never changes the control's
+            // box, so keyboard focus cannot shift any layout (Carbon's rule).
+            .when(state == ControlState::Focused, |this| {
+                this.shadow(vec![gpui_kit::BoxShadow {
+                    color: self.palette.focus_ring,
+                    offset: gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.)),
+                    blur_radius: gpui_kit::px(0.),
+                    spread_radius: gpui_kit::px(2.),
+                    inset: true,
+                }])
+            })
             .rounded(px(radius::CONTROL))
             .with_size(Size::Size(px(height)))
             .compact()
             .disabled(state == ControlState::Disabled)
             .loading(state == ControlState::Busy)
-            .selected(state == ControlState::Selected)
+            // Selection is painted by GNSScope's own tokens above; passing it
+            // to the wrapped button would add a second, library-owned
+            // selection chrome (the box that used to surround a selected tab).
+            .selected(false)
             .refine_style(&self.style)
             .child(content)
             .when_some(self.tooltip, |button, tooltip| button.tooltip(tooltip))
@@ -810,17 +941,17 @@ pub(crate) fn gnss_input(
         ControlState::Error => palette.danger,
         ControlState::Focused => palette.focus_ring,
         ControlState::Disabled => palette.border,
-        _ => palette.border_strong,
+        _ => palette.border,
     };
     div()
-        .h(px(32.0))
+        .h(px(30.0))
         .rounded(px(radius::CONTROL))
         .border_1()
         .border_color(border)
         .bg(if state == ControlState::Disabled {
             palette.disabled
         } else {
-            palette.surface_raised
+            palette.surface_alt
         })
         .child(
             Input::new(input)
@@ -831,11 +962,11 @@ pub(crate) fn gnss_input(
 
 pub(crate) fn gnss_search_input(input: &Entity<InputState>, palette: Palette) -> impl IntoElement {
     div()
-        .h(px(32.0))
+        .h(px(30.0))
         .rounded(px(radius::CONTROL))
         .border_1()
-        .border_color(palette.border_strong)
-        .bg(palette.surface_raised)
+        .border_color(palette.border)
+        .bg(palette.surface_alt)
         .child(
             Input::new(input)
                 .prefix(IconName::Search)
@@ -846,8 +977,8 @@ pub(crate) fn gnss_search_input(input: &Entity<InputState>, palette: Palette) ->
 
 pub(crate) fn gnss_progress(value: f32, palette: Palette, busy: bool) -> impl IntoElement {
     Progress::new("gnss-progress")
-        .h(px(5.0))
-        .rounded(px(2.5))
+        .h(px(4.0))
+        .rounded(px(1.0))
         .bg(if busy {
             palette.warning
         } else {

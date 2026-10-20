@@ -11,16 +11,24 @@ use gpui_kit::Hsla;
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(crate) struct Palette {
+    /// Deepest window tone behind every floating panel.
+    pub(crate) canvas: Hsla,
     pub(crate) background: Hsla,
     pub(crate) sidebar: Hsla,
     pub(crate) surface: Hsla,
     pub(crate) surface_alt: Hsla,
     pub(crate) surface_raised: Hsla,
     pub(crate) surface_dialog: Hsla,
+    /// Ink-alpha hover/press overlays, valid on any surface tier.
     pub(crate) hover: Hsla,
     pub(crate) active: Hsla,
+    /// Lit inner edge for floating panels (dark: white sheen, light: none).
+    pub(crate) panel_sheen: Hsla,
     pub(crate) disabled: Hsla,
     pub(crate) border: Hsla,
+    /// A fainter rule than `border`: table body separators, lane dividers and
+    /// in-pane group breaks, which must not compete with the pane edges.
+    pub(crate) border_subtle: Hsla,
     pub(crate) divider: Hsla,
     pub(crate) border_strong: Hsla,
     pub(crate) focus_ring: Hsla,
@@ -35,9 +43,16 @@ pub(crate) struct Palette {
     pub(crate) accent_wash: Hsla,
     pub(crate) on_accent: Hsla,
     pub(crate) solid: Hsla,
+    pub(crate) solid_hover: Hsla,
+    pub(crate) solid_pressed: Hsla,
     pub(crate) on_solid: Hsla,
     pub(crate) overlay: Hsla,
     pub(crate) overlay_strong: Hsla,
+    /// Panel drop shadow (2026-10-20 floating chassis): a single soft shadow
+    /// that gives every region weight without a second elevation language.
+    pub(crate) shadow: Hsla,
+    /// Stronger shadow reserved for true floating layers (menus, palette).
+    pub(crate) shadow_strong: Hsla,
     pub(crate) healthy: Hsla,
     pub(crate) healthy_wash: Hsla,
     pub(crate) warning: Hsla,
@@ -55,23 +70,28 @@ pub(crate) struct Palette {
     pub(crate) plot_cursor: Hsla,
     pub(crate) plot_selection: Hsla,
     pub(crate) chart_series: [Hsla; 10],
+    /// Sky-plot elevation bands, ordered 75-90 … 0-15 (spec §3.5).
+    pub(crate) elevation_bands: [Hsla; 6],
 }
 
 impl Palette {
     pub(crate) fn light() -> Self {
         Self {
+            canvas: color(light::CANVAS),
             background: color(light::BACKGROUND),
             sidebar: color(light::SIDEBAR),
             surface: color(light::SURFACE),
             surface_alt: color(light::SURFACE_ALT),
             surface_raised: color(light::SURFACE_RAISED),
             surface_dialog: color(light::SURFACE_DIALOG),
-            hover: color(light::HOVER),
-            active: color(light::ACTIVE),
+            hover: color(light::TEXT).opacity(opacity::STATE_HOVER),
+            active: color(light::TEXT).opacity(opacity::STATE_PRESSED),
+            panel_sheen: color(light::TEXT).opacity(opacity::PANEL_SHEEN * 0.6),
             disabled: color(light::DISABLED),
-            border: color(light::BORDER),
-            divider: color(light::BORDER),
-            border_strong: color(light::BORDER_STRONG),
+            border: color(light::TEXT).opacity(0.12),
+            border_subtle: color(light::TEXT).opacity(0.07),
+            divider: color(light::TEXT).opacity(0.10),
+            border_strong: color(light::TEXT).opacity(0.22),
             focus_ring: color(light::ACCENT),
             text: color(light::TEXT),
             muted: color(light::MUTED),
@@ -84,9 +104,13 @@ impl Palette {
             accent_wash: color(light::ACCENT_WASH),
             on_accent: color(shared::LIGHT_ON_ACCENT),
             solid: color(shared::LIGHT_SOLID),
+            solid_hover: color(shared::LIGHT_SOLID_HOVER),
+            solid_pressed: color(shared::LIGHT_SOLID_PRESSED),
             on_solid: color(shared::LIGHT_ON_SOLID),
             overlay: color(shared::OVERLAY).opacity(opacity::OVERLAY),
             overlay_strong: color(shared::OVERLAY).opacity(opacity::OVERLAY_STRONG),
+            shadow: color(shared::OVERLAY).opacity(0.10),
+            shadow_strong: color(shared::OVERLAY).opacity(0.16),
             healthy: color(light::HEALTHY),
             healthy_wash: color(light::HEALTHY_WASH),
             warning: color(light::WARNING),
@@ -101,23 +125,27 @@ impl Palette {
             plot_cursor: color(light::ACCENT),
             plot_selection: color(light::ACCENT_WASH),
             chart_series: shared::CHART_LIGHT.map(color),
+            elevation_bands: light::ELEVATION.map(color),
         }
     }
 
     pub(crate) fn dark() -> Self {
         Self {
+            canvas: color(dark::CANVAS),
             background: color(dark::BACKGROUND),
             sidebar: color(dark::SIDEBAR),
             surface: color(dark::SURFACE),
             surface_alt: color(dark::SURFACE_ALT),
             surface_raised: color(dark::SURFACE_RAISED),
             surface_dialog: color(dark::SURFACE_DIALOG),
-            hover: color(dark::HOVER),
-            active: color(dark::ACTIVE),
+            hover: color(dark::TEXT).opacity(opacity::STATE_HOVER),
+            active: color(dark::TEXT).opacity(opacity::STATE_PRESSED),
+            panel_sheen: color(dark::TEXT).opacity(opacity::PANEL_SHEEN),
             disabled: color(dark::DISABLED),
-            border: color(dark::BORDER),
-            divider: color(dark::BORDER),
-            border_strong: color(dark::BORDER_STRONG),
+            border: color(dark::TEXT).opacity(0.10),
+            border_subtle: color(dark::TEXT).opacity(0.06),
+            divider: color(dark::TEXT).opacity(0.08),
+            border_strong: color(dark::TEXT).opacity(0.20),
             focus_ring: color(dark::ACCENT),
             text: color(dark::TEXT),
             muted: color(dark::MUTED),
@@ -130,9 +158,13 @@ impl Palette {
             accent_wash: color(dark::ACCENT_WASH),
             on_accent: color(shared::DARK_ON_ACCENT),
             solid: color(shared::DARK_SOLID),
+            solid_hover: color(shared::DARK_SOLID_HOVER),
+            solid_pressed: color(shared::DARK_SOLID_PRESSED),
             on_solid: color(shared::DARK_ON_SOLID),
             overlay: color(shared::OVERLAY).opacity(opacity::OVERLAY),
             overlay_strong: color(shared::OVERLAY).opacity(opacity::OVERLAY_STRONG),
+            shadow: color(0x000000).opacity(0.45),
+            shadow_strong: color(0x000000).opacity(0.62),
             healthy: color(dark::HEALTHY),
             healthy_wash: color(dark::HEALTHY_WASH),
             warning: color(dark::WARNING),
@@ -147,6 +179,7 @@ impl Palette {
             plot_cursor: color(dark::ACCENT),
             plot_selection: color(dark::ACCENT_WASH),
             chart_series: shared::CHART_DARK.map(color),
+            elevation_bands: dark::ELEVATION.map(color),
         }
     }
 }
