@@ -107,7 +107,8 @@ fn step_button(
         .on_click(epoch_handler(actions, action))
 }
 
-/// "1x" zoom reset chip: rect radius 4 (never a pill), data 11, hover tint.
+/// "1x" zoom reset chip: a square cell of the same divided group as the zoom
+/// buttons, data 12, hover tint. It reads as a value, not a second button.
 fn zoom_reset_chip(zoom: usize, actions: &EpochHandler, palette: Palette) -> AnyElement {
     div()
         .id("timeline-zoom-reset")
@@ -117,11 +118,9 @@ fn zoom_reset_chip(zoom: usize, actions: &EpochHandler, palette: Palette) -> Any
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(palette.border)
+        .bg(palette.surface_alt)
         .font_family(data_font_family())
-        .text_size(px(11.))
+        .text_size(px(12.))
         .text_color(if zoom == 1 {
             palette.faint
         } else {
@@ -204,7 +203,28 @@ fn cluster(
                 })
                 .cursor_pointer()
                 .hover(|style| style.bg(palette.hover))
-                .child(format!("{} / {}", epoch_number, controls.epoch_count))
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(if no_epochs {
+                                    palette.faint
+                                } else {
+                                    palette.accent
+                                })
+                                .child(format!("{epoch_number}")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(palette.faint)
+                                .child(format!("/ {}", controls.epoch_count)),
+                        ),
+                )
                 .on_click(epoch_handler(actions, EpochAction::PreciseJump)),
         )
         // Row 2: 4-way stepping grid, 4 equal cells with 4px gaps (4x33px at
@@ -218,11 +238,8 @@ fn cluster(
                 .flex_shrink_0()
                 .grid()
                 .grid_cols(4)
-                .gap(px(2.))
-                .px(px(2.))
-                .rounded(px(4.))
-                .border_1()
-                .border_color(palette.border)
+                .gap(px(1.))
+                .bg(palette.border)
                 .child(step_button(
                     "epoch-first",
                     IconName::ArrowLeft,
@@ -267,11 +284,8 @@ fn cluster(
                 .h(px(CLUSTER_CONTROL_HEIGHT))
                 .flex_shrink_0()
                 .flex()
-                .gap(px(2.))
-                .px(px(2.))
-                .rounded(px(4.))
-                .border_1()
-                .border_color(palette.border)
+                .gap(px(1.))
+                .bg(palette.border)
                 .child(
                     GnssButton::new("timeline-zoom-out", "\u{2212}", palette)
                         .size(ControlSize::Compact)
@@ -310,12 +324,15 @@ fn cluster(
                     localize("跟随实时", "Follow live"),
                     palette,
                 )
-                .kind(ButtonKind::Toggle)
+                .kind(ButtonKind::Secondary)
                 .size(ControlSize::Compact)
                 .w_full()
                 .h(px(CLUSTER_CONTROL_HEIGHT))
-                .when(controls.follow_live, |button| button.icon(IconName::Redo2))
-                .selected(controls.follow_live)
+                // Following is shown by the redo glyph plus accent text, not by
+                // a filled block: the transport stays a neutral instrument.
+                .when(controls.follow_live, |button| {
+                    button.icon(IconName::Redo2).text_color(palette.accent)
+                })
                 .disabled(!controls.can_follow)
                 .on_click(epoch_handler(actions, EpochAction::Follow)),
             ),

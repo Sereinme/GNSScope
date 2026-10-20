@@ -18,13 +18,11 @@ use gpui_kit::prelude::*;
 use gpui_kit::{canvas, div, point, px, quad, size, AnyElement, Bounds, PathBuilder, SharedString};
 
 /// Vertical layer contract of the 85px track (spec §3.10 / issue 13).
-const LANE_TOP: f32 = 19.0;
-const LANE_HEIGHT: f32 = 42.0;
 const STEM_TOP: f32 = 27.0;
-const STEM_HEIGHT: f32 = 34.0;
+const STEM_HEIGHT: f32 = BASELINE_TOP - STEM_TOP;
 const CAP_RING: f32 = 8.0;
 const BASELINE_TOP: f32 = 73.0;
-const PROGRESS_HEIGHT: f32 = 3.0;
+const PROGRESS_HEIGHT: f32 = 2.0;
 const CALLOUT_HEIGHT: f32 = 15.0;
 const CALLOUT_GAP: f32 = 10.0;
 /// Cursor fraction beyond which the callout flips to the left of the playhead.
@@ -34,7 +32,9 @@ const CALLOUT_FLIP: f32 = 0.68;
 /// Conservative rendered width of "00:02:04.8 · 历元 1248" at 11px.
 const CALLOUT_WIDTH_EST: f32 = 160.0;
 /// Conservative rendered width of "处理边界 63%" at 11px.
-const CAPTION_WIDTH_EST: f32 = 96.0;
+/// The boundary tag is now a bare percentage; estimate its width for the
+/// collision test against the playhead callout.
+const CAPTION_WIDTH_EST: f32 = 34.0;
 /// Narrowest track width in the acceptance matrix (1100x800 layout).
 const NARROW_TRACK_REF: f32 = 585.0;
 /// Right padding of the track area; captions may borrow it before the divider.
@@ -472,11 +472,17 @@ fn cap(kind: EventKind, palette: Palette) -> AnyElement {
 }
 
 fn tick_element(level: TickLevel, percent: f32, palette: Palette) -> impl IntoElement {
-    let (top, height, color) = match level {
-        TickLevel::Minor => (BASELINE_TOP + 1.0, 4.0, palette.border_strong.opacity(0.9)),
-        TickLevel::Mid => (BASELINE_TOP + 1.0, 6.0, palette.border_strong.opacity(0.9)),
-        TickLevel::Major => (BASELINE_TOP + 1.0, 10.0, palette.plot_axis.opacity(0.9)),
+    // Two levels, one tone: minor ticks are hairlines under the stems, major
+    // ticks are a touch taller so a labelled time is findable without the
+    // ruler becoming a picket fence.
+    let (top, height) = match level {
+        TickLevel::Minor => (BASELINE_TOP - 3.0, 3.0),
+        TickLevel::Mid => (BASELINE_TOP - 5.0, 5.0),
+        TickLevel::Major => (BASELINE_TOP - 8.0, 8.0),
     };
+    let color = palette
+        .border_strong
+        .opacity(if level == TickLevel::Major { 0.9 } else { 0.55 });
     div()
         .absolute()
         .left(gpui_kit::relative(percent))
@@ -486,9 +492,10 @@ fn tick_element(level: TickLevel, percent: f32, palette: Palette) -> impl IntoEl
         .bg(color)
 }
 
-/// The 85px track: processed block, event lane, wash band, ticks, progress
-/// hairline, stems, captions, boundary and playhead, plus the transparent
-/// seek slider overlay supplied by the app.
+/// The 85px track, drawn as three objects on the panel itself: event stems
+/// standing on a hairline baseline, a 2px processed bar riding that baseline,
+/// and the playhead. The transparent seek slider from the app is the only
+/// interactive layer.
 pub(crate) fn track(
     view: &TrackView,
     seek: AnyElement,
@@ -513,41 +520,11 @@ pub(crate) fn track(
         .relative()
         .h(px(metrics::TIMELINE_TRACK_HEIGHT))
         .w_full()
-        // 1. Processed region: flat surface-alt block sharing its right edge
-        //    with the boundary marker (no gradients, full track height).
-        .children((processed > 0.0005).then(|| {
-            div()
-                .absolute()
-                .left_0()
-                .top_0()
-                .h(px(metrics::TIMELINE_TRACK_HEIGHT))
-                .w(gpui_kit::relative(processed))
-                .bg(palette.surface_alt)
-        }))
-        // 2. Event lane band: flat surface-alt, 1px top hairline.
-        .child(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(px(LANE_TOP))
-                .h(px(LANE_HEIGHT))
-                .bg(palette.surface_alt)
-                .border_t_1()
-                .border_color(palette.border),
-        )
-        // 3. Playhead selection wash band (under ticks, stems and progress).
-        .child(
-            div()
-                .absolute()
-                .left(gpui_kit::relative(view.cursor_percent))
-                .ml(px(-5.))
-                .top_0()
-                .h(px(metrics::TIMELINE_TRACK_HEIGHT))
-                .w(px(10.))
-                .bg(palette.accent_wash),
-        )
-        // 4. Tick baseline + three-level ladder scaled to the window.
+        // The track is drawn directly on the panel: no nested bands, no
+        // filled blocks. Three objects only — stems off the axis, a 2px
+        // processed bar riding the axis, and the playhead.
+        //
+        // 1. Baseline: one hairline the stems actually stand on.
         .child(
             div()
                 .absolute()
@@ -555,34 +532,16 @@ pub(crate) fn track(
                 .right_0()
                 .top(px(BASELINE_TOP))
                 .h(px(1.))
-                .bg(palette.plot_axis.opacity(0.85)),
+                .bg(palette.plot_axis.opacity(0.55)),
         )
+        // 2. Ticks: 4px stubs above the baseline, muted so they never compete
+        //    with the stems.
         .children(
             ticks(ladder, start_ms, span_ms)
                 .into_iter()
                 .map(|(percent, level)| tick_element(level, percent, palette)),
         )
-        // 5. Progress hairline: unavailable-wash groove + accent fill to the
-        //    processed edge; the fill end cap is the processing boundary.
-        .child(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom_0()
-                .h(px(PROGRESS_HEIGHT))
-                .bg(palette.unavailable_wash)
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .bottom_0()
-                        .w(gpui_kit::relative(processed))
-                        .bg(palette.accent),
-                ),
-        )
-        // 6. Event stems: 34px line + cap shape/color only (no stem text).
+        // 3. Stems: 1px rule from the baseline upward to the cap.
         .children(
             stems
                 .into_iter()
@@ -606,76 +565,73 @@ pub(crate) fn track(
                         )
                 }),
         )
-        // 7. Lane identity caption (opaque band-colored backing keeps stem
-        //    lines from crossing the text).
+        // 4. Processed progress rides the baseline as a 2px bar: the record's
+        //    real extent is a quantity, so it is a bar, not a filled block.
         .child(
             div()
                 .absolute()
-                .left(px(2.))
-                .top(px(33.))
-                .px(px(2.))
+                .left_0()
+                .right_0()
+                .top(px(BASELINE_TOP + 6.0))
+                .h(px(PROGRESS_HEIGHT))
                 .bg(palette.surface_alt)
-                .text_size(px(11.))
-                .text_color(palette.faint)
-                .child(localize("事件", "Events")),
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top_0()
+                        .bottom_0()
+                        .w(gpui_kit::relative(processed))
+                        .bg(palette.accent),
+                ),
         )
-        // 8. Processing boundary: 1px tertiary line sharing the processed
-        //    block's edge, plus a collision-aware caption.
+        // 5. Boundary: one hairline where the processed bar ends, with a bare
+        //    percentage tick at the top — no caption sentence in the track.
         .children(show_boundary.then(|| {
-            let caption_text = format!(
-                "{} {}%",
-                localize("处理边界", "Boundary"),
-                (processed * 100.0).round() as u32
-            );
             div()
                 .absolute()
                 .left(gpui_kit::relative(processed))
                 .top_0()
-                .h(px(metrics::TIMELINE_TRACK_HEIGHT))
+                .h(px(BASELINE_TOP))
                 .w(px(1.))
-                .bg(palette.faint)
+                .bg(palette.border_strong)
                 .when(boundary.visible, |this| {
                     this.child(
                         div()
                             .absolute()
                             .top(px(boundary.top))
-                            .text_size(px(11.))
+                            .font_family(data_font_family())
+                            .text_size(px(10.))
                             .text_color(palette.faint)
                             .whitespace_nowrap()
-                            .when(boundary.right_of_line, |text| text.left(px(4.)))
-                            .when(!boundary.right_of_line, |text| text.right(px(4.)))
-                            .child(caption_text),
+                            .when(boundary.right_of_line, |text| text.left(px(5.)))
+                            .when(!boundary.right_of_line, |text| text.right(px(5.)))
+                            .child(format!("{:.0}%", processed * 100.0)),
                     )
                 })
         }))
-        // 9. Playhead: 1.5px accent line, 8px cap and the two-part callout
-        //    with a 1px accent connector (flips inward near the right edge).
+        // 6. Playhead: 1.5px accent line with a 7px square cap sitting on the
+        //    baseline, plus the compact two-part callout.
         .child(
             div()
                 .absolute()
                 .left(gpui_kit::relative(view.cursor_percent))
                 .ml(px(-0.75))
                 .top_0()
-                .h(px(metrics::TIMELINE_TRACK_HEIGHT))
+                .h(px(BASELINE_TOP + 4.0))
                 .w(px(1.5))
                 .bg(palette.accent)
-                // Playhead cap: a 6px accent dot with a 2px surface ring, so
-                // the head reads as an instrument cursor instead of a text
-                // glyph (design pass).
                 .child(
                     div()
                         .absolute()
-                        .top(px(-3.))
-                        .left(px(-3.))
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(palette.accent)
-                        .border_2()
-                        .border_color(palette.surface),
+                        .top(px(BASELINE_TOP - 2.0))
+                        .left(px(-3.25))
+                        .size(px(7.))
+                        .bg(palette.accent),
                 )
                 .child(callout(view, cursor_time, localize, palette)),
         )
-        // 10. Transparent seek slider spanning the track (shared cursor).
+        // 7. Transparent seek slider spanning the track (shared cursor).
         .child(
             div()
                 .absolute()
@@ -704,13 +660,13 @@ fn callout(
         .when(flipped, |this| this.right(px(CALLOUT_GAP)))
         .when(!flipped, |this| this.left(px(CALLOUT_GAP)))
         .h(px(CALLOUT_HEIGHT))
-        .px(px(5.))
+        .px(px(6.))
         .flex()
         .items_center()
-        .rounded(px(4.))
+        .gap(px(5.))
         .border_1()
-        .border_color(palette.border)
-        .bg(palette.surface_raised)
+        .border_color(palette.border_strong)
+        .bg(palette.surface_alt)
         // 1px accent connector anchoring the chip to the playhead.
         .child(
             div()
@@ -728,13 +684,6 @@ fn callout(
                 .text_size(px(11.))
                 .text_color(palette.accent)
                 .child(cursor_time),
-        )
-        .child(
-            div()
-                .mx(px(4.))
-                .text_size(px(11.))
-                .text_color(palette.faint)
-                .child("·"),
         )
         .child(
             div()
@@ -1043,15 +992,16 @@ mod tests {
         assert!(caption.right_of_line);
         assert_eq!(caption.top, 0.0);
 
-        // Cursor overlapping the right-side caption span: drop into the lane
-        // interior right of the line (stem-free by contract).
+        // Cursor overlapping the right-side tag: drop to the lower row right of
+        // the line.
         let caption = boundary_caption(0.63, 0.60, &[]);
         assert!(caption.visible);
         assert_eq!(caption.top, 46.0);
         assert!(caption.right_of_line);
 
-        // Near-complete run: caption flips left of the line at the top row.
-        let caption = boundary_caption(0.9, 0.3, &[]);
+        // Only the last few percent leave no room for a right-side tag: it
+        // flips to the left of the line, still on the top row.
+        let caption = boundary_caption(0.97, 0.3, &[]);
         assert!(caption.visible);
         assert!(!caption.right_of_line);
         assert_eq!(caption.top, 0.0);
