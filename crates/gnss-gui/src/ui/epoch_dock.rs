@@ -436,7 +436,13 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
                         .pr(px(12.))
                         .pb(px(6.))
                         .pl(px(10.))
-                        .child(timeline::track(&track, profile.as_deref(), seek, palette)),
+                        .child(timeline::track(
+                            &track,
+                            profile.as_deref(),
+                            localize("散布", "Scatter"),
+                            seek,
+                            palette,
+                        )),
                 )
                 .child(div().w(px(1.)).h_full().flex_shrink_0().bg(palette.border))
                 .child(cluster(

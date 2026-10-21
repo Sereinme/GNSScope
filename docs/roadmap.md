@@ -283,6 +283,15 @@ by the zone it occupies, so a constant record still reads. See
 `.scratch/ui-visual-refactor/design-pass-evidence.md` §15. Gates: formatting, strict Clippy,
 357 passed / 0 failed / 8 ignored.
 
+**Timeline body is position scatter (2026-10-22):** PDOP barely moves on a healthy record,
+so the strip now plots how far each epoch's solution sat from the record's own MEDIAN
+position, in metres (small-angle conversion from persisted lat/lon; a display transform, not a
+new receiver output). Static captures show the noise floor, moving ones the trajectory's
+extent, and a solution jump appears as a step. The field states its measure and its peak
+(`散布 59 m`), so the auto-range is never hidden. The PDOP field, its zone bands and threshold
+constants were removed with it. See `.scratch/ui-visual-refactor/design-pass-evidence.md` §16.
+Gates: formatting, strict Clippy, 357 passed / 0 failed / 8 ignored.
+
 **Phase 4 deletion safety correction:** history reveal/delete actions now live in
 right-click menus, not selected-row inline controls. Delete requests a native
 Cancel-first confirmation bound to the original UUID; changing selection/order

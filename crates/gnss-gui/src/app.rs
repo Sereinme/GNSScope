@@ -7654,22 +7654,37 @@ impl GnsscopeApp {
             "{time_label} {receiver_seconds} s · PVT {pvt_hz} Hz · {event_label} {}",
             events.len()
         );
-        // Quality field: PDOP is the one scalar in the solution that has a real
-        // scale and a real reading (lower is better), and it is persisted per
-        // epoch. Drawn inside its own zones so even a flat record says
-        // something. `None` stays a gap — never a fabricated 0.
-        let pdop_per_epoch = self
-            .display_epochs()
+        // Timeline field: horizontal position scatter — how far each epoch's
+        // solution sat from the record's own median position, in metres. This is
+        // a display transform of persisted positions, not a new receiver output:
+        // on a static capture it is the noise floor, on a moving one it is the
+        // trajectory's extent, and a jump in the solution shows up as a step.
+        // Epochs without a position stay gaps.
+        let epochs = self.display_epochs();
+        let mut latitudes: Vec<f64> = epochs.iter().map(|pvt| pvt.latitude_deg).collect();
+        let mut longitudes: Vec<f64> = epochs.iter().map(|pvt| pvt.longitude_deg).collect();
+        let median = |values: &mut Vec<f64>| -> Option<f64> {
+            values.retain(|value| value.is_finite());
+            if values.is_empty() {
+                return None;
+            }
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            Some(values[values.len() / 2])
+        };
+        let centre = median(&mut latitudes).zip(median(&mut longitudes));
+        let scatter_per_epoch = epochs
             .iter()
             .map(|pvt| {
-                pvt.quality
-                    .pdop
-                    .filter(|pdop| pdop.is_finite() && *pdop > 0.0)
-                    .map(|pdop| pdop as f32)
+                centre.map(|(lat0, lon0)| {
+                    let north_m = (pvt.latitude_deg - lat0) * 111_111.0;
+                    let east_m =
+                        (pvt.longitude_deg - lon0) * 111_111.0 * lat0.to_radians().cos().max(1e-6);
+                    (north_m.hypot(east_m)) as f32
+                })
             })
             .collect::<Vec<_>>();
         let profile = crate::plots::timeline::sample_series(
-            &pdop_per_epoch,
+            &scatter_per_epoch,
             epoch_period_ms.max(1),
             timeline_duration_ms,
             crate::plots::timeline::PROFILE_BUCKETS,

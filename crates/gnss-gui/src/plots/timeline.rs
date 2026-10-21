@@ -280,12 +280,6 @@ pub(crate) fn sample_series(
     values.iter().any(Option::is_some).then_some(values)
 }
 
-/// PDOP quality zones, upper bound of each (0-2 excellent, 2-5 good, 5-10
-/// moderate, above that poor). Shared with the renderer so the curve and the
-/// bands can never disagree.
-pub(crate) const PDOP_ZONES: [f32; 3] = [2.0, 5.0, 10.0];
-/// Top of the PDOP scale, in dilution units.
-pub(crate) const PDOP_CEILING: f32 = 12.0;
 /// Column resolution of the quality field.
 pub(crate) const PROFILE_BUCKETS: usize = 160;
 
@@ -409,58 +403,30 @@ fn tick_element(level: TickLevel, percent: f32, palette: Palette, top: f32) -> i
 
 /// Vertical position of the fix-floor label, in track coordinates. Kept beside
 /// the profile geometry so the label and the dashed rule never drift apart.
-/// PDOP over the record, drawn inside its own quality zones. The zones are what
-/// make even a flat record readable: a constant 3.1 says "good geometry" because
-/// you can see which band the curve sits in. Lower is better, so the baseline is
-/// PDOP 0 and the top of the field is poor geometry.
-fn pdop_profile(profile: Option<&[Option<f32>]>, palette: Palette) -> Option<AnyElement> {
+/// Horizontal position scatter over the record: an area from a zero baseline,
+/// scaled to this record's own largest excursion (the axis label states the
+/// scale, so the auto-range is never hidden). A static capture collapses to a
+/// thin noise ribbon; a moving one shows the trajectory's extent; a solution
+/// jump shows as a step.
+fn scatter_field(
+    profile: Option<&[Option<f32>]>,
+    label: &'static str,
+    palette: Palette,
+) -> Option<AnyElement> {
     let values = profile?.to_vec();
     if values.iter().all(Option::is_none) {
         return None;
     }
-    let top = 8.0;
+    let top = 10.0;
     let height = BASELINE_TOP - top;
-    let zone_color = |index: usize| match index {
-        0 => palette.healthy,
-        1 => palette.text,
-        2 => palette.attention,
-        _ => palette.danger,
-    };
-    let zone_rows = (0..4).map(|zone| {
-        let low = if zone == 0 { 0.0 } else { PDOP_ZONES[zone - 1] };
-        let high = if zone < 3 {
-            PDOP_ZONES[zone]
-        } else {
-            PDOP_CEILING
-        };
-        let bottom = height * (low / PDOP_CEILING);
-        let zone_height = height * ((high - low) / PDOP_CEILING);
-        let wash = if zone >= 2 {
-            zone_color(zone).opacity(0.07)
-        } else {
-            palette.surface.opacity(0.0)
-        };
-        div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .bottom(px(bottom))
-            .h(px(zone_height))
-            .bg(wash)
-            .border_t_1()
-            .border_color(palette.border.opacity(0.5))
-    });
-    let thresholds = PDOP_ZONES.into_iter().map(|bound| {
-        let bottom = height * (bound / PDOP_CEILING);
-        div()
-            .absolute()
-            .left(px(3.))
-            .bottom(px(bottom + 1.0))
-            .font_family(data_font_family())
-            .text_size(px(9.))
-            .text_color(palette.faint)
-            .child(format!("{bound:.0}"))
-    });
+    let peak = values
+        .iter()
+        .flatten()
+        .copied()
+        .fold(0.0_f32, f32::max)
+        .max(0.5);
+    let fill = palette.chart_series[1].opacity(0.16);
+    let line = palette.chart_series[1].opacity(0.85);
     Some(
         div()
             .absolute()
@@ -468,7 +434,6 @@ fn pdop_profile(profile: Option<&[Option<f32>]>, palette: Palette) -> Option<Any
             .right_0()
             .top(px(top))
             .h(px(height))
-            .children(zone_rows)
             .child(
                 canvas(
                     move |_, _, _| {},
@@ -480,60 +445,58 @@ fn pdop_profile(profile: Option<&[Option<f32>]>, palette: Palette) -> Option<Any
                         }
                         let n = values.len().max(2);
                         let origin = bounds.origin;
-                        // One path per zone colour: the hue is the reading.
-                        let mut paths: [Vec<(f32, f32)>; 4] =
-                            [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-                        for (index, value) in values.iter().enumerate() {
-                            let Some(value) = value else {
-                                continue;
-                            };
-                            let x = (index as f32 / n as f32) * w;
-                            let ratio = (value / PDOP_CEILING).clamp(0.0, 1.0);
-                            let y = h - h * (0.04 + 0.92 * ratio);
-                            let zone = if *value < PDOP_ZONES[0] {
-                                0
-                            } else if *value < PDOP_ZONES[1] {
-                                1
-                            } else if *value < PDOP_ZONES[2] {
-                                2
-                            } else {
-                                3
-                            };
-                            paths[zone].push((x, y));
-                        }
-                        let colours = [
-                            palette.healthy.opacity(0.9),
-                            palette.text.opacity(0.8),
-                            palette.attention.opacity(0.9),
-                            palette.danger.opacity(0.9),
-                        ];
-                        for (zone, run) in paths.iter().enumerate() {
+                        let mut area = PathBuilder::fill();
+                        let mut stroke = PathBuilder::stroke(px(1.5));
+                        let mut run: Vec<(f32, f32)> = Vec::new();
+                        let flush = |run: &mut Vec<(f32, f32)>,
+                                     area: &mut PathBuilder,
+                                     stroke: &mut PathBuilder| {
                             if run.is_empty() {
-                                continue;
+                                return;
                             }
-                            let mut stroke = PathBuilder::stroke(px(1.5));
+                            area.move_to(point(origin.x + px(run[0].0), origin.y + px(h)));
+                            for (x, y) in run.iter() {
+                                area.line_to(point(origin.x + px(*x), origin.y + px(*y)));
+                            }
+                            let last = run[run.len() - 1];
+                            area.line_to(point(origin.x + px(last.0), origin.y + px(h)));
+                            area.close();
                             stroke.move_to(point(origin.x + px(run[0].0), origin.y + px(run[0].1)));
                             for (x, y) in run.iter().skip(1) {
                                 stroke.line_to(point(origin.x + px(*x), origin.y + px(*y)));
                             }
-                            if let Ok(path) = stroke.build() {
-                                window.paint_path(path, colours[zone]);
-                            }
+                            run.clear();
+                        };
+                        for (index, value) in values.iter().enumerate() {
+                            let Some(value) = value else {
+                                flush(&mut run, &mut area, &mut stroke);
+                                continue;
+                            };
+                            let x = (index as f32 / n as f32) * w;
+                            let ratio = (value / peak).clamp(0.0, 1.0);
+                            run.push((x, h - h * (0.04 + 0.92 * ratio)));
+                        }
+                        flush(&mut run, &mut area, &mut stroke);
+                        if let Ok(path) = area.build() {
+                            window.paint_path(path, fill);
+                        }
+                        if let Ok(path) = stroke.build() {
+                            window.paint_path(path, line);
                         }
                     },
                 )
                 .size_full(),
             )
-            .children(thresholds)
+            // The scale is never hidden: the field names itself and its peak.
             .child(
                 div()
                     .absolute()
-                    .right(px(4.))
+                    .left(px(3.))
                     .top_0()
                     .font_family(data_font_family())
                     .text_size(px(9.))
                     .text_color(palette.faint)
-                    .child("PDOP"),
+                    .child(format!("{label} {peak:.0} m")),
             )
             .into_any_element(),
     )
@@ -542,6 +505,7 @@ fn pdop_profile(profile: Option<&[Option<f32>]>, palette: Palette) -> Option<Any
 pub(crate) fn track(
     view: &TrackView,
     profile: Option<&[Option<f32>]>,
+    profile_label: &'static str,
     seek: AnyElement,
     palette: Palette,
 ) -> AnyElement {
@@ -567,7 +531,7 @@ pub(crate) fn track(
                 .bg(palette.plot_axis),
         )
         // 1b. PDOP field.
-        .children(pdop_profile(profile, palette))
+        .children(scatter_field(profile, profile_label, palette))
         // 2. Time grid: the major ruler ticks continue through the band as faint
         //    vertical rules. This is the time axis, not a data curve — it gives
         //    the field structure without inventing a shape to look at.
