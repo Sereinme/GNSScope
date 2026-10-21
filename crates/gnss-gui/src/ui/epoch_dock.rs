@@ -71,7 +71,7 @@ pub(crate) struct EpochView {
     /// The epoch total lives in [`EpochControls::epoch_count`].
     pub(crate) epoch_number: usize,
     pub(crate) track: TrackView,
-    pub(crate) profile: Option<Vec<Option<f32>>>,
+    pub(crate) profile: Option<Vec<Option<u8>>>,
     pub(crate) jump_editing: bool,
     pub(crate) jump_input: Option<AnyElement>,
     pub(crate) seek: AnyElement,

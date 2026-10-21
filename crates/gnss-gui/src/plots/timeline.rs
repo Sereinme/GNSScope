@@ -13,7 +13,7 @@
 use crate::visual_system::{data_font_family, metrics, Palette};
 use crate::{GuiDiagnosticEvent, GuiDiagnosticEventKind};
 use gpui_kit::prelude::*;
-use gpui_kit::{canvas, div, point, px, AnyElement, Bounds, PathBuilder, SharedString};
+use gpui_kit::{canvas, div, point, px, quad, size, AnyElement, Bounds, PathBuilder, SharedString};
 
 /// The band is one object: a coverage ridge rising from a bottom baseline,
 /// event notches cut into it, and a ruler under the baseline. There are no
@@ -250,16 +250,16 @@ pub(crate) fn axis_label_set(
 /// columns stay `None` so the renderer breaks the polyline instead of
 /// fabricating zeros.
 pub(crate) fn profile_series(
-    peak_per_epoch: &[Option<f32>],
+    peak_per_epoch: &[Option<u8>],
     period_ms: u64,
     duration_ms: u64,
     buckets: usize,
-) -> Option<Vec<Option<f32>>> {
+) -> Option<Vec<Option<u8>>> {
     if peak_per_epoch.is_empty() || duration_ms == 0 || buckets == 0 {
         return None;
     }
     let period_ms = period_ms.max(1);
-    let mut values: Vec<Option<f32>> = Vec::with_capacity(buckets);
+    let mut values: Vec<Option<u8>> = Vec::with_capacity(buckets);
     for bucket in 0..buckets {
         // Take the MAX across the bucket's epoch span: a bucket is "covered" if
         // any epoch inside it had satellites tracked, which is what lets a
@@ -268,12 +268,12 @@ pub(crate) fn profile_series(
         let to = ((bucket as u64 + 1) * duration_ms) / buckets as u64;
         let first = (from / period_ms) as usize;
         let last = ((to.max(from + 1) - 1) / period_ms) as usize;
-        let mut value: Option<f32> = None;
+        // MIN within the bucket: an outage that lasts a fraction of a bucket
+        // must still show up, so the profile reports the worst moment it covers.
+        let mut value: Option<u8> = None;
         for index in first..=last.min(peak_per_epoch.len().saturating_sub(1)) {
-            if let Some(peak) = peak_per_epoch.get(index).and_then(|v| *v) {
-                if peak.is_finite() {
-                    value = Some(value.map_or(peak, |current| current.max(peak)));
-                }
+            if let Some(count) = peak_per_epoch.get(index).and_then(|v| *v) {
+                value = Some(value.map_or(count, |current: u8| current.min(count)));
             }
         }
         values.push(value);
@@ -402,22 +402,30 @@ fn tick_element(level: TickLevel, percent: f32, palette: Palette, top: f32) -> i
         .bg(color)
 }
 
+/// Vertical position of the fix-floor label, in track coordinates. Kept beside
+/// the profile geometry so the label and the dashed rule never drift apart.
+fn floor_label_top() -> f32 {
+    const TOP: f32 = 8.0;
+    let height = BASELINE_TOP - TOP;
+    let floor_y = height - height * (0.08 + 0.84 * (4.0 / 12.0));
+    TOP + floor_y - 6.0
+}
+
 /// The coverage ridge: one bar per displayed bucket, height = tracked-satellite
 /// count on a fixed 0..=12 domain. Real counts only; a bucket with no channel
 /// data keeps a gap, and a run with no coverage draws no ridge at all.
-fn signal_profile(profile: Option<&[Option<f32>]>, palette: Palette) -> Option<AnyElement> {
+fn satellite_profile(profile: Option<&[Option<u8>]>, palette: Palette) -> Option<AnyElement> {
     let values = profile?.to_vec();
     if values.iter().all(Option::is_none) {
         return None;
     }
     let top = 8.0;
     let height = BASELINE_TOP - top;
-    let lo = values.iter().flatten().cloned().fold(f32::MAX, f32::min);
-    let hi = values.iter().flatten().cloned().fold(f32::MIN, f32::max);
-    let span = (hi - lo).max(0.5);
-    // One area + one 1px crest. Neutral by design: hue is reserved for events.
-    let fill = palette.muted.opacity(0.22);
-    let crest = palette.muted.opacity(0.75);
+    // Fixed domain so runs stay comparable: 0..=12 tracked satellites.
+    let fill = palette.muted.opacity(0.20);
+    let line = palette.muted.opacity(0.70);
+    let floor = palette.danger.opacity(0.35);
+    let domain = 12.0_f32;
     Some(
         canvas(
             move |_, _, _| {},
@@ -430,7 +438,7 @@ fn signal_profile(profile: Option<&[Option<f32>]>, palette: Palette) -> Option<A
                 let n = values.len().max(2);
                 let origin = bounds.origin;
                 let mut area = PathBuilder::fill();
-                let mut line = PathBuilder::stroke(px(1.0));
+                let mut stroke = PathBuilder::stroke(px(1.0));
                 let mut run: Vec<(f32, f32)> = Vec::new();
                 let flush =
                     |run: &mut Vec<(f32, f32)>, area: &mut PathBuilder, line: &mut PathBuilder| {
@@ -452,21 +460,39 @@ fn signal_profile(profile: Option<&[Option<f32>]>, palette: Palette) -> Option<A
                     };
                 for (index, value) in values.iter().enumerate() {
                     let Some(value) = value else {
-                        flush(&mut run, &mut area, &mut line);
+                        flush(&mut run, &mut area, &mut stroke);
                         continue;
                     };
-                    let x = ((index as f32 + 0.5) / n as f32) * w;
-                    // 12..88% of the field keeps the shape off both edges.
-                    let ratio = ((*value - lo) / span).clamp(0.0, 1.0);
-                    let y = h - h * (0.12 + 0.76 * ratio);
+                    let x = (index as f32 / n as f32) * w;
+                    // 8..92% of the field: zero satellites sits near the floor.
+                    let ratio = (f32::from(*value) / domain).clamp(0.0, 1.0);
+                    let y = h - h * (0.08 + 0.84 * ratio);
                     run.push((x, y));
                 }
-                flush(&mut run, &mut area, &mut line);
+                flush(&mut run, &mut area, &mut stroke);
                 if let Ok(path) = area.build() {
                     window.paint_path(path, fill);
                 }
-                if let Ok(path) = line.build() {
-                    window.paint_path(path, crest);
+                if let Ok(path) = stroke.build() {
+                    window.paint_path(path, line);
+                }
+                // Fix floor: a dashed rule at 4 satellites (the 3D-fix minimum)
+                // so the line's height has something to be measured against.
+                let floor_y = h - h * (0.08 + 0.84 * (4.0 / domain));
+                let mut dash_x = 0.0;
+                while dash_x < w {
+                    window.paint_quad(quad(
+                        Bounds {
+                            origin: point(origin.x + px(dash_x), origin.y + px(floor_y)),
+                            size: size(px(3.0), px(1.)),
+                        },
+                        0.0,
+                        floor,
+                        px(0.0),
+                        floor,
+                        Default::default(),
+                    ));
+                    dash_x += 7.0;
                 }
             },
         )
@@ -484,7 +510,7 @@ fn signal_profile(profile: Option<&[Option<f32>]>, palette: Palette) -> Option<A
 /// with a ruler handle.
 pub(crate) fn track(
     view: &TrackView,
-    profile: Option<&[Option<f32>]>,
+    profile: Option<&[Option<u8>]>,
     seek: AnyElement,
     palette: Palette,
 ) -> AnyElement {
@@ -499,7 +525,7 @@ pub(crate) fn track(
         .h(px(metrics::TIMELINE_TRACK_HEIGHT))
         .w_full()
         // 1. Coverage ridge.
-        .children(signal_profile(profile, palette))
+        .children(satellite_profile(profile, palette))
         // 2. Baseline: the one line everything stands on.
         .child(
             div()
@@ -601,6 +627,18 @@ pub(crate) fn track(
                 .top(px(BASELINE_TOP + 8.0))
                 .h(px(RULER_LABELS_HEIGHT))
                 .child(axis_labels(view, palette, RULER_LABELS_HEIGHT)),
+        )
+        // 6c. The fix floor is named: without a number the dashed rule is
+        //     decoration. `4` is the 3D-fix minimum this line encodes.
+        .child(
+            div()
+                .absolute()
+                .left(px(3.))
+                .top(px(floor_label_top()))
+                .font_family(data_font_family())
+                .text_size(px(9.))
+                .text_color(palette.danger.opacity(0.75))
+                .child("4"),
         )
         // 7. Transparent seek slider spanning body and ruler alike: dragging the
         //    scale is the primary gesture, so the whole band seeks.
@@ -756,13 +794,18 @@ mod tests {
     }
 
     #[test]
-    fn profile_series_takes_the_bucket_peak_and_keeps_gaps() {
-        let per_epoch = [Some(30.0), Some(41.0), None, None, Some(38.0), None];
-        let series = profile_series(&per_epoch, 100, 600, 3).expect("real amplitude");
+    fn profile_series_reports_the_bucket_minimum_and_keeps_gaps() {
+        // A count profile reports the WORST moment inside each bucket, so a
+        // short outage cannot hide between samples.
+        let per_epoch = [Some(9), Some(7), None, None, Some(8), None];
+        let series = profile_series(&per_epoch, 100, 600, 3).expect("real counts");
         assert_eq!(series.len(), 3);
-        assert_eq!(series[0], Some(41.0), "bucket peak, not the first sample");
-        assert_eq!(series[1], None, "an epoch without channel data is a gap");
-        assert_eq!(series[2], Some(38.0));
+        assert_eq!(series[0], Some(7), "bucket minimum, not the first sample");
+        assert_eq!(
+            series[1], None,
+            "an epoch without tracked satellites is a gap"
+        );
+        assert_eq!(series[2], Some(8));
         assert!(profile_series(&[None, None], 100, 200, 2).is_none());
         assert!(profile_series(&[], 100, 200, 2).is_none());
     }

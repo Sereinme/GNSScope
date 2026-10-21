@@ -7650,36 +7650,31 @@ impl GnsscopeApp {
             InterfaceLanguage::SimplifiedChinese => ("接收机时间", "事件"),
             InterfaceLanguage::English => ("Receiver time", "Events"),
         };
-        let cn0_label = match self.interface_language {
-            InterfaceLanguage::SimplifiedChinese => "均值",
-            InterfaceLanguage::English => "mean",
+        let sats_label = match self.interface_language {
+            InterfaceLanguage::SimplifiedChinese => "卫星数",
+            InterfaceLanguage::English => "satellites",
         };
         let subtitle = format!(
-            "{time_label} {receiver_seconds} s · PVT {pvt_hz} Hz · C/N0 {cn0_label} · {event_label} {}",
+            "{time_label} {receiver_seconds} s · PVT {pvt_hz} Hz · {sats_label} · {event_label} {}",
             events.len()
         );
-        // Signal profile for the timeline body: the MEAN C/N0 of the tracked
-        // channels at each epoch. A mean is the honest "how healthy was the
-        // constellation here" reading — a peak would stay high while every
-        // other satellite dropped out, which is exactly the moment worth
-        // finding. Epochs with no tracked channel stay `None` (a gap).
-        let mean_per_epoch = self
+        // Timeline profile: tracked satellites per epoch. C/N0 is per-channel,
+        // so any single aggregate of it would be a number with no meaning;
+        // "how many satellites were tracked" is the honest scalar for a record
+        // and shows outages directly. Epochs without channel data stay `None`.
+        let tracked_per_epoch = self
             .display_epoch_channels()
             .iter()
             .map(|channels| {
-                let mut sum = 0.0_f64;
-                let mut count = 0_u32;
-                for channel in channels.iter().filter(|channel| channel.tracking_locked) {
-                    if channel.cn0_db_hz.is_finite() && channel.cn0_db_hz > 0.0 {
-                        sum += channel.cn0_db_hz;
-                        count += 1;
-                    }
-                }
-                (count > 0).then_some((sum / f64::from(count)) as f32)
+                let tracked = channels
+                    .iter()
+                    .filter(|channel| channel.tracking_locked)
+                    .count();
+                (tracked > 0).then_some(tracked.min(u8::MAX as usize) as u8)
             })
             .collect::<Vec<_>>();
         let profile = crate::plots::timeline::profile_series(
-            &mean_per_epoch,
+            &tracked_per_epoch,
             epoch_period_ms.max(1),
             timeline_duration_ms,
             crate::plots::timeline::PROFILE_BUCKETS,

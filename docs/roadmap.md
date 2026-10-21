@@ -263,6 +263,15 @@ seeks, with `timeline_ruler_row_seeks_like_the_body` as its regression. See
 `.scratch/ui-visual-refactor/design-pass-evidence.md` §13. Gates: formatting, strict Clippy,
 358 passed / 0 failed / 8 ignored.
 
+**Timeline plots satellite count (2026-10-21):** C/N0 is a per-channel quantity, so any single
+aggregate of it has no referent; the profile now plots tracked satellites per epoch (bucket
+MINIMUM so a short outage cannot hide), on a fixed 0..=12 domain, drawn as a step line with a
+20% fill and a dashed 4-satellite floor labelled `4` — the 3D-fix minimum that gives the level
+its scale. The subtitle names the measure (`卫星数`). The fixture's constant 9 satellites make
+the line flat; that is the data, not the render. See
+`.scratch/ui-visual-refactor/design-pass-evidence.md` §14. Gates: formatting, strict Clippy,
+358 passed / 0 failed / 8 ignored.
+
 **Phase 4 deletion safety correction:** history reveal/delete actions now live in
 right-click menus, not selected-row inline controls. Delete requests a native
 Cancel-first confirmation bound to the original UUID; changing selection/order
