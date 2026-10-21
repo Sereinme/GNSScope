@@ -7650,31 +7650,26 @@ impl GnsscopeApp {
             InterfaceLanguage::SimplifiedChinese => ("接收机时间", "事件"),
             InterfaceLanguage::English => ("Receiver time", "Events"),
         };
-        let sats_label = match self.interface_language {
-            InterfaceLanguage::SimplifiedChinese => "卫星数",
-            InterfaceLanguage::English => "satellites",
-        };
         let subtitle = format!(
-            "{time_label} {receiver_seconds} s · PVT {pvt_hz} Hz · {sats_label} · {event_label} {}",
+            "{time_label} {receiver_seconds} s · PVT {pvt_hz} Hz · {event_label} {}",
             events.len()
         );
-        // Timeline profile: tracked satellites per epoch. C/N0 is per-channel,
-        // so any single aggregate of it would be a number with no meaning;
-        // "how many satellites were tracked" is the honest scalar for a record
-        // and shows outages directly. Epochs without channel data stay `None`.
-        let tracked_per_epoch = self
-            .display_epoch_channels()
+        // Quality field: PDOP is the one scalar in the solution that has a real
+        // scale and a real reading (lower is better), and it is persisted per
+        // epoch. Drawn inside its own zones so even a flat record says
+        // something. `None` stays a gap — never a fabricated 0.
+        let pdop_per_epoch = self
+            .display_epochs()
             .iter()
-            .map(|channels| {
-                let tracked = channels
-                    .iter()
-                    .filter(|channel| channel.tracking_locked)
-                    .count();
-                (tracked > 0).then_some(tracked.min(u8::MAX as usize) as u8)
+            .map(|pvt| {
+                pvt.quality
+                    .pdop
+                    .filter(|pdop| pdop.is_finite() && *pdop > 0.0)
+                    .map(|pdop| pdop as f32)
             })
             .collect::<Vec<_>>();
-        let profile = crate::plots::timeline::profile_series(
-            &tracked_per_epoch,
+        let profile = crate::plots::timeline::sample_series(
+            &pdop_per_epoch,
             epoch_period_ms.max(1),
             timeline_duration_ms,
             crate::plots::timeline::PROFILE_BUCKETS,
@@ -7757,8 +7752,8 @@ impl GnsscopeApp {
                 title: self.localized("选中解算任务时间线", "Selected run timeline"),
                 subtitle,
                 epoch_number,
-                track,
                 profile,
+                track,
                 jump_editing: self.epoch_jump_editing,
                 jump_input,
                 seek: slider.into_any_element(),

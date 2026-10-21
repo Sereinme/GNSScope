@@ -67,11 +67,13 @@ pub(crate) struct EpochControls {
 pub(crate) struct EpochView {
     pub(crate) title: &'static str,
     pub(crate) subtitle: String,
+    /// PDOP per display bucket for the quality field; `None` when the run has
+    /// no genuine dilution values.
+    pub(crate) profile: Option<Vec<Option<f32>>>,
     /// 1-based selected epoch number for the counter and the playhead callout.
     /// The epoch total lives in [`EpochControls::epoch_count`].
     pub(crate) epoch_number: usize,
     pub(crate) track: TrackView,
-    pub(crate) profile: Option<Vec<Option<u8>>>,
     pub(crate) jump_editing: bool,
     pub(crate) jump_input: Option<AnyElement>,
     pub(crate) seek: AnyElement,
@@ -337,9 +339,9 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
     let EpochView {
         title,
         subtitle,
+        profile,
         epoch_number,
         track,
-        profile,
         jump_editing,
         jump_input,
         seek,
@@ -347,7 +349,6 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
         actions,
         localize,
     } = view;
-    let profile = profile.as_deref();
     // The playhead timecode is a header readout: it is always visible and can
     // never occlude the rail or a lane, which the in-track chip did.
     let cursor_readout = timeline::format_decis(track.cursor_time_ms());
@@ -435,7 +436,7 @@ pub(crate) fn render(view: EpochView, palette: Palette) -> impl IntoElement {
                         .pr(px(12.))
                         .pb(px(6.))
                         .pl(px(10.))
-                        .child(timeline::track(&track, profile, seek, palette)),
+                        .child(timeline::track(&track, profile.as_deref(), seek, palette)),
                 )
                 .child(div().w(px(1.)).h_full().flex_shrink_0().bg(palette.border))
                 .child(cluster(

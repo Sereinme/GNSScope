@@ -1,11 +1,15 @@
 //! Epoch timeline.
 //!
-//! The band is one object: a **signal profile** of per-bucket peak C/N0 drawn
-//! as bars with brighter crests, event notches cut through it, a hairline
-//! baseline with a tick ruler under it, and a playhead with a triangular
-//! handle on the baseline. At a ~20:1 aspect ratio this is the only shape that
-//! carries real information without turning into stripes: the body varies, the
-//! markers punctuate it, and the ruler anchors the scale.
+//! A timeline is a time instrument, not a chart. The band carries three things
+//! and nothing else: the **time grid** (major ticks continue through the field
+//! as faint rules), the **event flags** (1px rules with a cap per category), and
+//! the **playhead**. The ruler with its labels sits under the baseline, inside
+//! the same hit area, so dragging the scale seeks.
+//!
+//! Per-epoch metrics deliberately live in their own panes. Every candidate for a
+//! strip curve here is either per-channel (C/N0), constant on a healthy record
+//! (satellite count, PDOP), or so narrow that scaling it would exaggerate noise
+//! into drama.
 //!
 //! It renders display-only data supplied by `app.rs`; interaction callbacks and
 //! state ownership stay in the application.
@@ -13,7 +17,7 @@
 use crate::visual_system::{data_font_family, metrics, Palette};
 use crate::{GuiDiagnosticEvent, GuiDiagnosticEventKind};
 use gpui_kit::prelude::*;
-use gpui_kit::{canvas, div, point, px, quad, size, AnyElement, Bounds, PathBuilder, SharedString};
+use gpui_kit::{canvas, div, point, px, AnyElement, Bounds, PathBuilder, SharedString};
 
 /// The band is one object: a coverage ridge rising from a bottom baseline,
 /// event notches cut into it, and a ruler under the baseline. There are no
@@ -29,8 +33,6 @@ const RULER_LABELS_HEIGHT: f32 = 16.0;
 const TICK_CAP: usize = 480;
 /// Maximum event stems drawn inside the visible window.
 const STEM_CAP: usize = 64;
-/// Minimap envelope resolution (buckets across the record).
-pub(crate) const PROFILE_BUCKETS: usize = 120;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EventKind {
@@ -245,43 +247,48 @@ pub(crate) fn axis_label_set(
     labels
 }
 
-/// Downsample the per-epoch tracked-satellite series onto `buckets` columns.
-/// the record duration. Returns `None` when no real amplitude exists; empty
-/// columns stay `None` so the renderer breaks the polyline instead of
-/// fabricating zeros.
-pub(crate) fn profile_series(
-    peak_per_epoch: &[Option<u8>],
+/// Downsample a per-epoch scalar onto `buckets` columns. The MEAN is used: the
+/// strip reads a trend, so one outlier epoch must not reshape a bucket.
+pub(crate) fn sample_series(
+    per_epoch: &[Option<f32>],
     period_ms: u64,
     duration_ms: u64,
     buckets: usize,
-) -> Option<Vec<Option<u8>>> {
-    if peak_per_epoch.is_empty() || duration_ms == 0 || buckets == 0 {
+) -> Option<Vec<Option<f32>>> {
+    if per_epoch.is_empty() || duration_ms == 0 || buckets == 0 {
         return None;
     }
     let period_ms = period_ms.max(1);
-    let mut values: Vec<Option<u8>> = Vec::with_capacity(buckets);
+    let mut values = Vec::with_capacity(buckets);
     for bucket in 0..buckets {
-        // Take the MAX across the bucket's epoch span: a bucket is "covered" if
-        // any epoch inside it had satellites tracked, which is what lets a
-        // sparse but healthy record still show a continuous ridge.
         let from = (bucket as u64 * duration_ms) / buckets as u64;
         let to = ((bucket as u64 + 1) * duration_ms) / buckets as u64;
         let first = (from / period_ms) as usize;
         let last = ((to.max(from + 1) - 1) / period_ms) as usize;
-        // MIN within the bucket: an outage that lasts a fraction of a bucket
-        // must still show up, so the profile reports the worst moment it covers.
-        let mut value: Option<u8> = None;
-        for index in first..=last.min(peak_per_epoch.len().saturating_sub(1)) {
-            if let Some(count) = peak_per_epoch.get(index).and_then(|v| *v) {
-                value = Some(value.map_or(count, |current: u8| current.min(count)));
+        let mut sum = 0.0_f64;
+        let mut count = 0_u32;
+        for index in first..=last.min(per_epoch.len().saturating_sub(1)) {
+            if let Some(value) = per_epoch.get(index).and_then(|v| *v) {
+                if value.is_finite() && value > 0.0 {
+                    sum += f64::from(value);
+                    count += 1;
+                }
             }
         }
-        values.push(value);
+        values.push((count > 0).then_some((sum / f64::from(count)) as f32));
     }
     values.iter().any(Option::is_some).then_some(values)
 }
 
-/// "00:02:04.8" decisecond timestamp for the playhead callout.
+/// PDOP quality zones, upper bound of each (0-2 excellent, 2-5 good, 5-10
+/// moderate, above that poor). Shared with the renderer so the curve and the
+/// bands can never disagree.
+pub(crate) const PDOP_ZONES: [f32; 3] = [2.0, 5.0, 10.0];
+/// Top of the PDOP scale, in dilution units.
+pub(crate) const PDOP_CEILING: f32 = 12.0;
+/// Column resolution of the quality field.
+pub(crate) const PROFILE_BUCKETS: usize = 160;
+
 pub(crate) fn format_decis(milliseconds: u64) -> String {
     let decis = (milliseconds % 1_000) / 100;
     format!("{}.{decis}", crate::app::format_timeline_time(milliseconds))
@@ -316,8 +323,6 @@ fn event_window(view: &TrackView) -> Vec<(f32, EventKind)> {
     stems
 }
 
-/// Cap shape drawn at the top of an event stem (6px cap in an 8px surface
-/// ring, matching `.cap--*` in theme.css; LOSS uses a glyph triangle).
 /// A 8x5 triangle drawn as three stacked rules (widest at the base): the only
 /// shape the available border API can render crisply at this size.
 fn triangle(color: gpui_kit::Hsla, pointing_up: bool) -> AnyElement {
@@ -404,113 +409,139 @@ fn tick_element(level: TickLevel, percent: f32, palette: Palette, top: f32) -> i
 
 /// Vertical position of the fix-floor label, in track coordinates. Kept beside
 /// the profile geometry so the label and the dashed rule never drift apart.
-fn floor_label_top() -> f32 {
-    const TOP: f32 = 8.0;
-    let height = BASELINE_TOP - TOP;
-    let floor_y = height - height * (0.08 + 0.84 * (4.0 / 12.0));
-    TOP + floor_y - 6.0
-}
-
-/// The coverage ridge: one bar per displayed bucket, height = tracked-satellite
-/// count on a fixed 0..=12 domain. Real counts only; a bucket with no channel
-/// data keeps a gap, and a run with no coverage draws no ridge at all.
-fn satellite_profile(profile: Option<&[Option<u8>]>, palette: Palette) -> Option<AnyElement> {
+/// PDOP over the record, drawn inside its own quality zones. The zones are what
+/// make even a flat record readable: a constant 3.1 says "good geometry" because
+/// you can see which band the curve sits in. Lower is better, so the baseline is
+/// PDOP 0 and the top of the field is poor geometry.
+fn pdop_profile(profile: Option<&[Option<f32>]>, palette: Palette) -> Option<AnyElement> {
     let values = profile?.to_vec();
     if values.iter().all(Option::is_none) {
         return None;
     }
     let top = 8.0;
     let height = BASELINE_TOP - top;
-    // Fixed domain so runs stay comparable: 0..=12 tracked satellites.
-    let fill = palette.muted.opacity(0.20);
-    let line = palette.muted.opacity(0.70);
-    let floor = palette.danger.opacity(0.35);
-    let domain = 12.0_f32;
+    let zone_color = |index: usize| match index {
+        0 => palette.healthy,
+        1 => palette.text,
+        2 => palette.attention,
+        _ => palette.danger,
+    };
+    let zone_rows = (0..4).map(|zone| {
+        let low = if zone == 0 { 0.0 } else { PDOP_ZONES[zone - 1] };
+        let high = if zone < 3 {
+            PDOP_ZONES[zone]
+        } else {
+            PDOP_CEILING
+        };
+        let bottom = height * (low / PDOP_CEILING);
+        let zone_height = height * ((high - low) / PDOP_CEILING);
+        let wash = if zone >= 2 {
+            zone_color(zone).opacity(0.07)
+        } else {
+            palette.surface.opacity(0.0)
+        };
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(px(bottom))
+            .h(px(zone_height))
+            .bg(wash)
+            .border_t_1()
+            .border_color(palette.border.opacity(0.5))
+    });
+    let thresholds = PDOP_ZONES.into_iter().map(|bound| {
+        let bottom = height * (bound / PDOP_CEILING);
+        div()
+            .absolute()
+            .left(px(3.))
+            .bottom(px(bottom + 1.0))
+            .font_family(data_font_family())
+            .text_size(px(9.))
+            .text_color(palette.faint)
+            .child(format!("{bound:.0}"))
+    });
     Some(
-        canvas(
-            move |_, _, _| {},
-            move |bounds: Bounds<gpui_kit::Pixels>, _, window, _| {
-                let w = f32::from(bounds.size.width);
-                let h = f32::from(bounds.size.height);
-                if w <= 2.0 || h <= 2.0 {
-                    return;
-                }
-                let n = values.len().max(2);
-                let origin = bounds.origin;
-                let mut area = PathBuilder::fill();
-                let mut stroke = PathBuilder::stroke(px(1.0));
-                let mut run: Vec<(f32, f32)> = Vec::new();
-                let flush =
-                    |run: &mut Vec<(f32, f32)>, area: &mut PathBuilder, line: &mut PathBuilder| {
-                        if run.is_empty() {
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(px(top))
+            .h(px(height))
+            .children(zone_rows)
+            .child(
+                canvas(
+                    move |_, _, _| {},
+                    move |bounds: Bounds<gpui_kit::Pixels>, _, window, _| {
+                        let w = f32::from(bounds.size.width);
+                        let h = f32::from(bounds.size.height);
+                        if w <= 2.0 || h <= 2.0 {
                             return;
                         }
-                        area.move_to(point(origin.x + px(run[0].0), origin.y + px(h)));
-                        for (x, y) in run.iter() {
-                            area.line_to(point(origin.x + px(*x), origin.y + px(*y)));
+                        let n = values.len().max(2);
+                        let origin = bounds.origin;
+                        // One path per zone colour: the hue is the reading.
+                        let mut paths: [Vec<(f32, f32)>; 4] =
+                            [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+                        for (index, value) in values.iter().enumerate() {
+                            let Some(value) = value else {
+                                continue;
+                            };
+                            let x = (index as f32 / n as f32) * w;
+                            let ratio = (value / PDOP_CEILING).clamp(0.0, 1.0);
+                            let y = h - h * (0.04 + 0.92 * ratio);
+                            let zone = if *value < PDOP_ZONES[0] {
+                                0
+                            } else if *value < PDOP_ZONES[1] {
+                                1
+                            } else if *value < PDOP_ZONES[2] {
+                                2
+                            } else {
+                                3
+                            };
+                            paths[zone].push((x, y));
                         }
-                        let last = run[run.len() - 1];
-                        area.line_to(point(origin.x + px(last.0), origin.y + px(h)));
-                        area.close();
-                        line.move_to(point(origin.x + px(run[0].0), origin.y + px(run[0].1)));
-                        for (x, y) in run.iter().skip(1) {
-                            line.line_to(point(origin.x + px(*x), origin.y + px(*y)));
+                        let colours = [
+                            palette.healthy.opacity(0.9),
+                            palette.text.opacity(0.8),
+                            palette.attention.opacity(0.9),
+                            palette.danger.opacity(0.9),
+                        ];
+                        for (zone, run) in paths.iter().enumerate() {
+                            if run.is_empty() {
+                                continue;
+                            }
+                            let mut stroke = PathBuilder::stroke(px(1.5));
+                            stroke.move_to(point(origin.x + px(run[0].0), origin.y + px(run[0].1)));
+                            for (x, y) in run.iter().skip(1) {
+                                stroke.line_to(point(origin.x + px(*x), origin.y + px(*y)));
+                            }
+                            if let Ok(path) = stroke.build() {
+                                window.paint_path(path, colours[zone]);
+                            }
                         }
-                        run.clear();
-                    };
-                for (index, value) in values.iter().enumerate() {
-                    let Some(value) = value else {
-                        flush(&mut run, &mut area, &mut stroke);
-                        continue;
-                    };
-                    let x = (index as f32 / n as f32) * w;
-                    // 8..92% of the field: zero satellites sits near the floor.
-                    let ratio = (f32::from(*value) / domain).clamp(0.0, 1.0);
-                    let y = h - h * (0.08 + 0.84 * ratio);
-                    run.push((x, y));
-                }
-                flush(&mut run, &mut area, &mut stroke);
-                if let Ok(path) = area.build() {
-                    window.paint_path(path, fill);
-                }
-                if let Ok(path) = stroke.build() {
-                    window.paint_path(path, line);
-                }
-                // Fix floor: a dashed rule at 4 satellites (the 3D-fix minimum)
-                // so the line's height has something to be measured against.
-                let floor_y = h - h * (0.08 + 0.84 * (4.0 / domain));
-                let mut dash_x = 0.0;
-                while dash_x < w {
-                    window.paint_quad(quad(
-                        Bounds {
-                            origin: point(origin.x + px(dash_x), origin.y + px(floor_y)),
-                            size: size(px(3.0), px(1.)),
-                        },
-                        0.0,
-                        floor,
-                        px(0.0),
-                        floor,
-                        Default::default(),
-                    ));
-                    dash_x += 7.0;
-                }
-            },
-        )
-        .absolute()
-        .left_0()
-        .right_0()
-        .top(px(top))
-        .h(px(height))
-        .into_any_element(),
+                    },
+                )
+                .size_full(),
+            )
+            .children(thresholds)
+            .child(
+                div()
+                    .absolute()
+                    .right(px(4.))
+                    .top_0()
+                    .font_family(data_font_family())
+                    .text_size(px(9.))
+                    .text_color(palette.faint)
+                    .child("PDOP"),
+            )
+            .into_any_element(),
     )
 }
 
-/// The timeline band: a coverage ridge standing on a baseline, event notches
-/// cut through it, the processing boundary where the ridge ends, and a playhead
-/// with a ruler handle.
 pub(crate) fn track(
     view: &TrackView,
-    profile: Option<&[Option<u8>]>,
+    profile: Option<&[Option<f32>]>,
     seek: AnyElement,
     palette: Palette,
 ) -> AnyElement {
@@ -525,7 +556,6 @@ pub(crate) fn track(
         .h(px(metrics::TIMELINE_TRACK_HEIGHT))
         .w_full()
         // 1. Coverage ridge.
-        .children(satellite_profile(profile, palette))
         // 2. Baseline: the one line everything stands on.
         .child(
             div()
@@ -536,8 +566,27 @@ pub(crate) fn track(
                 .h(px(1.))
                 .bg(palette.plot_axis),
         )
+        // 1b. PDOP field.
+        .children(pdop_profile(profile, palette))
+        // 2. Time grid: the major ruler ticks continue through the band as faint
+        //    vertical rules. This is the time axis, not a data curve — it gives
+        //    the field structure without inventing a shape to look at.
+        .children(
+            ticks(ladder, start_ms, span_ms)
+                .into_iter()
+                .filter(|(_, level)| *level == TickLevel::Major)
+                .map(|(percent, _)| {
+                    div()
+                        .absolute()
+                        .left(gpui_kit::relative(percent))
+                        .top_0()
+                        .h(px(BASELINE_TOP))
+                        .w(px(1.))
+                        .bg(palette.border.opacity(0.45))
+                }),
+        )
         // 3. Ruler ticks sit just below the baseline, inside the track so they
-        //    line up with the bars exactly.
+        //    line up with the grid exactly.
         .children(
             ticks(ladder, start_ms, span_ms)
                 .into_iter()
@@ -627,18 +676,6 @@ pub(crate) fn track(
                 .top(px(BASELINE_TOP + 8.0))
                 .h(px(RULER_LABELS_HEIGHT))
                 .child(axis_labels(view, palette, RULER_LABELS_HEIGHT)),
-        )
-        // 6c. The fix floor is named: without a number the dashed rule is
-        //     decoration. `4` is the 3D-fix minimum this line encodes.
-        .child(
-            div()
-                .absolute()
-                .left(px(3.))
-                .top(px(floor_label_top()))
-                .font_family(data_font_family())
-                .text_size(px(9.))
-                .text_color(palette.danger.opacity(0.75))
-                .child("4"),
         )
         // 7. Transparent seek slider spanning body and ruler alike: dragging the
         //    scale is the primary gesture, so the whole band seeks.
@@ -791,23 +828,6 @@ mod tests {
             .iter()
             .filter(|label| label.align == LabelAlign::Center)
             .all(|label| label.percent <= 0.91));
-    }
-
-    #[test]
-    fn profile_series_reports_the_bucket_minimum_and_keeps_gaps() {
-        // A count profile reports the WORST moment inside each bucket, so a
-        // short outage cannot hide between samples.
-        let per_epoch = [Some(9), Some(7), None, None, Some(8), None];
-        let series = profile_series(&per_epoch, 100, 600, 3).expect("real counts");
-        assert_eq!(series.len(), 3);
-        assert_eq!(series[0], Some(7), "bucket minimum, not the first sample");
-        assert_eq!(
-            series[1], None,
-            "an epoch without tracked satellites is a gap"
-        );
-        assert_eq!(series[2], Some(8));
-        assert!(profile_series(&[None, None], 100, 200, 2).is_none());
-        assert!(profile_series(&[], 100, 200, 2).is_none());
     }
 
     #[test]

@@ -272,6 +272,17 @@ the line flat; that is the data, not the render. See
 `.scratch/ui-visual-refactor/design-pass-evidence.md` §14. Gates: formatting, strict Clippy,
 358 passed / 0 failed / 8 ignored.
 
+**Timeline body is PDOP (2026-10-21):** three candidate scalars were tried and rejected —
+aggregate C/N0 (per-channel, no referent), tracked satellite count (constant on a healthy
+record), and speed (a zero-based area read as a solid block, while a deviation band
+exaggerated ±0.25 m/s into a full-amplitude sine). PDOP is the one series that is a single
+per-epoch value with an absolute scale and an interpretable direction, and it is already
+persisted (`quality.pdop`, `None` honoured — never a fabricated zero). It is drawn inside its
+own quality zones (0–2 / 2–5 / 5–10 / >10, only the risk zones tinted) with the curve coloured
+by the zone it occupies, so a constant record still reads. See
+`.scratch/ui-visual-refactor/design-pass-evidence.md` §15. Gates: formatting, strict Clippy,
+357 passed / 0 failed / 8 ignored.
+
 **Phase 4 deletion safety correction:** history reveal/delete actions now live in
 right-click menus, not selected-row inline controls. Delete requests a native
 Cancel-first confirmation bound to the original UUID; changing selection/order
