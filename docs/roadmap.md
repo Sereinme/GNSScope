@@ -292,6 +292,15 @@ extent, and a solution jump appears as a step. The field states its measure and 
 constants were removed with it. See `.scratch/ui-visual-refactor/design-pass-evidence.md` §16.
 Gates: formatting, strict Clippy, 357 passed / 0 failed / 8 ignored.
 
+**Timeline ruler refined (2026-10-22):** the draggable scale now has a real three-level
+hierarchy — a major division cuts through the axis (4px above, 10px below) and into the label
+strip at `text` 80%, a mid division drops 5px, a minor one 3px, each a step lower in tone. The
+label strip gains its own 1px top hairline so it reads as a separate readout band, which also
+signals that the row is draggable. Duplicate end rules were removed (the tick ladder already
+places a division at both ends). See
+`.scratch/ui-visual-refactor/design-pass-evidence.md` §17. Gates: formatting, strict Clippy,
+357 passed / 0 failed / 8 ignored.
+
 **Phase 4 deletion safety correction:** history reveal/delete actions now live in
 right-click menus, not selected-row inline controls. Delete requests a native
 Cancel-first confirmation bound to the original UUID; changing selection/order

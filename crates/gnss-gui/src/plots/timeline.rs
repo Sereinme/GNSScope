@@ -383,15 +383,20 @@ fn cap(kind: EventKind, palette: Palette) -> AnyElement {
     }
 }
 
-fn tick_element(level: TickLevel, percent: f32, palette: Palette, top: f32) -> impl IntoElement {
-    let (top, height) = match level {
-        TickLevel::Minor => (top, 3.0),
-        TickLevel::Mid => (top, 4.0),
-        TickLevel::Major => (top, 5.0),
+/// One ruler division. Heights and tones are a strict hierarchy so the scale
+/// can be read at a glance: a major division cuts through the axis (4px above,
+/// 9px below), a mid division is a short drop, a minor one is a tick mark.
+fn tick_element(level: TickLevel, percent: f32, palette: Palette) -> impl IntoElement {
+    let (top, height, tone) = match level {
+        TickLevel::Minor => (BASELINE_TOP + 1.0, 3.0, 0.30),
+        TickLevel::Mid => (BASELINE_TOP + 1.0, 5.0, 0.50),
+        TickLevel::Major => (BASELINE_TOP - 4.0, 14.0, 0.80),
     };
-    let color = palette
-        .border_strong
-        .opacity(if level == TickLevel::Major { 0.9 } else { 0.5 });
+    let color = if level == TickLevel::Major {
+        palette.text.opacity(tone)
+    } else {
+        palette.border_strong.opacity(tone)
+    };
     div()
         .absolute()
         .left(gpui_kit::relative(percent))
@@ -554,7 +559,7 @@ pub(crate) fn track(
         .children(
             ticks(ladder, start_ms, span_ms)
                 .into_iter()
-                .map(|(percent, level)| tick_element(level, percent, palette, BASELINE_TOP + 1.0)),
+                .map(|(percent, level)| tick_element(level, percent, palette)),
         )
         // 4. Event notches: a 1px rule through the body with the cap on top.
         .children(
@@ -630,15 +635,17 @@ pub(crate) fn track(
                         .child(triangle(palette.accent, true)),
                 ),
         )
-        // 6b. Ruler labels live inside the band, under the baseline, so the
-        //     seek layer below covers them too.
+        // 6b. Ruler label strip: closed above by a hairline so the draggable
+        //     row reads as a rule of its own, with the time labels set inside it.
         .child(
             div()
                 .absolute()
                 .left_0()
                 .right_0()
-                .top(px(BASELINE_TOP + 8.0))
+                .top(px(BASELINE_TOP + 9.0))
                 .h(px(RULER_LABELS_HEIGHT))
+                .border_t_1()
+                .border_color(palette.border)
                 .child(axis_labels(view, palette, RULER_LABELS_HEIGHT)),
         )
         // 7. Transparent seek slider spanning body and ruler alike: dragging the
